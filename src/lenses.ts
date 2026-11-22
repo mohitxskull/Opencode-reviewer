@@ -48,6 +48,15 @@ export const READONLY_SESSION_PERMISSIONS: readonly SessionPermissionRule[] = [
   { action: "read", resource: "*.env.example", effect: "allow" },
 ];
 
+// Why: When a cohort prompt already contains 100% of the cohort's annotated diff
+// hunks (`L0042 (+):`), the pre-computed Rust Symbol Call-Site Graph, Clippy
+// diagnostics, and `.coderabbit.yaml` path instructions, allowing tool calls causes
+// free models to spend 3-15 turns grepping/reading files redundantly. Denying tool
+// calls for self-contained cohort prompts forces a single-turn JSON response (~15-25s).
+export const SINGLE_TURN_NO_TOOLS_PERMISSIONS: readonly SessionPermissionRule[] = [
+  { action: "*", resource: "*", effect: "deny" },
+];
+
 function globToRegExp(pattern: string): RegExp {
   if (pattern === "*") {
     return /^.*$/;
@@ -410,8 +419,9 @@ function getSubsystemGroupKey(filePath: string): string {
 export function groupDiffFilesIntoCohorts(
   diffMap: Readonly<Record<string, DiffFileMap>>,
   crateGraph: CrateGraph,
-  maxFilesPerCohort = 6,
+  maxFilesPerCohort = 7,
   maxCharsPerCohort = 26_000,
+  maxCohorts = 6,
 ): FileCohort[] {
   const allPaths = Object.keys(diffMap);
   if (allPaths.length === 0) {
@@ -427,7 +437,10 @@ export function groupDiffFilesIntoCohorts(
         ? scoreFileReviewPriority(fileMap, layerInfo.layer, crateGraph.testLayer, clippyEmpty)
         : { score: 0, isTestOrBench: true, addedLinesCount: 0, riskSignals: [] };
       const approxChars = fileMap
-        ? fileMap.hunks.reduce((acc, h) => acc + h.annotatedLines.join("\n").length, 0)
+        ? fileMap.hunks.reduce(
+            (acc, h) => acc + compactAnnotatedLines(h.annotatedLines).join("\n").length,
+            0,
+          )
         : 0;
       return {
         filePath,
@@ -437,13 +450,9 @@ export function groupDiffFilesIntoCohorts(
         approxChars,
       };
     })
-    // Prioritize production Rust files over large test suites; sort by subsystem group and risk score
     .sort((a, b) => {
       if (a.isTestOrBench !== b.isTestOrBench) {
         return a.isTestOrBench ? 1 : -1;
-      }
-      if (a.layer !== b.layer) {
-        return a.layer - b.layer;
       }
       if (a.groupKey !== b.groupKey) {
         return a.groupKey.localeCompare(b.groupKey);
@@ -451,13 +460,14 @@ export function groupDiffFilesIntoCohorts(
       return b.score - a.score;
     });
 
-  // Separate production files from pure test files (unless the PR only touches test files)
   const prodFiles = scored.filter((f) => !f.isTestOrBench);
   const targetFiles = prodFiles.length > 0 ? prodFiles : scored;
 
+  const effectiveMaxFiles = Math.max(maxFilesPerCohort, Math.ceil(targetFiles.length / maxCohorts));
+
   const cohorts: FileCohort[] = [];
   let currentPaths: string[] = [];
-  let currentGroup = "";
+  let currentGroups = new Set<string>();
   let currentChars = 0;
 
   const flushCohort = () => {
@@ -465,28 +475,28 @@ export function groupDiffFilesIntoCohorts(
       return;
     }
     const idx = cohorts.length + 1;
+    const label = Array.from(currentGroups).slice(0, 2).join("+") || `batch-${idx}`;
     cohorts.push({
       id: `cohort-${idx}`,
-      label: currentGroup || `batch-${idx}`,
+      label,
       filePaths: currentPaths,
     });
     currentPaths = [];
+    currentGroups = new Set<string>();
     currentChars = 0;
   };
 
   for (const item of targetFiles) {
-    const groupChanged = currentPaths.length > 0 && item.groupKey !== currentGroup;
-    const exceedsFiles = currentPaths.length >= maxFilesPerCohort;
+    const canStartNewCohort = cohorts.length + 1 < maxCohorts;
+    const exceedsFiles = currentPaths.length >= effectiveMaxFiles;
     const exceedsChars =
       currentPaths.length > 0 && currentChars + item.approxChars > maxCharsPerCohort;
 
-    if (groupChanged || exceedsFiles || exceedsChars) {
+    if (canStartNewCohort && (exceedsFiles || exceedsChars)) {
       flushCohort();
     }
-    if (currentPaths.length === 0) {
-      currentGroup = item.groupKey;
-    }
     currentPaths.push(item.filePath);
+    currentGroups.add(item.groupKey);
     currentChars += Math.min(item.approxChars, maxCharsPerCohort);
   }
   flushCohort();
@@ -849,13 +859,14 @@ export class OpenCodeMultiLensOrchestrator {
     promptText: string,
     files: readonly string[],
     audit?: AuditLogger,
+    permissions: readonly SessionPermissionRule[] = READONLY_SESSION_PERMISSIONS,
   ): Promise<{ replyText: string; sessionID: string; durationMs: number; assistantTurns: number }> {
     const t0 = Date.now();
     const session = await client.session.create({
       location: { directory: repoRoot },
       model: this.model,
       title,
-      permissions: READONLY_SESSION_PERMISSIONS,
+      permissions,
     });
 
     await audit?.logEvent(
@@ -957,6 +968,9 @@ export class OpenCodeMultiLensOrchestrator {
     audit?: AuditLogger,
   ): Promise<Finding[]> {
     const fullPrompt = `${lensPrompt}\n\n${contextPrompt}`;
+    const permissions = title.startsWith("peer-cohort-")
+      ? SINGLE_TURN_NO_TOOLS_PERMISSIONS
+      : READONLY_SESSION_PERMISSIONS;
     const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
       client,
       repoRoot,
@@ -964,6 +978,7 @@ export class OpenCodeMultiLensOrchestrator {
       fullPrompt,
       files,
       audit,
+      permissions,
     );
     const jsonObj = extractJsonObject(replyText);
     const parsed = LensFindingsOutputSchema.parse(jsonObj);
