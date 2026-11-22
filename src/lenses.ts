@@ -1,4 +1,8 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, rename } from "node:fs/promises";
+import { join } from "node:path";
 import type { AuditLogger } from "./audit.ts";
+import { resolvePeerReviewsDir } from "./git.ts";
 import type {
   ConsideredAndRejectedItem,
   DeletionProposedItem,
@@ -21,7 +25,11 @@ import {
   type SessionPermissionRule,
 } from "./opencode/permissions.ts";
 import { groupDiffFilesIntoCohorts } from "./prompts/cohorts.ts";
-import { buildReviewContextPrompt, type ReviewContext } from "./prompts/context.ts";
+import {
+  buildReviewContextPrompt,
+  buildWalkthroughContextPrompt,
+  type ReviewContext,
+} from "./prompts/context.ts";
 import {
   COHORT_DEEP_AUDIT_PROMPT,
   IDIOMS_LOGIC_LENS_PROMPT,
@@ -53,7 +61,11 @@ export {
   MAX_HUNK_LINES_BEFORE_COMPACT,
   scoreFileReviewPriority,
 } from "./prompts/cohorts.ts";
-export { buildReviewContextPrompt, type ReviewContext } from "./prompts/context.ts";
+export {
+  buildReviewContextPrompt,
+  buildWalkthroughContextPrompt,
+  type ReviewContext,
+} from "./prompts/context.ts";
 export {
   COHORT_DEEP_AUDIT_PROMPT,
   IDIOMS_LOGIC_LENS_PROMPT,
@@ -149,8 +161,10 @@ export class OpenCodeMultiLensOrchestrator {
   public async runAllLenses(context: ReviewContext): Promise<MultiLensRunResult> {
     const client = await this.clientFactory();
     const overallContextPrompt = buildReviewContextPrompt(context);
+    const walkthroughContextPrompt = buildWalkthroughContextPrompt(context);
     const cohorts = groupDiffFilesIntoCohorts(context.diffMap, context.crateGraph);
     const audit = context.auditLogger;
+    const cacheDir = join(resolvePeerReviewsDir(context.repoRoot, context.pr.number), "cache");
 
     // For small PRs (<= 1 cohort), run the 3 standard lenses (Walkthrough + Soundness + Idioms)
     if (cohorts.length <= 1) {
@@ -165,7 +179,13 @@ export class OpenCodeMultiLensOrchestrator {
       );
 
       const [walkthrough, soundnessOut, idiomsOut] = await Promise.all([
-        this.runWalkthroughLens(client, context.repoRoot, overallContextPrompt, audit),
+        this.runWalkthroughLens(
+          client,
+          context.repoRoot,
+          walkthroughContextPrompt,
+          cacheDir,
+          audit,
+        ),
         this.runFindingsLens(
           client,
           context.repoRoot,
@@ -174,6 +194,7 @@ export class OpenCodeMultiLensOrchestrator {
           overallContextPrompt,
           "soundness",
           Object.keys(context.diffMap),
+          cacheDir,
           audit,
         ),
         this.runFindingsLens(
@@ -184,6 +205,7 @@ export class OpenCodeMultiLensOrchestrator {
           overallContextPrompt,
           "idioms",
           Object.keys(context.diffMap),
+          cacheDir,
           audit,
         ),
       ]);
@@ -214,7 +236,8 @@ export class OpenCodeMultiLensOrchestrator {
     const walkthroughPromise = this.runWalkthroughLens(
       client,
       context.repoRoot,
-      overallContextPrompt,
+      walkthroughContextPrompt,
+      cacheDir,
       audit,
     );
     walkthroughPromise.catch(() => {});
@@ -274,6 +297,7 @@ export class OpenCodeMultiLensOrchestrator {
               cohortPrompt,
               "soundness",
               cohort.filePaths,
+              cacheDir,
               audit,
             );
           } catch (err) {
@@ -317,6 +341,30 @@ export class OpenCodeMultiLensOrchestrator {
       openQuestions,
       failedCohorts,
     };
+  }
+
+  private computeCacheFilePath(cacheDir: string, title: string, fullPrompt: string): string {
+    const hash = createHash("sha256")
+      .update(`${this.model.providerID}/${this.model.id}\n${title}\n${fullPrompt}`)
+      .digest("hex")
+      .slice(0, 16);
+    const safeSlug = title
+      .replace(/[^a-z0-9]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 32);
+    return join(cacheDir, `${safeSlug}-${hash}.json`);
+  }
+
+  private async writeCacheFileAtomically(cachePath: string, data: unknown): Promise<void> {
+    try {
+      const dir = join(cachePath, "..");
+      await mkdir(dir, { recursive: true });
+      const tmp = `${cachePath}.${randomUUID().slice(0, 8)}.tmp`;
+      await Bun.write(tmp, JSON.stringify(data, null, 2));
+      await rename(tmp, cachePath);
+    } catch {
+      // Cache persistence is best-effort
+    }
   }
 
   private async executeReadOnlyPrompt(
@@ -435,9 +483,27 @@ export class OpenCodeMultiLensOrchestrator {
     client: OpenCodeClientLike,
     repoRoot: string,
     contextPrompt: string,
+    cacheDir: string,
     audit?: AuditLogger,
   ): Promise<WalkthroughReport> {
     const fullPrompt = `${WALKTHROUGH_LENS_PROMPT}\n\n${contextPrompt}`;
+    const cachePath = this.computeCacheFilePath(cacheDir, "peer-lens-walkthrough", fullPrompt);
+    const cacheFile = Bun.file(cachePath);
+    if (await cacheFile.exists()) {
+      try {
+        const cachedRaw: unknown = await cacheFile.json();
+        const cachedParsed = WalkthroughReportSchema.parse(cachedRaw);
+        await audit?.logEvent(
+          "lens.session.cache_hit",
+          `  ├─ ⚡ Cache hit for [peer-lens-walkthrough] (${cachedParsed.changes.length} files summarized)`,
+          { title: "peer-lens-walkthrough", cachePath },
+        );
+        return cachedParsed;
+      } catch {
+        // Ignore corrupt cache file and re-run lens
+      }
+    }
+
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -453,6 +519,7 @@ export class OpenCodeMultiLensOrchestrator {
       try {
         const jsonObj = extractJsonObject(replyText);
         const parsed = WalkthroughReportSchema.parse(jsonObj);
+        await this.writeCacheFileAtomically(cachePath, parsed);
 
         await audit?.logEvent(
           "lens.session.completed",
@@ -501,6 +568,7 @@ export class OpenCodeMultiLensOrchestrator {
     contextPrompt: string,
     source: FindingSource,
     files: readonly string[],
+    cacheDir: string,
     audit?: AuditLogger,
   ): Promise<{
     findings: Finding[];
@@ -509,6 +577,29 @@ export class OpenCodeMultiLensOrchestrator {
     openQuestions: OpenQuestionItem[];
   }> {
     const fullPrompt = `${lensPrompt}\n\n${contextPrompt}`;
+    const cachePath = this.computeCacheFilePath(cacheDir, title, fullPrompt);
+    const cacheFile = Bun.file(cachePath);
+    if (await cacheFile.exists()) {
+      try {
+        const cachedRaw = (await cacheFile.json()) as {
+          findings: Finding[];
+          consideredAndRejected: ConsideredAndRejectedItem[];
+          deletionsProposed: DeletionProposedItem[];
+          openQuestions: OpenQuestionItem[];
+        };
+        if (Array.isArray(cachedRaw.findings)) {
+          await audit?.logEvent(
+            "lens.session.cache_hit",
+            `  ├─ ⚡ Cache hit for [${title}] (${cachedRaw.findings.length} finding(s))`,
+            { title, cachePath, findingsCount: cachedRaw.findings.length },
+          );
+          return cachedRaw;
+        }
+      } catch {
+        // Ignore corrupt cache entry and re-run lens
+      }
+    }
+
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -561,6 +652,14 @@ export class OpenCodeMultiLensOrchestrator {
           );
         }
 
+        const outputPayload = {
+          findings: results,
+          consideredAndRejected: parsed.consideredAndRejected,
+          deletionsProposed: parsed.deletionsProposed,
+          openQuestions: parsed.openQuestions,
+        };
+        await this.writeCacheFileAtomically(cachePath, outputPayload);
+
         await audit?.logEvent(
           "lens.session.completed",
           `  ├─ ✓ Finished [${title}] in ${(durationMs / 1000).toFixed(1)}s (${results.length} finding(s), ${parsed.consideredAndRejected.length} rejected, ${assistantTurns} turn(s))`,
@@ -590,12 +689,7 @@ export class OpenCodeMultiLensOrchestrator {
           },
         );
 
-        return {
-          findings: results,
-          consideredAndRejected: parsed.consideredAndRejected,
-          deletionsProposed: parsed.deletionsProposed,
-          openQuestions: parsed.openQuestions,
-        };
+        return outputPayload;
       } catch (err) {
         if (err instanceof OpenCodeProviderQuotaError) {
           throw err;

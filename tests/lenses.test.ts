@@ -1,6 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildReviewContextPrompt,
+  buildWalkthroughContextPrompt,
   evaluatePermissionRule,
   extractJsonObject,
   LensOutputParseError,
@@ -11,6 +15,17 @@ import {
   READONLY_SESSION_PERMISSIONS,
   type ReviewContext,
 } from "../src/lenses.ts";
+
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  while (tempDirs.length > 0) {
+    const dir = tempDirs.pop();
+    if (dir) {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
 
 const SAMPLE_CONTEXT: ReviewContext = {
   repoRoot: "/tmp/fake-rust-repo",
@@ -283,7 +298,9 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
       clientFactory: async () => fakeClient,
     });
 
-    const result = await orchestrator.runAllLenses(SAMPLE_CONTEXT);
+    const repoRoot = await mkdtemp(join(tmpdir(), "peer-lenses-cache-"));
+    tempDirs.push(repoRoot);
+    const result = await orchestrator.runAllLenses({ ...SAMPLE_CONTEXT, repoRoot });
 
     expect(createdSessions.length).toBe(3);
     for (const s of createdSessions) {
@@ -296,6 +313,11 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
     expect(result.walkthrough.changes.length).toBe(1);
     expect(result.findings.length).toBe(2);
     expect(result.findings.map((f) => f.source).sort()).toEqual(["idioms", "soundness"]);
+
+    // Second run with identical context hits per-lens disk cache (0 additional OpenCode sessions created)
+    const cachedResult = await orchestrator.runAllLenses({ ...SAMPLE_CONTEXT, repoRoot });
+    expect(createdSessions.length).toBe(3);
+    expect(cachedResult.findings.length).toBe(2);
   });
 
   test("buildReviewContextPrompt puts high-risk prod files in Tier 1 inline diff and secondary/test files in Tier 2 paths-only", () => {
@@ -451,8 +473,11 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
       clientFactory: async () => fakeClient,
     });
 
+    const repoRoot = await mkdtemp(join(tmpdir(), "peer-lenses-f07-"));
+    tempDirs.push(repoRoot);
     const res = await orchestrator.runAllLenses({
       ...SAMPLE_CONTEXT,
+      repoRoot,
       diffMap,
     });
 
@@ -500,10 +525,15 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
       clientFactory: async () => fakeClient,
     });
 
-    await expect(orchestrator.runAllLenses(SAMPLE_CONTEXT)).rejects.toThrow(
+    const repoRoot = await mkdtemp(join(tmpdir(), "peer-lenses-quota-"));
+    tempDirs.push(repoRoot);
+    await expect(orchestrator.runAllLenses({ ...SAMPLE_CONTEXT, repoRoot })).rejects.toThrow(
       OpenCodeProviderQuotaError,
     );
     // In 3-lens mode, each of the 3 lenses fails on attempt 1 without retrying a 2nd time
     expect(promptCalls).toBe(3);
+    expect(buildWalkthroughContextPrompt(SAMPLE_CONTEXT).length).toBeLessThan(
+      buildReviewContextPrompt(SAMPLE_CONTEXT).length,
+    );
   });
 });

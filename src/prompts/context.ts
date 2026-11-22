@@ -29,6 +29,64 @@ export interface ReviewContext {
   readonly auditLogger?: AuditLogger;
 }
 
+export function buildWalkthroughContextPrompt(context: ReviewContext): string {
+  const sections: string[] = [];
+
+  sections.push(
+    `# Pull Request Context\n` +
+      `- Repository: ${context.pr.owner}/${context.pr.repo}\n` +
+      `- PR #${context.pr.number}: ${context.pr.title}\n` +
+      `- Author: ${context.pr.author}\n` +
+      `- Range: ${context.diffBaseSha.slice(0, 7)}..${context.headSha.slice(0, 7)} (${context.isIncremental ? "incremental delta" : "full PR diff"})\n\n` +
+      `## PR Description\n${(context.pr.body.trim() || "(no description)").slice(0, 2000)}`,
+  );
+
+  const clippyFiles = new Set(context.clippyDiagnostics.map((d) => d.filePath));
+  const enrichedFiles = Object.keys(context.diffMap)
+    .map((filePath) => {
+      const fileMap = context.diffMap[filePath];
+      const layerInfo = resolveFileArchitecturalLayer(context.crateGraph, filePath);
+      const priority = fileMap
+        ? scoreFileReviewPriority(
+            fileMap,
+            layerInfo.layer,
+            context.crateGraph.testLayer,
+            clippyFiles,
+          )
+        : { score: 0, isTestOrBench: true, addedLinesCount: 0, riskSignals: [] };
+      const symbols = fileMap
+        ? extractSymbolsFromFileMap(fileMap).map((s) => `${s.kind} ${s.name}`)
+        : [];
+      return {
+        filePath,
+        crateName: layerInfo.crateName,
+        layer: layerInfo.layer,
+        addedLinesCount: priority.addedLinesCount,
+        riskSignals: priority.riskSignals,
+        symbols,
+      };
+    })
+    .sort((a, b) => a.layer - b.layer || a.filePath.localeCompare(b.filePath));
+
+  const fileListLines = enrichedFiles.map((f) => {
+    const symSuffix = f.symbols.length > 0 ? ` | symbols: ${f.symbols.slice(0, 4).join(", ")}` : "";
+    const riskSuffix = f.riskSignals.length > 0 ? ` | signals: ${f.riskSignals.join(",")}` : "";
+    return `- [Layer ${f.layer} | crate: ${f.crateName}] \`${f.filePath}\` (+${f.addedLinesCount} lines${symSuffix}${riskSuffix})`;
+  });
+
+  sections.push(
+    `## Modified Rust Code Files (${enrichedFiles.length} file(s), Ordered by Cargo Crate Dependency Layer)\n${fileListLines.join("\n") || "(none)"}`,
+  );
+
+  if (context.symbolGraph && context.symbolGraph.nodes.length > 0) {
+    sections.push(
+      `## Rust Symbol & Cross-Workspace Call-Site Graph\n${formatSymbolGraphSummary(context.symbolGraph)}`,
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
 export function buildReviewContextPrompt(
   context: ReviewContext,
   maxInlineDiffChars = DEFAULT_MAX_INLINE_DIFF_CHARS,
