@@ -377,18 +377,14 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           },
         );
 
-        // Step 4: Transactional cargo check verification of single-hunk suggestions
+        // Step 4: Transactional cargo check verification of single-hunk inline diff suggestions
         const verifier = new SuggestionCompilerVerifier();
         const verifiedInline = await verifier.verifySuggestions(
           repoRoot,
           partitioned.inlineFindings,
           auditLogger,
         );
-        const verifiedOutside = await verifier.verifySuggestions(
-          repoRoot,
-          partitioned.outsideDiffFindings,
-          auditLogger,
-        );
+        const verifiedOutside = partitioned.outsideDiffFindings;
 
         const baseline = collectRustToolchainBaseline(repoRoot);
         const graphDeletions: DeletionProposedItem[] = symbolGraph.nodes

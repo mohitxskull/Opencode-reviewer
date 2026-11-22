@@ -111,12 +111,22 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
       "allow",
     );
 
-    // Secrets are denied even for read, except .env.example
+    // Secrets are denied even for read AND grep, except .env.example
     expect(evaluatePermissionRule(READONLY_SESSION_PERMISSIONS, "read", ".env")).toBe("deny");
+    expect(evaluatePermissionRule(READONLY_SESSION_PERMISSIONS, "grep", ".env")).toBe("deny");
+    expect(evaluatePermissionRule(READONLY_SESSION_PERMISSIONS, "grep", "config/.env.local")).toBe(
+      "deny",
+    );
+    expect(evaluatePermissionRule(READONLY_SESSION_PERMISSIONS, "grep", "certs/server.pem")).toBe(
+      "deny",
+    );
     expect(evaluatePermissionRule(READONLY_SESSION_PERMISSIONS, "read", "config/.env.local")).toBe(
       "deny",
     );
     expect(evaluatePermissionRule(READONLY_SESSION_PERMISSIONS, "read", ".env.example")).toBe(
+      "allow",
+    );
+    expect(evaluatePermissionRule(READONLY_SESSION_PERMISSIONS, "grep", ".env.example")).toBe(
       "allow",
     );
   });

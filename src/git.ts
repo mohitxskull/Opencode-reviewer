@@ -1,6 +1,7 @@
 import { rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { registerSignalCleanup, triggerSignalCleanup } from "./lifecycle.ts";
 import { type ReviewCheckpoint, ReviewCheckpointSchema } from "./models.ts";
 
 // Why: Storing checkpoints and reports under .git/peer/reviews/pr-<number>/ keeps
@@ -134,8 +135,7 @@ export class InPlaceCheckoutSession {
   private originalRef: string | null = null;
   private hadCargoLockOnEntry = true;
   private restored = false;
-  private sigintHandler: (() => void) | null = null;
-  private sigtermHandler: (() => void) | null = null;
+  private unregisterCleanup: (() => void) | null = null;
 
   constructor(options: CheckoutOptions) {
     this.options = options;
@@ -152,17 +152,9 @@ export class InPlaceCheckoutSession {
       this.originalRef = runGitSync(this.options.repoRoot, ["rev-parse", "--verify", "HEAD"]);
     }
 
-    this.sigintHandler = () => {
-      this.restoreOnSignal();
-      process.exit(130);
-    };
-    this.sigtermHandler = () => {
-      this.restoreOnSignal();
-      process.exit(143);
-    };
-
-    process.on("SIGINT", this.sigintHandler);
-    process.on("SIGTERM", this.sigtermHandler);
+    this.unregisterCleanup = registerSignalCleanup(() => {
+      this.restoreOriginalRefSync();
+    });
 
     try {
       const hasCommit = tryGitSync(this.options.repoRoot, [
@@ -189,6 +181,7 @@ export class InPlaceCheckoutSession {
   }
 
   public restoreOnSignal(): void {
+    triggerSignalCleanup();
     this.restoreOriginalRefSync();
   }
 
@@ -223,13 +216,9 @@ export class InPlaceCheckoutSession {
   }
 
   private removeSignalListeners(): void {
-    if (this.sigintHandler) {
-      process.off("SIGINT", this.sigintHandler);
-      this.sigintHandler = null;
-    }
-    if (this.sigtermHandler) {
-      process.off("SIGTERM", this.sigtermHandler);
-      this.sigtermHandler = null;
+    if (this.unregisterCleanup) {
+      this.unregisterCleanup();
+      this.unregisterCleanup = null;
     }
   }
 }

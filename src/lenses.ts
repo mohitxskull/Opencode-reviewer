@@ -45,9 +45,17 @@ export const READONLY_SESSION_PERMISSIONS: readonly SessionPermissionRule[] = [
   { action: "read", resource: "*", effect: "allow" },
   { action: "grep", resource: "*", effect: "allow" },
   { action: "glob", resource: "*", effect: "allow" },
-  { action: "read", resource: "*.env", effect: "deny" },
-  { action: "read", resource: "*.env.*", effect: "deny" },
+  { action: "*", resource: "*.env", effect: "deny" },
+  { action: "*", resource: "*.env.*", effect: "deny" },
+  { action: "*", resource: "*/.env", effect: "deny" },
+  { action: "*", resource: "*/.env.*", effect: "deny" },
+  { action: "*", resource: "*.pem", effect: "deny" },
+  { action: "*", resource: "*.key", effect: "deny" },
+  { action: "*", resource: "*id_rsa*", effect: "deny" },
+  { action: "*", resource: "*id_ed25519*", effect: "deny" },
+  { action: "*", resource: "*.git/config", effect: "deny" },
   { action: "read", resource: "*.env.example", effect: "allow" },
+  { action: "grep", resource: "*.env.example", effect: "allow" },
 ];
 
 // Why: When a cohort prompt already contains 100% of the cohort's annotated diff

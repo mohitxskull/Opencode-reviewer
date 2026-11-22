@@ -1,5 +1,9 @@
-import { join } from "node:path";
+import { writeFileSync } from "node:fs";
+import { lstat, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { AuditLogger } from "./audit.ts";
+import { isReviewableRustCodeFile } from "./diff.ts";
+import { registerSignalCleanup } from "./lifecycle.ts";
 import { type Finding, FindingSchema } from "./models.ts";
 
 export interface CargoCheckResult {
@@ -10,7 +14,7 @@ export interface CargoCheckResult {
 export type CargoCheckRunner = (repoRoot: string) => Promise<CargoCheckResult>;
 
 async function defaultCargoCheckRunner(repoRoot: string): Promise<CargoCheckResult> {
-  const proc = Bun.spawnSync(
+  const proc = Bun.spawn(
     ["cargo", "check", "--workspace", "--all-targets", "--message-format=json"],
     {
       cwd: repoRoot,
@@ -19,8 +23,14 @@ async function defaultCargoCheckRunner(repoRoot: string): Promise<CargoCheckResu
     },
   );
 
+  const [stdoutText, stderrText, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+
   const errorMessages: string[] = [];
-  for (const line of proc.stdout.toString().split("\n")) {
+  for (const line of stdoutText.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) {
       continue;
@@ -39,11 +49,11 @@ async function defaultCargoCheckRunner(repoRoot: string): Promise<CargoCheckResu
     }
   }
 
-  const ok = proc.exitCode === 0 && errorMessages.length === 0;
+  const ok = exitCode === 0 && errorMessages.length === 0;
   const errorSummary =
     errorMessages.length > 0
       ? errorMessages.slice(0, 3).join("; ")
-      : proc.stderr.toString().trim().slice(0, 300);
+      : stderrText.trim().slice(0, 300);
 
   return { ok, errorSummary };
 }
@@ -78,6 +88,42 @@ function applyLineReplacement(
   return hasTrailingNewline ? `${joined}${lineEnding}` : joined;
 }
 
+async function resolveContainedTargetPath(
+  realRepoRoot: string,
+  candidateRelPath: string,
+): Promise<string | null> {
+  if (!candidateRelPath || isAbsolute(candidateRelPath)) {
+    return null;
+  }
+  const normalizedRel = candidateRelPath.replace(/\\/g, "/");
+  if (normalizedRel.split("/").includes("..")) {
+    return null;
+  }
+
+  const resolvedCandidate = resolve(realRepoRoot, candidateRelPath);
+  if (!resolvedCandidate.startsWith(`${realRepoRoot}${sep}`)) {
+    return null;
+  }
+
+  try {
+    const stat = await lstat(resolvedCandidate);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      return null;
+    }
+    const realTarget = await realpath(resolvedCandidate);
+    if (!realTarget.startsWith(`${realRepoRoot}${sep}`)) {
+      return null;
+    }
+    const canonicalRel = relative(realRepoRoot, realTarget).replace(/\\/g, "/");
+    if (!isReviewableRustCodeFile(canonicalRel)) {
+      return null;
+    }
+    return realTarget;
+  } catch {
+    return null;
+  }
+}
+
 export interface SuggestionVerifierOptions {
   readonly checkRunner?: CargoCheckRunner;
 }
@@ -85,8 +131,9 @@ export interface SuggestionVerifierOptions {
 // Why: Re-joining decoded UTF-8 lines can normalize CRLF/LF or trailing newline
 // bytes, leaving the user's checked-out working tree dirty according to `git status`.
 // Snapshotting `originalBytes = await Bun.file(targetPath).bytes()` and writing
-// `originalBytes` back verbatim in `finally` (with SIGINT/SIGTERM deferred during
-// the patch-check-restore critical section) guarantees bit-for-bit restoration.
+// `originalBytes` back verbatim in `finally` (and registering a LIFO signal cleanup
+// via `registerSignalCleanup` during the patch-check-restore critical section)
+// guarantees bit-for-bit restoration before any branch switch.
 export class SuggestionCompilerVerifier {
   private readonly checkRunner: CargoCheckRunner;
 
@@ -100,6 +147,7 @@ export class SuggestionCompilerVerifier {
     auditLogger?: AuditLogger,
   ): Promise<Finding[]> {
     const results: Finding[] = [];
+    const realRepoRoot = await realpath(repoRoot);
     const totalWithSuggestions = findings.filter(
       (f) => f.suggestion !== null && f.suggestion.trim().length > 0,
     ).length;
@@ -119,9 +167,8 @@ export class SuggestionCompilerVerifier {
 
       suggestionIndex += 1;
       const checkStartMs = Date.now();
-      const targetPath = join(repoRoot, finding.filePath);
-      const targetFile = Bun.file(targetPath);
-      if (!(await targetFile.exists())) {
+      const targetPath = await resolveContainedTargetPath(realRepoRoot, finding.filePath);
+      if (targetPath === null) {
         results.push(
           FindingSchema.parse({
             ...finding,
@@ -132,6 +179,7 @@ export class SuggestionCompilerVerifier {
         continue;
       }
 
+      const targetFile = Bun.file(targetPath);
       const originalBytes = await targetFile.bytes();
       const originalText = new TextDecoder().decode(originalBytes);
       const patchedText = applyLineReplacement(
@@ -152,29 +200,24 @@ export class SuggestionCompilerVerifier {
         continue;
       }
 
-      let deferredSignal: NodeJS.Signals | null = null;
-      const onSigInt = () => {
-        deferredSignal = "SIGINT";
-      };
-      const onSigTerm = () => {
-        deferredSignal = "SIGTERM";
+      let restored = false;
+      const restoreOriginalBytesSync = () => {
+        if (restored) {
+          return;
+        }
+        restored = true;
+        writeFileSync(targetPath, originalBytes);
       };
 
-      process.on("SIGINT", onSigInt);
-      process.on("SIGTERM", onSigTerm);
+      const unregisterSignalCleanup = registerSignalCleanup(restoreOriginalBytesSync);
 
       let checkResult: CargoCheckResult;
       try {
         await Bun.write(targetPath, patchedText);
-        checkResult = await this.checkRunner(repoRoot);
+        checkResult = await this.checkRunner(realRepoRoot);
       } finally {
-        await Bun.write(targetPath, originalBytes);
-        process.off("SIGINT", onSigInt);
-        process.off("SIGTERM", onSigTerm);
-      }
-
-      if (deferredSignal !== null) {
-        process.kill(process.pid, deferredSignal);
+        restoreOriginalBytesSync();
+        unregisterSignalCleanup();
       }
 
       const checkDurationMs = Date.now() - checkStartMs;

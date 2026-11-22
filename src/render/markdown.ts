@@ -36,17 +36,28 @@ const SEVERITY_EMOJI: Readonly<Record<Severity, string>> = {
 export function sanitizeAgentPrompt(prompt: string): string {
   let sanitized = prompt;
 
-  // Strip command substitutions $(...)
-  sanitized = sanitized.replace(/\$\([^)]*\)/g, "[redacted-command]");
+  // Strip backtick shell execution (`...`)
+  sanitized = sanitized.replace(/`[^`]*`/g, "[redacted-command]");
 
-  // Strip credential paths (~/.ssh, ~/.aws, ~/.gnupg, id_rsa, .env)
-  sanitized = sanitized.replace(/~\/?\.(?:ssh|aws|gnupg|config)\S*/gi, "[redacted-path]");
-  sanitized = sanitized.replace(/\bid_rsa\b|\bid_ed25519\b/gi, "[redacted-key]");
+  // Iteratively strip nested command substitutions $(...)
+  let prev = "";
+  while (prev !== sanitized && sanitized.includes("$(")) {
+    prev = sanitized;
+    sanitized = sanitized.replace(/\$\([^()]*\)/g, "[redacted-command]");
+  }
+  sanitized = sanitized.replace(/\$\(/g, "[redacted-command]");
+
+  // Strip credential paths (~/.ssh, $HOME/.ssh, /home/.../.aws, ~/.gnupg, id_rsa, .env)
+  sanitized = sanitized.replace(
+    /(?:~|\$HOME|\$\{HOME\}|\/home\/[^/\s]+|\/Users\/[^/\s]+|\/root)\/\.(?:ssh|aws|gnupg|config|cargo\/credentials)\S*/gi,
+    "[redacted-path]",
+  );
+  sanitized = sanitized.replace(/\b(?:id_rsa|id_ed25519)\b/gi, "[redacted-key]");
   sanitized = sanitized.replace(/(?:^|\s)\.[a-z0-9_.-]*env\b/gi, " [redacted-env]");
 
-  // Strip secret environment variable names
+  // Strip secret environment variable names (any *TOKEN*, *SECRET*, *API_KEY*, *PRIVATE_KEY*, *PASSWORD*, *CREDENTIAL*)
   sanitized = sanitized.replace(
-    /\$?\b(?:PEER_GITHUB_TOKEN|GITHUB_TOKEN|GH_TOKEN|AWS_SECRET_ACCESS_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY)\b/gi,
+    /\$?\b[A-Z0-9_]*(?:TOKEN|SECRET|API_KEY|PRIVATE_KEY|PASSWORD|CREDENTIAL)S?\b/g,
     "[redacted-secret]",
   );
 
@@ -63,14 +74,20 @@ export function sanitizeAgentPrompt(prompt: string): string {
     return "[redacted-url]";
   });
 
-  // Neutralize closing </details> tag injection
-  sanitized = sanitized.replace(/<\/details>/gi, "");
+  // Neutralize closing HTML/Markdown container tags
+  sanitized = sanitizeMarkdownText(sanitized);
 
   return sanitized.trim();
 }
 
+export function sanitizeMarkdownText(text: string): string {
+  return text
+    .replace(/<\/?(?:details|summary|blockquote|script|iframe|object|embed)\b[^>]*>/gi, "")
+    .replace(/<img\b[^>]*>/gi, "");
+}
+
 function escapeTableCell(value: string): string {
-  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+  return sanitizeMarkdownText(value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
 }
 
 export function renderWalkthroughComment(bundle: ReviewBundle): string {
@@ -116,7 +133,7 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
 
   lines.push(
     `### 0. Executive Summary`,
-    walkthrough.summary.trim(),
+    sanitizeMarkdownText(walkthrough.summary).trim(),
     "",
     `- **Total Findings:** ${totalFindingsCount} (${breakdown || "0 actionable"})`,
     `- **Actionable Inline Comments:** ${bundle.findings.length}`,
@@ -241,42 +258,58 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
   return lines.join("\n").trimEnd();
 }
 
-export function renderInlineFindingComment(finding: Finding): string {
+export interface RenderFindingOptions {
+  readonly allowCommitSuggestion?: boolean;
+}
+
+export function renderInlineFindingComment(
+  finding: Finding,
+  options: RenderFindingOptions = {},
+): string {
+  const allowCommitSuggestion = options.allowCommitSuggestion ?? true;
   const typeIcon = TYPE_EMOJI[finding.type];
   const sevIcon = SEVERITY_EMOJI[finding.severity];
   const stateLabel = finding.epistemicState ?? "VERIFIED-DEFECT";
   const mechanismLabel = finding.evidenceMechanism ?? "Correctness";
+  const safeTitle = sanitizeMarkdownText(finding.title).trim();
+  const safeBody = sanitizeMarkdownText(finding.body).trim();
 
   const lines: string[] = [
     `_${typeIcon} ${finding.type}_ | _${sevIcon} ${finding.severity}_ | \`${stateLabel}\` | **Mechanism:** \`${mechanismLabel}\``,
     "",
-    `**${finding.title}**`,
+    `**${safeTitle}**`,
     "",
-    finding.body.trim(),
+    safeBody,
   ];
 
   const metaBullets: string[] = [];
   if (finding.rootCause && finding.rootCause.trim().length > 0) {
-    metaBullets.push(`- **Root Cause:** ${finding.rootCause.trim()}`);
+    metaBullets.push(`- **Root Cause:** ${sanitizeMarkdownText(finding.rootCause).trim()}`);
   }
   if (finding.blastRadius && finding.blastRadius.trim().length > 0) {
     metaBullets.push(
-      `- **Blast Radius:** ${finding.blastRadius.trim()} (Reversible: ${finding.reversible ? "Yes" : "No"})`,
+      `- **Blast Radius:** ${sanitizeMarkdownText(finding.blastRadius).trim()} (Reversible: ${finding.reversible ? "Yes" : "No"})`,
     );
   }
   if (finding.traceability && finding.traceability.trim().length > 0) {
-    metaBullets.push(`- **Traceability:** ${finding.traceability.trim()}`);
+    metaBullets.push(`- **Traceability:** ${sanitizeMarkdownText(finding.traceability).trim()}`);
   }
   if (finding.verificationCommand && finding.verificationCommand.trim().length > 0) {
-    metaBullets.push(`- **Verification:** \`${finding.verificationCommand.trim()}\``);
+    metaBullets.push(
+      `- **Verification:** \`${sanitizeMarkdownText(finding.verificationCommand).trim()}\``,
+    );
   }
   if (metaBullets.length > 0) {
     lines.push("", ...metaBullets);
   }
 
-  if (finding.suggestion !== null && finding.suggestionVerified) {
+  if (finding.suggestion !== null && finding.suggestion.trim().length > 0) {
     const cleanSuggestion = finding.suggestion.replace(/\r\n/g, "\n").replace(/\n$/, "");
-    lines.push("", `> ✓ Verified with \`cargo check\``, "```suggestion", cleanSuggestion, "```");
+    if (allowCommitSuggestion && finding.suggestionVerified) {
+      lines.push("", `> ✓ Verified with \`cargo check\``, "```suggestion", cleanSuggestion, "```");
+    } else if (!allowCommitSuggestion) {
+      lines.push("", "```rust", cleanSuggestion, "```");
+    }
   }
 
   const safePrompt = sanitizeAgentPrompt(finding.agentPrompt);
@@ -355,7 +388,7 @@ export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
           "",
           `\`${filePath}\` (${rangeLabel}):`,
           "",
-          renderInlineFindingComment(f),
+          renderInlineFindingComment(f, { allowCommitSuggestion: false }),
           "",
           "---",
         );
@@ -395,7 +428,7 @@ export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
           "",
           `\`${filePath}\` (${rangeLabel}):`,
           "",
-          renderInlineFindingComment(f),
+          renderInlineFindingComment(f, { allowCommitSuggestion: false }),
           "",
           "---",
         );
