@@ -1,5 +1,11 @@
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import {
+  extractSymbolsFromFileMap,
+  formatSymbolGraphSummary,
+  type RustSymbolGraph,
+} from "./graph.ts";
+import { formatLearningsPromptSection, type RepoLearning } from "./learnings.ts";
 import type {
   ClippyDiagnostic,
   CrateGraph,
@@ -94,9 +100,100 @@ export interface ReviewContext {
   readonly crateGraph: CrateGraph;
   readonly diffMap: Readonly<Record<string, DiffFileMap>>;
   readonly clippyDiagnostics: readonly ClippyDiagnostic[];
+  readonly symbolGraph?: RustSymbolGraph;
+  readonly learnings?: readonly RepoLearning[];
 }
 
-export function buildReviewContextPrompt(context: ReviewContext): string {
+// Why: Large PRs (e.g. 50-150 files, >1 MB raw diff) exceed an LLM's effective
+// reasoning window and inflate token usage by 10x if every file is dumped inline.
+// We use Progressive Context Disclosure:
+// - Tier 1 (Primary High-Risk Production Rust files): scored by risk signals
+//   (`unsafe`, `.await`, locks, `select!`, `unwrap`/`panic!`, Clippy hits, non-test
+//   layer) and included with compact annotated diff hunks (up to 6 files / 18k chars).
+// - Tier 2 (Secondary / Test / Mechanical files): ONLY the file path, crate layer,
+//   valid right-side hunk line ranges, and modified symbol names are listed so the
+//   agent can request a specific file via `read` only if needed.
+export const DEFAULT_MAX_INLINE_DIFF_CHARS = 18_000;
+export const DEFAULT_MAX_TIER1_FILES = 6;
+export const MAX_HUNK_LINES_BEFORE_COMPACT = 40;
+
+const HIGH_RISK_RUST_TOKEN_REGEX =
+  /\b(?:unsafe|await|Mutex|RwLock|parking_lot|select!|unwrap|expect|panic!|transmute|from_raw|into_raw|Send|Sync)\b/;
+
+export function scoreFileReviewPriority(
+  fileMap: DiffFileMap,
+  layer: number,
+  testLayer: number,
+  clippyFiles: ReadonlySet<string>,
+): { score: number; isTestOrBench: boolean; addedLinesCount: number; riskSignals: string[] } {
+  const isTestOrBench =
+    layer >= testLayer ||
+    fileMap.filePath.includes("/tests/") ||
+    fileMap.filePath.startsWith("tests/") ||
+    fileMap.filePath.includes("/benches/") ||
+    fileMap.filePath.endsWith("_test.rs");
+
+  let score = isTestOrBench ? 0 : 100 - Math.min(layer * 5, 30);
+  if (fileMap.filePath.endsWith("Cargo.toml")) {
+    score -= 40;
+  }
+  if (clippyFiles.has(fileMap.filePath)) {
+    score += 50;
+  }
+
+  let addedLinesCount = 0;
+  const riskSignalsSet = new Set<string>();
+
+  for (const hunk of fileMap.hunks) {
+    for (const line of hunk.annotatedLines) {
+      if (line.includes("(+):")) {
+        addedLinesCount += 1;
+        const match = HIGH_RISK_RUST_TOKEN_REGEX.exec(line);
+        if (match?.[0]) {
+          riskSignalsSet.add(match[0]);
+        }
+      }
+    }
+  }
+
+  score += riskSignalsSet.size * 25;
+  score += Math.min(addedLinesCount, 80) * 0.25;
+
+  return {
+    score,
+    isTestOrBench,
+    addedLinesCount,
+    riskSignals: Array.from(riskSignalsSet),
+  };
+}
+
+function compactAnnotatedLines(lines: readonly string[]): string[] {
+  if (lines.length <= MAX_HUNK_LINES_BEFORE_COMPACT) {
+    return [...lines];
+  }
+  // Keep added lines (`(+):`) plus first/last 2 context lines of the hunk
+  const selected: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) {
+      continue;
+    }
+    const isAdded = line.includes("(+):");
+    const isNeighborAdded =
+      (i > 0 && (lines[i - 1]?.includes("(+):") ?? false)) ||
+      (i + 1 < lines.length && (lines[i + 1]?.includes("(+):") ?? false));
+    if (isAdded || isNeighborAdded || i < 2 || i >= lines.length - 2) {
+      selected.push(line);
+    }
+  }
+  return selected.slice(0, MAX_HUNK_LINES_BEFORE_COMPACT);
+}
+
+export function buildReviewContextPrompt(
+  context: ReviewContext,
+  maxInlineDiffChars = DEFAULT_MAX_INLINE_DIFF_CHARS,
+  maxTier1Files = DEFAULT_MAX_TIER1_FILES,
+): string {
   const sections: string[] = [];
 
   sections.push(
@@ -105,26 +202,57 @@ export function buildReviewContextPrompt(context: ReviewContext): string {
       `- PR #${context.pr.number}: ${context.pr.title}\n` +
       `- Author: ${context.pr.author}\n` +
       `- Range: ${context.diffBaseSha.slice(0, 7)}..${context.headSha.slice(0, 7)} (${context.isIncremental ? "incremental delta" : "full PR diff"})\n\n` +
-      `## PR Description\n${context.pr.body.trim() || "(no description)"}`,
+      `## PR Description\n${(context.pr.body.trim() || "(no description)").slice(0, 2000)}`,
   );
 
-  const orderedFiles = Object.keys(context.diffMap)
+  if (context.learnings && context.learnings.length > 0) {
+    sections.push(formatLearningsPromptSection(context.learnings));
+  }
+
+  const clippyFiles = new Set(context.clippyDiagnostics.map((d) => d.filePath));
+
+  const enrichedFiles = Object.keys(context.diffMap)
     .map((filePath) => {
+      const fileMap = context.diffMap[filePath];
       const layerInfo = resolveFileArchitecturalLayer(context.crateGraph, filePath);
+      const priority = fileMap
+        ? scoreFileReviewPriority(
+            fileMap,
+            layerInfo.layer,
+            context.crateGraph.testLayer,
+            clippyFiles,
+          )
+        : { score: 0, isTestOrBench: true, addedLinesCount: 0, riskSignals: [] };
+      const symbols = fileMap
+        ? extractSymbolsFromFileMap(fileMap).map((s) => `${s.kind} ${s.name}`)
+        : [];
       return {
         filePath,
+        fileMap,
         crateName: layerInfo.crateName,
         layer: layerInfo.layer,
+        ...priority,
+        symbols,
       };
     })
     .sort((a, b) => a.layer - b.layer || a.filePath.localeCompare(b.filePath));
 
-  const fileListLines = orderedFiles.map(
-    (f) => `- [Layer ${f.layer} | crate: ${f.crateName}] \`${f.filePath}\``,
-  );
+  const fileListLines = enrichedFiles.map((f) => {
+    const ranges = f.fileMap
+      ? f.fileMap.hunks.map((h) => `${h.newStart}..${h.newEnd}`).join(", ")
+      : "";
+    const symSuffix = f.symbols.length > 0 ? ` | symbols: ${f.symbols.slice(0, 5).join(", ")}` : "";
+    return `- [Layer ${f.layer} | crate: ${f.crateName}] \`${f.filePath}\` (hunks: ${ranges}${symSuffix})`;
+  });
   sections.push(
-    `## Modified Files (Ordered by Cargo Crate Dependency Layer)\n${fileListLines.join("\n") || "(none)"}`,
+    `## Modified Rust Code Files (Ordered by Cargo Crate Dependency Layer)\n${fileListLines.join("\n") || "(none)"}`,
   );
+
+  if (context.symbolGraph && context.symbolGraph.nodes.length > 0) {
+    sections.push(
+      `## Rust Symbol & Cross-Workspace Call-Site Graph\n${formatSymbolGraphSummary(context.symbolGraph)}`,
+    );
+  }
 
   if (context.clippyDiagnostics.length > 0) {
     const clippyLines = context.clippyDiagnostics.map(
@@ -137,30 +265,80 @@ export function buildReviewContextPrompt(context: ReviewContext): string {
     sections.push(`## Local Cargo Clippy / Compiler Diagnostics\nZero warnings or errors.`);
   }
 
-  const diffBlocks: string[] = [];
-  for (const fileEntry of orderedFiles) {
-    const fileMap = context.diffMap[fileEntry.filePath];
-    if (!fileMap) {
+  // Partition into Tier 1 (highest-priority production Rust files for inline diff)
+  // and Tier 2 (paths + hunk intervals + symbols only, available on demand via `read`)
+  const rankedByScore = [...enrichedFiles].sort(
+    (a, b) => b.score - a.score || a.layer - b.layer || a.filePath.localeCompare(b.filePath),
+  );
+
+  const tier1Paths = new Set<string>();
+  const tier1Blocks: string[] = [];
+  let usedChars = 0;
+
+  for (const entry of rankedByScore) {
+    if (!entry.fileMap) {
       continue;
     }
-    const hunkTexts = fileMap.hunks.map(
-      (hunk) =>
+    if (tier1Blocks.length >= maxTier1Files) {
+      break;
+    }
+    // Always keep non-test files prioritized; if a PR only modifies test files, allow the top test files
+    if (entry.isTestOrBench && tier1Blocks.length > 0) {
+      continue;
+    }
+
+    const hunkTexts = entry.fileMap.hunks.map((hunk) => {
+      const lines = compactAnnotatedLines(hunk.annotatedLines);
+      return (
         `${hunk.header} (right-side valid range: ${hunk.newStart}..${hunk.newEnd})\n` +
-        hunk.annotatedLines.join("\n"),
-    );
-    diffBlocks.push(
-      `### File: \`${fileMap.filePath}\` (Layer ${fileEntry.layer}, crate \`${fileEntry.crateName}\`)\n` +
-        `\`\`\`diff\n${hunkTexts.join("\n\n")}\n\`\`\``,
+        lines.join("\n")
+      );
+    });
+    const block =
+      `### File: \`${entry.filePath}\` (Layer ${entry.layer}, crate \`${entry.crateName}\`)\n` +
+      `\`\`\`diff\n${hunkTexts.join("\n\n")}\n\`\`\``;
+
+    if (usedChars + block.length > maxInlineDiffChars && tier1Blocks.length > 0) {
+      continue;
+    }
+
+    tier1Paths.add(entry.filePath);
+    tier1Blocks.push(block);
+    usedChars += block.length;
+  }
+
+  const tier2Lines: string[] = [];
+  for (const entry of enrichedFiles) {
+    if (tier1Paths.has(entry.filePath) || !entry.fileMap) {
+      continue;
+    }
+    const ranges = entry.fileMap.hunks.map((h) => `${h.newStart}..${h.newEnd}`).join(", ");
+    const symLabel =
+      entry.symbols.length > 0
+        ? ` | modified symbols: ${entry.symbols.slice(0, 6).join(", ")}`
+        : "";
+    tier2Lines.push(
+      `- \`${entry.filePath}\` (Layer ${entry.layer}, crate \`${entry.crateName}\`, +${entry.addedLinesCount} lines, valid hunks: ${ranges}${symLabel})`,
     );
   }
 
-  sections.push(`## Annotated Right-Side Unified Diff Hunks\n${diffBlocks.join("\n\n")}`);
+  sections.push(
+    `## Tier 1: Primary High-Risk Rust Diff Hunks (Inline)\n${tier1Blocks.join("\n\n") || "(none)"}`,
+  );
+
+  if (tier2Lines.length > 0) {
+    sections.push(
+      `## Tier 2: Secondary & Test Files (Paths Only — Request via \`read\` Tool Only If Needed)\n` +
+        tier2Lines.join("\n"),
+    );
+  }
+
   return sections.join("\n\n");
 }
 
 export const WALKTHROUGH_LENS_PROMPT = `LENS: WALKTHROUGH_ARCHITECTURE
 You are the Walkthrough & Architecture Review Lens for a complex Rust repository.
-You have read-only access to the workspace (read, grep, glob). Do not attempt to edit files or run shell commands.
+TOKEN EFFICIENCY RULE: All changed files, crate layers, and diff hunks are already provided below. Do NOT call any tools (\`read\`, \`grep\`, \`glob\`) for the walkthrough — respond immediately in a single turn with the JSON object.
 
 Analyze the PR context, architectural crate-graph layers, and annotated diff hunks.
 Return ONLY a single JSON object matching this exact schema (no extra commentary outside JSON):
@@ -187,11 +365,11 @@ Rules:
 
 export const SOUNDNESS_CONCURRENCY_LENS_PROMPT = `LENS: SOUNDNESS_CONCURRENCY
 You are the Rust Soundness, \`unsafe\`, and Async/Concurrency Review Lens.
-You have read-only access to the workspace (read, grep, glob). Inspect surrounding callers, struct invariants, and trait bounds when needed.
+TOKEN EFFICIENCY RULE: The annotated diff hunks and line numbers are already provided below. To keep token usage low, make AT MOST 2 tool calls (\`read\`/\`grep\`) ONLY if strictly required to verify a critical invariant, then immediately return your JSON response. Prefer analyzing the provided diff directly in 0 tool calls.
 
 Focus strictly on:
 1. \`unsafe\` blocks/fns: missing or falsified \`// SAFETY:\` invariants, pointer aliasing/provenance, uninitialized memory, FFI unwind/drop safety, unsound \`Send\`/\`Sync\` impls.
-2. Async & Concurrency: synchronous locks (\`std::sync::Mutex\`, \`RwLock\`, \`parking_lot\`) held across \`.await\` points, lock-order inversions/deadlocks, \`tokio::select!\` branch cancellation safety, unbounded channels lacking backpressure.
+2. Async & Concurrency: synchronous locks (\`std::sync::Mutex\`, \`RwLock\`, \`parking_lot\`) held across \`.await\` points, lock-order inversions/deadlocks, \`tokio::select!\` branch cancellation safety, unbounded channels/maps lacking backpressure or eviction.
 3. Panic & Crash Paths: \`unwrap()\`, \`expect()\`, \`panic!()\`, indexing \`slice[i]\`, or unchecked integer arithmetic on untrusted/production inputs.
 
 Return ONLY a single JSON object matching this exact schema:
@@ -217,7 +395,7 @@ Rules:
 
 export const IDIOMS_LOGIC_LENS_PROMPT = `LENS: IDIOMS_PERFORMANCE_LOGIC
 You are the Rust Idioms, Performance, and Domain Logic Review Lens, applying the PingCAP/TiKV Rust Style Guide (\`rust-conventions\`).
-You have read-only access to the workspace (read, grep, glob).
+TOKEN EFFICIENCY RULE: The annotated diff hunks and line numbers are already provided below. To keep token usage low, make AT MOST 2 tool calls (\`read\`/\`grep\`) ONLY if strictly required, then immediately return your JSON response. Prefer analyzing the provided diff directly in 0 tool calls.
 
 Focus strictly on:
 1. Domain Logic & Edge Cases: off-by-one errors, wrong boolean conditions, partial state updates before fallible \`?\` returns, swallowed errors.
@@ -338,9 +516,17 @@ export interface OpenCodeClientLike {
 
 export async function createDefaultOpenCodeClient(): Promise<OpenCodeClientLike> {
   const endpoint = await Service.ensure();
+  const noIdleTimeoutFetch = ((input: string | URL | Request, init?: RequestInit) =>
+    globalThis.fetch(input, {
+      ...init,
+      // Disable Bun's 300s default socket idle timeout on long-polling session.wait requests
+      timeout: false,
+    } as RequestInit)) as typeof globalThis.fetch;
+
   return OpenCode.make({
     baseUrl: endpoint.url,
     headers: Service.headers(endpoint),
+    fetch: noIdleTimeoutFetch,
   }) as unknown as OpenCodeClientLike;
 }
 

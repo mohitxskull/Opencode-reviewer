@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { parseUnifiedDiff } from "./diff.ts";
+import { filterCodeOnlyDiffMap, parseUnifiedDiff } from "./diff.ts";
 import {
   CheckpointStore,
   detectRepoOwnerAndName,
@@ -16,7 +16,9 @@ import {
   parsePrTarget,
   resolveGitHubToken,
 } from "./github.ts";
+import { buildRustSymbolGraph } from "./graph.ts";
 import { clippyToFindings, deduplicateAndFilterFindings } from "./judge.ts";
+import { LearningStore } from "./learnings.ts";
 import { OpenCodeMultiLensOrchestrator, parseModelSpec, type ReviewContext } from "./lenses.ts";
 import {
   type Finding,
@@ -52,6 +54,9 @@ const HELP_TEXT = `peer — Local-First Rust PR Reviewer (OpenCode SDK + Octokit
 
 Usage:
   peer [review] [PR_NUMBER_OR_URL] [options]
+  peer learn add "<rule>" [--scope "<glob>"] [--repo <path>]
+  peer learn list [--repo <path>]
+  peer learn remove <id> [--repo <path>]
 
 Options:
   --repo <path>              Target local Rust git repository (default: cwd)
@@ -61,6 +66,7 @@ Options:
   --post                     Post Walkthrough comment and PENDING draft review to GitHub
   --submit-review            Submit review with event=COMMENT instead of PENDING draft
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
+  --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
   -h, --help                 Show this help message
 `;
 
@@ -79,6 +85,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         post: { type: "boolean", default: false },
         "submit-review": { type: "boolean", default: false },
         model: { type: "string" },
+        scope: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
       allowPositionals: true,
@@ -90,6 +97,55 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
 
     const repoRoot = resolve(parsed.values.repo ?? process.cwd());
+    const learningStore = new LearningStore(repoRoot);
+
+    if (parsed.positionals[0] === "learn") {
+      const action = parsed.positionals[1];
+      if (action === "add") {
+        const ruleText = parsed.positionals.slice(2).join(" ").trim();
+        if (!ruleText) {
+          writeErr('Usage: peer learn add "<rule>" [--scope "<glob>"]');
+          return 1;
+        }
+        const entry = await learningStore.add({
+          rule: ruleText,
+          scope: parsed.values.scope ?? null,
+        });
+        writeOut(
+          `Added learning [${entry.id}]${entry.scope ? ` (scope: ${entry.scope})` : ""}: ${entry.rule}`,
+        );
+        return 0;
+      }
+      if (action === "list") {
+        const list = await learningStore.list();
+        if (list.length === 0) {
+          writeOut("No repository learnings recorded yet.");
+        } else {
+          for (const item of list) {
+            writeOut(
+              `[${item.id}] ${item.scope ? `(scope: ${item.scope}) ` : "(global) "}${item.rule}`,
+            );
+          }
+        }
+        return 0;
+      }
+      if (action === "remove") {
+        const id = parsed.positionals[2]?.trim();
+        if (!id) {
+          writeErr("Usage: peer learn remove <id>");
+          return 1;
+        }
+        const removed = await learningStore.remove(id);
+        if (!removed) {
+          writeErr(`Learning ID "${id}" not found.`);
+          return 1;
+        }
+        writeOut(`Removed learning [${id}].`);
+        return 0;
+      }
+      writeErr("Unknown learn subcommand. Expected: peer learn add | list | remove");
+      return 1;
+    }
     const profile: ReviewProfile = ReviewProfileSchema.parse(parsed.values.profile ?? "chill");
     const fresh = parsed.values.fresh ?? false;
     const localOnly = parsed.values["local-only"] ?? false;
@@ -178,12 +234,15 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
         }
 
-        const diffMap = parseUnifiedDiff(diffText);
+        const rawDiffMap = parseUnifiedDiff(diffText);
+        const diffMap = filterCodeOnlyDiffMap(rawDiffMap);
         const modifiedFiles = new Set(Object.keys(diffMap));
 
-        const [crateGraph, clippyDiagnostics] = await Promise.all([
+        const [crateGraph, clippyDiagnostics, symbolGraph, learnings] = await Promise.all([
           collectCrateGraph(repoRoot),
           collectClippyDiagnostics(repoRoot, modifiedFiles),
+          buildRustSymbolGraph(repoRoot, diffMap),
+          learningStore.getMatchingLearnings(modifiedFiles),
         ]);
 
         const reviewContext: ReviewContext = {
@@ -195,6 +254,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           crateGraph,
           diffMap,
           clippyDiagnostics,
+          symbolGraph,
+          learnings,
         };
 
         const lensRunner: LensRunnerFn =

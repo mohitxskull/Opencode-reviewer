@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { parseUnifiedDiff, snapRangeToHunk } from "../src/diff.ts";
+import {
+  filterCodeOnlyDiffMap,
+  isReviewableRustCodeFile,
+  parseUnifiedDiff,
+  snapRangeToHunk,
+} from "../src/diff.ts";
 
 const SAMPLE_DIFF = `diff --git a/src/lib.rs b/src/lib.rs
 index 1111111..2222222 100644
@@ -71,5 +76,26 @@ describe("Task 04: Unified diff line mapper", () => {
 
     // Range far outside any hunk rejected
     expect(snapRangeToHunk(libMap, 25, 28, 3)).toBeNull();
+  });
+
+  test("isReviewableRustCodeFile and filterCodeOnlyDiffMap exclude .md, docs, and lockfiles while keeping Rust code", () => {
+    expect(isReviewableRustCodeFile("src/lib.rs")).toBe(true);
+    expect(isReviewableRustCodeFile("crates/oms/src/kernel.rs")).toBe(true);
+    expect(isReviewableRustCodeFile("Cargo.toml")).toBe(true);
+    expect(isReviewableRustCodeFile("crates/oms/Cargo.toml")).toBe(true);
+
+    expect(isReviewableRustCodeFile("README.md")).toBe(false);
+    expect(isReviewableRustCodeFile("docs/plans/04-oms/README.md")).toBe(false);
+    expect(isReviewableRustCodeFile("docs/reports/reviews/v01/todo.md")).toBe(false);
+    expect(isReviewableRustCodeFile("Cargo.lock")).toBe(false);
+    expect(isReviewableRustCodeFile(".github/workflows/ci.yml")).toBe(false);
+
+    const rawMap = parseUnifiedDiff(
+      `${SAMPLE_DIFF}\ndiff --git a/docs/plan.md b/docs/plan.md\n--- a/docs/plan.md\n+++ b/docs/plan.md\n@@ -1,1 +1,2 @@\n # Plan\n+More docs\n`,
+    );
+    expect("docs/plan.md" in rawMap).toBe(true);
+    const filtered = filterCodeOnlyDiffMap(rawMap);
+    expect("docs/plan.md" in filtered).toBe(false);
+    expect("src/lib.rs" in filtered).toBe(true);
   });
 });

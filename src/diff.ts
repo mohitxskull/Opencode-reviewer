@@ -12,6 +12,37 @@ export function formatAnnotatedDiffLine(
   return `L${String(lineNo).padStart(4, "0")} (${marker}): ${content}`;
 }
 
+// Why: Reviewing .md documentation, plans, review reports, Cargo.lock, and CI YAML
+// wastes tens of thousands of tokens on non-Rust prose and causes review lenses
+// to lose focus on actual Rust code invariants. Only Rust source files (*.rs)
+// and Cargo manifests (Cargo.toml) are eligible for Rust PR review.
+export function isReviewableRustCodeFile(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (
+    normalized.startsWith("docs/") ||
+    normalized.startsWith(".github/") ||
+    normalized.startsWith(".") ||
+    normalized.endsWith(".md") ||
+    normalized.endsWith(".lock")
+  ) {
+    return false;
+  }
+  const baseName = normalized.split("/").pop() ?? "";
+  return normalized.endsWith(".rs") || baseName === "Cargo.toml";
+}
+
+export function filterCodeOnlyDiffMap(
+  diffMap: Readonly<Record<string, DiffFileMap>>,
+): Record<string, DiffFileMap> {
+  const filtered: Record<string, DiffFileMap> = {};
+  for (const [filePath, fileMap] of Object.entries(diffMap)) {
+    if (isReviewableRustCodeFile(filePath)) {
+      filtered[filePath] = fileMap;
+    }
+  }
+  return filtered;
+}
+
 export function parseUnifiedDiff(diffText: string): Record<string, DiffFileMap> {
   const result: Record<string, DiffFileMap> = {};
   const lines = diffText.replace(/\r\n/g, "\n").split("\n");

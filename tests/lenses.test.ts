@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildReviewContextPrompt,
   evaluatePermissionRule,
   extractJsonObject,
   LensOutputParseError,
@@ -284,5 +285,69 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
     expect(result.walkthrough.changes.length).toBe(1);
     expect(result.findings.length).toBe(2);
     expect(result.findings.map((f) => f.source).sort()).toEqual(["idioms", "soundness"]);
+  });
+
+  test("buildReviewContextPrompt puts high-risk prod files in Tier 1 inline diff and secondary/test files in Tier 2 paths-only", () => {
+    const contextWithTiers: ReviewContext = {
+      ...SAMPLE_CONTEXT,
+      learnings: [
+        {
+          id: "learn-1",
+          rule: "Dual account snapshots are intentional.",
+          scope: null,
+          createdAt: "2026-11-22T00:00:00Z",
+        },
+      ],
+      symbolGraph: {
+        nodes: [
+          {
+            name: "clear_funding_sync",
+            kind: "fn",
+            filePath: "components/raftstore/src/lib.rs",
+            line: 11,
+            prodReferences: [],
+            testReferences: [],
+          },
+        ],
+      },
+      diffMap: {
+        ...SAMPLE_CONTEXT.diffMap,
+        "tests/heavy_integration.rs": {
+          filePath: "tests/heavy_integration.rs",
+          hunks: [
+            {
+              oldStart: 1,
+              oldCount: 2,
+              newStart: 1,
+              newEnd: 3,
+              header: "@@ -1,2 +1,3 @@",
+              annotatedLines: [
+                "L0001 (+): #[test]",
+                "L0002 (+): fn test_heavy_integration_flow() {",
+                "L0003 (+):     assert_eq!(1, 1);",
+              ],
+              rightSideLines: [1, 2, 3],
+            },
+          ],
+        },
+      },
+    };
+
+    const prompt = buildReviewContextPrompt(contextWithTiers);
+
+    // 1. Includes learnings and symbol graph
+    expect(prompt).toContain("Dual account snapshots are intentional.");
+    expect(prompt).toContain("0 production callers/refs outside definition");
+
+    // 2. Production file (components/raftstore/src/lib.rs) is in Tier 1 with its annotated diff lines
+    expect(prompt).toContain("### File: `components/raftstore/src/lib.rs`");
+    expect(prompt).toContain("L0011 (+):     let guard = mutex.lock().unwrap();");
+
+    // 3. Test file (tests/heavy_integration.rs) is in Tier 2 as path-only (its diff body is NOT dumped inline)
+    expect(prompt).toContain(
+      "## Tier 2: Secondary & Test Files (Paths Only — Request via `read` Tool Only If Needed)",
+    );
+    expect(prompt).toContain("- `tests/heavy_integration.rs`");
+    expect(prompt).not.toContain("L0003 (+):     assert_eq!(1, 1);");
   });
 });
