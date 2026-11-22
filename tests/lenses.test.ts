@@ -6,6 +6,7 @@ import {
   LensOutputParseError,
   type OpenCodeClientLike,
   OpenCodeMultiLensOrchestrator,
+  OpenCodeProviderQuotaError,
   parseModelSpec,
   READONLY_SESSION_PERMISSIONS,
   type ReviewContext,
@@ -459,5 +460,50 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
     expect(res.walkthrough.summary).toBe("Walkthrough succeeded on retry 2.");
     expect(res.failedCohorts?.length).toBe(1);
     expect(res.failedCohorts?.[0]).toContain("cohort-1");
+  });
+
+  test("OpenCodeMultiLensOrchestrator surfaces OpenCodeProviderQuotaError immediately on HTTP 429 provider.free-limit without futile retries", async () => {
+    let promptCalls = 0;
+    const fakeClient: OpenCodeClientLike = {
+      session: {
+        create: async () => ({ id: "quota-sess" }),
+        prompt: async () => {
+          promptCalls += 1;
+        },
+        remove: async () => {},
+      },
+      experimental: {
+        session: {
+          wait: async () => {},
+        },
+      },
+      message: {
+        list: async () => ({
+          data: [
+            {
+              type: "assistant",
+              finish: "error",
+              error: {
+                type: "provider.free-limit",
+                message: "Free usage limit reached. Connect a provider or switch models.",
+                status: 429,
+                retryAfterMs: 33_000_000,
+              },
+              content: [],
+            },
+          ],
+        }),
+      },
+    };
+
+    const orchestrator = new OpenCodeMultiLensOrchestrator({
+      clientFactory: async () => fakeClient,
+    });
+
+    await expect(orchestrator.runAllLenses(SAMPLE_CONTEXT)).rejects.toThrow(
+      OpenCodeProviderQuotaError,
+    );
+    // In 3-lens mode, each of the 3 lenses fails on attempt 1 without retrying a 2nd time
+    expect(promptCalls).toBe(3);
   });
 });

@@ -30,9 +30,44 @@ export interface OpenCodeAssistantMessagePart {
   readonly text?: string;
 }
 
+export interface OpenCodeMessageError {
+  readonly type?: string;
+  readonly message?: string;
+  readonly status?: number;
+  readonly retryAfterMs?: number;
+}
+
 export interface OpenCodeSessionMessage {
   readonly type: string;
+  readonly finish?: string;
+  readonly outcome?: string;
+  readonly error?: OpenCodeMessageError;
   readonly content?: readonly OpenCodeAssistantMessagePart[];
+}
+
+export class OpenCodeProviderQuotaError extends Error {
+  public readonly status: number | undefined;
+  public readonly retryAfterMs: number | undefined;
+  public readonly errorType: string;
+
+  constructor(options: {
+    errorType: string;
+    message: string;
+    status?: number;
+    retryAfterMs?: number;
+  }) {
+    const retryHint =
+      typeof options.retryAfterMs === "number" && options.retryAfterMs > 0
+        ? ` (retry after ~${Math.ceil(options.retryAfterMs / 60_000)}m)`
+        : "";
+    super(
+      `OpenCode provider error [${options.errorType}${options.status ? ` HTTP ${options.status}` : ""}]: ${options.message}${retryHint}`,
+    );
+    this.name = "OpenCodeProviderQuotaError";
+    this.errorType = options.errorType;
+    this.status = options.status;
+    this.retryAfterMs = options.retryAfterMs;
+  }
 }
 
 export interface OpenCodeClientLike {

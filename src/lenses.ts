@@ -13,6 +13,7 @@ import {
   createDefaultOpenCodeClient,
   type ModelSpec,
   type OpenCodeClientLike,
+  OpenCodeProviderQuotaError,
   parseModelSpec,
 } from "./opencode/client.ts";
 import {
@@ -33,6 +34,8 @@ export {
   type ModelSpec,
   type OpenCodeAssistantMessagePart,
   type OpenCodeClientLike,
+  type OpenCodeMessageError,
+  OpenCodeProviderQuotaError,
   type OpenCodeSessionMessage,
   parseModelSpec,
 } from "./opencode/client.ts";
@@ -274,6 +277,9 @@ export class OpenCodeMultiLensOrchestrator {
               audit,
             );
           } catch (err) {
+            if (err instanceof OpenCodeProviderQuotaError) {
+              throw err;
+            }
             failedCohorts.push(title);
             await audit?.logEvent(
               "lens.session.failed",
@@ -375,6 +381,31 @@ export class OpenCodeMultiLensOrchestrator {
         type: "assistant",
       });
 
+      const erroredMsg = messages.data.find(
+        (m) => m.error && (typeof m.error.message === "string" || typeof m.error.type === "string"),
+      );
+      if (erroredMsg?.error) {
+        const errInfo = erroredMsg.error;
+        const errType = errInfo.type ?? "provider.error";
+        const errMsg = errInfo.message ?? "OpenCode provider returned an error";
+        if (
+          errType.includes("limit") ||
+          errType.includes("quota") ||
+          errType.includes("auth") ||
+          errInfo.status === 429 ||
+          errInfo.status === 401 ||
+          errInfo.status === 403
+        ) {
+          throw new OpenCodeProviderQuotaError({
+            errorType: errType,
+            message: errMsg,
+            status: errInfo.status,
+            retryAfterMs: errInfo.retryAfterMs,
+          });
+        }
+        throw new Error(`OpenCode session [${title}] failed (${errType}): ${errMsg}`);
+      }
+
       const assistantTurns = messages.data.filter((m) => m.type === "assistant").length;
       const replyText = messages.data
         .flatMap((msg) => (msg.type === "assistant" && msg.content ? msg.content : []))
@@ -440,6 +471,9 @@ export class OpenCodeMultiLensOrchestrator {
 
         return parsed;
       } catch (err) {
+        if (err instanceof OpenCodeProviderQuotaError) {
+          throw err;
+        }
         lastError = err;
         if (attempt < 2) {
           await audit?.logEvent(
@@ -563,6 +597,9 @@ export class OpenCodeMultiLensOrchestrator {
           openQuestions: parsed.openQuestions,
         };
       } catch (err) {
+        if (err instanceof OpenCodeProviderQuotaError) {
+          throw err;
+        }
         lastError = err;
         if (attempt < 2) {
           await audit?.logEvent(
