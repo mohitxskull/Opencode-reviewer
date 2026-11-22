@@ -1,7 +1,6 @@
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
 import type { AuditLogger } from "./audit.ts";
-import { matchPathInstructionsForFiles, type RepoReviewConfig } from "./config.ts";
 import {
   extractSymbolsFromFileMap,
   formatSymbolGraphSummary,
@@ -113,7 +112,6 @@ export interface ReviewContext {
   readonly clippyDiagnostics: readonly ClippyDiagnostic[];
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
-  readonly repoConfig?: RepoReviewConfig | null;
   readonly auditLogger?: AuditLogger;
 }
 
@@ -225,25 +223,6 @@ export function buildReviewContextPrompt(
 
   if (context.learnings && context.learnings.length > 0) {
     sections.push(formatLearningsPromptSection(context.learnings));
-  }
-
-  if (context.repoConfig) {
-    const matchedRules = matchPathInstructionsForFiles(
-      context.repoConfig,
-      Object.keys(context.diffMap),
-    );
-    const configLines: string[] = [];
-    if (context.repoConfig.toneInstructions) {
-      configLines.push(`**Tone & Audit Standard:** ${context.repoConfig.toneInstructions}`);
-    }
-    for (const rule of matchedRules) {
-      configLines.push(`### Path Instructions for \`${rule.path}\`\n${rule.instructions}`);
-    }
-    if (configLines.length > 0) {
-      sections.push(
-        `## Repository Review Instructions (.coderabbit.yaml)\n${configLines.join("\n\n")}`,
-      );
-    }
   }
 
   const clippyFiles = new Set(context.clippyDiagnostics.map((d) => d.filePath));
@@ -523,13 +502,19 @@ export function groupDiffFilesIntoCohorts(
 
 export const COHORT_DEEP_AUDIT_PROMPT = `LENS: SUBSYSTEM_COHORT_AUDIT
 You are a strict Senior Rust Architecture, Soundness, Concurrency, and Domain-Logic Auditor reviewing a specific subsystem cohort of a Pull Request.
-TOKEN EFFICIENCY RULE: The full annotated diff hunks (\`L0042 (+):\`), cross-workspace symbol call-site graph, and repository path instructions for your assigned cohort files are provided below. Make AT MOST 1 targeted \`read\` tool call ONLY if an external struct/fn outside the diff is strictly required; otherwise use 0 tool calls and emit your JSON response immediately.
+Produce root-cause, falsifiable, evidence-backed findings citing concrete failure mechanisms. Reject backward-compat shims, layered patches, sleeps, swallowed errors, and unsupported aesthetic nitpicks.
+TOKEN EFFICIENCY RULE: The full annotated diff hunks (\`L0042 (+):\`) and cross-workspace symbol call-site graph for your assigned cohort files are provided below. Make AT MOST 1 targeted \`read\` tool call ONLY if an external struct/fn outside the diff is strictly required; otherwise use 0 tool calls and emit your JSON response immediately.
 
 Audit EVERY assigned Tier 1 file in this cohort thoroughly for:
-1. Repository Path Instructions (.coderabbit.yaml): Enforce every rule in the "Repository Review Instructions" section (financial Decimal vs float invariants, venue separation, error propagation vs swallowed errors, bounded queues/maps/retries, teardown iteration limits, reconciliation state transitions, monotonic timestamps, MIS session boundaries).
-2. Soundness, Concurrency & Crash Safety: Locks (\`Mutex\`/\`RwLock\`) held across \`.await\` or disk I/O, deadlock/barrier inversions, cancellation safety in \`tokio::select!\`, panics/\`unwrap()\`/\`expect()\`/unchecked indexing or arithmetic on production inputs, \`unsafe\` invariants.
-3. State-Machine, Data Integrity & Edge-Case Bugs: Partial state mutations before fallible \`?\` returns, stale snapshots overwriting newer state, uncalled cleanup/reset methods (check the Symbol Call-Site Graph!), inconsistent status transitions, off-by-one boundary bugs, silent error drops.
-4. Performance & PingCAP/TiKV Idioms: Hot-path clones/allocations, unbounded HashMap/Vec growth in long-running loops, proper \`Result\` propagation.
+1. Standing Rust Architecture & Correctness Laws:
+   - Source of truth hierarchy: (1) Code & type signatures, (2) Tests, (3) Code comments (flag code-vs-comment divergences as defects).
+   - Anti-patterns to flag: time-based sleeps, swallowed errors (\`let _ =\` or \`if let Ok(...)\` discarding failures) instead of \`Result\` propagation, unbounded queues/maps/sets/retries in long-running services, mutex guards held across \`.await\` or disk I/O, and floating-point arithmetic where exact decimal/integer precision is required.
+2. Soundness, Concurrency & Crash Safety:
+   - Locks (\`std::sync::Mutex\`, \`RwLock\`, \`parking_lot\`) held across \`.await\` or disk I/O, nested double-lock AB-BA deadlocks, barrier inversions, cancellation safety in \`tokio::select!\`, unbounded teardown drain loops, panics/\`unwrap()\`/\`expect()\`/unchecked indexing or arithmetic on production inputs, and \`unsafe\` invariants.
+3. State-Machine, Data Integrity & Edge-Case Bugs:
+   - Partial state mutations before fallible \`?\` returns, releasing reservations before durable status writes succeed, stale snapshots overwriting newer state, uncalled cleanup/reset methods (check the Symbol Call-Site Graph!), inconsistent status transitions, and off-by-one boundary bugs.
+4. Performance & PingCAP/TiKV Rust Idioms:
+   - Hot-path clones/allocations, \`crate::\` module imports, \`as_\`/\`to_\`/\`into_\` conversion naming, and visibility minimalism.
 
 Return ONLY a single JSON object matching this exact schema:
 {

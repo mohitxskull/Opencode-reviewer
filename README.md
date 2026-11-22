@@ -2,7 +2,7 @@
 
 `peer` is a local-first GitHub Pull Request reviewer built in **100% TypeScript on Bun**, powered by **`@opencode/client`** (OpenCode SDK, supporting free models like `hy4-flash-free` and `big-pickle`) and **`@octokit/rest`**.
 
-Designed specifically for **complex Rust workspaces**, `peer` runs directly inside your local dev repository with your warm `target/` build cache—combining CodeRabbit-grade PR walkthroughs and surgical inline comments with real `cargo clippy`, cross-workspace Rust symbol call-site graphs, `.coderabbit.yaml` path instructions, and transactional `cargo check` verification of every proposed ```` ```suggestion ```` block.
+Designed specifically for **complex Rust workspaces**, `peer` runs directly inside your local dev repository with your warm `target/` build cache—combining architectural PR walkthroughs and surgical inline comments with real `cargo clippy`, cross-workspace Rust symbol call-site graphs, native Rust soundness/concurrency/idiom audit rules, and transactional `cargo check` verification of every proposed ```` ```suggestion ```` block.
 
 ## Key Capabilities
 
@@ -11,9 +11,8 @@ Designed specifically for **complex Rust workspaces**, `peer` runs directly insi
   - Orders modified files by topological Cargo crate dependency layer (`L0` leaf/core crates $\rightarrow$ dependent crates $\rightarrow$ test layer).
   - Extracts `cargo clippy --workspace --all-targets --message-format=json` diagnostics.
   - Builds a cross-workspace **Rust Symbol & Call-Site Graph** via `git grep -n -w` in <50ms, surfacing 0-caller methods and production vs. test call sites.
-- **Subsystem Cohort Sharding & `.coderabbit.yaml` Integration:**
-  - Automatically loads `.coderabbit.yaml` / `.coderabbit.yml` (`tone_instructions`, `reviews.profile`, `path_filters`, and glob-matched `path_instructions`).
-  - Filters out non-code files (`.md`, `docs/`, lockfiles) and shards multi-file PRs into balanced subsystem cohorts so every production Rust file receives a deep audit.
+- **Subsystem Cohort Sharding & Native Rust Audit Rules:**
+  - Filters out non-code files (`.md`, `docs/`, lockfiles) and shards multi-file PRs into balanced subsystem cohorts so every production Rust file receives a deep audit for soundness, concurrency, state-machine invariants, and PingCAP/TiKV Rust conventions.
 - **Transactional `cargo check` Suggestion Verifier:**
   - Every candidate ```` ```suggestion ```` block is transactionally patched onto disk, compile-checked with `cargo check --workspace --all-targets`, and immediately restored bit-for-bit (`Uint8Array` snapshot). Broken suggestions that fail to compile are automatically stripped before posting.
 - **CodeRabbit-Grade Output & Safe GitHub Posting:**

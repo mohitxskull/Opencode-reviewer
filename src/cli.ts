@@ -2,7 +2,6 @@
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { AuditLogger } from "./audit.ts";
-import { isAllowedByPathFilters, loadRepoReviewConfig } from "./config.ts";
 import { filterCodeOnlyDiffMap, parseUnifiedDiff } from "./diff.ts";
 import {
   CheckpointStore,
@@ -149,9 +148,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       writeErr("Unknown learn subcommand. Expected: peer learn add | list | remove");
       return 1;
     }
-    const explicitProfile = parsed.values.profile
-      ? ReviewProfileSchema.parse(parsed.values.profile)
-      : null;
+    const profile: ReviewProfile = ReviewProfileSchema.parse(parsed.values.profile ?? "assertive");
     const fresh = parsed.values.fresh ?? false;
     const localOnly = parsed.values["local-only"] ?? false;
     const postToGitHub = parsed.values.post ?? false;
@@ -263,32 +260,19 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
         }
 
-        const repoConfig = await loadRepoReviewConfig(repoRoot);
-        const profile: ReviewProfile = explicitProfile ?? repoConfig?.profile ?? "chill";
-
         const rawDiffMap = parseUnifiedDiff(diffText);
-        const codeOnlyDiffMap = filterCodeOnlyDiffMap(rawDiffMap);
-        const diffMap =
-          repoConfig && repoConfig.pathFilters.length > 0
-            ? Object.fromEntries(
-                Object.entries(codeOnlyDiffMap).filter(([fp]) =>
-                  isAllowedByPathFilters(repoConfig.pathFilters, fp),
-                ),
-              )
-            : codeOnlyDiffMap;
+        const diffMap = filterCodeOnlyDiffMap(rawDiffMap);
         const modifiedFiles = new Set(Object.keys(diffMap));
         const excludedFiles = Object.keys(rawDiffMap).filter((fp) => !modifiedFiles.has(fp));
 
         await auditLogger.logEvent(
           "stage.checkout_and_diff",
-          `▶ Stage 2/6: Checked out ${pr.headSha.slice(0, 7)} (${modifiedFiles.size} Rust code files kept, ${excludedFiles.length} non-code/filtered files skipped, profile=${profile})`,
+          `▶ Stage 2/6: Checked out ${pr.headSha.slice(0, 7)} (${modifiedFiles.size} Rust code files kept, ${excludedFiles.length} non-code files skipped, profile=${profile})`,
           {
             diffBaseSha,
             headSha: pr.headSha,
             isIncremental,
             profile,
-            hasCodeRabbitYaml: repoConfig !== null,
-            pathInstructionCount: repoConfig?.pathInstructions.length ?? 0,
             keptRustFiles: Array.from(modifiedFiles),
             excludedNonCodeFiles: excludedFiles,
           },
@@ -338,7 +322,6 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           clippyDiagnostics,
           symbolGraph,
           learnings,
-          repoConfig,
           auditLogger,
         };
 
