@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { AuditLogger } from "./audit.ts";
 import { type Finding, FindingSchema } from "./models.ts";
 
 export interface CargoCheckResult {
@@ -96,8 +97,13 @@ export class SuggestionCompilerVerifier {
   public async verifySuggestions(
     repoRoot: string,
     findings: readonly Finding[],
+    auditLogger?: AuditLogger,
   ): Promise<Finding[]> {
     const results: Finding[] = [];
+    const totalWithSuggestions = findings.filter(
+      (f) => f.suggestion !== null && f.suggestion.trim().length > 0,
+    ).length;
+    let suggestionIndex = 0;
 
     for (const finding of findings) {
       if (finding.suggestion === null || finding.suggestion.trim().length === 0) {
@@ -111,6 +117,8 @@ export class SuggestionCompilerVerifier {
         continue;
       }
 
+      suggestionIndex += 1;
+      const checkStartMs = Date.now();
       const targetPath = join(repoRoot, finding.filePath);
       const targetFile = Bun.file(targetPath);
       if (!(await targetFile.exists())) {
@@ -168,6 +176,22 @@ export class SuggestionCompilerVerifier {
       if (deferredSignal !== null) {
         process.kill(process.pid, deferredSignal);
       }
+
+      const checkDurationMs = Date.now() - checkStartMs;
+      await auditLogger?.logEvent(
+        "verifier.suggestion.checked",
+        `  ├─ [cargo check ${suggestionIndex}/${totalWithSuggestions}] ${finding.filePath}:${finding.startLine}-${finding.endLine} -> ${checkResult.ok ? "✓ PASS" : `✗ FAIL (${checkResult.errorSummary.slice(0, 80)})`} (${checkDurationMs}ms)`,
+        {
+          findingId: finding.id,
+          filePath: finding.filePath,
+          startLine: finding.startLine,
+          endLine: finding.endLine,
+          passed: checkResult.ok,
+          durationMs: checkDurationMs,
+          errorSummary: checkResult.errorSummary,
+          suggestion: finding.suggestion,
+        },
+      );
 
       if (checkResult.ok) {
         results.push(

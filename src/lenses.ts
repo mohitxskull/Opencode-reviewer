@@ -1,5 +1,6 @@
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import type { AuditLogger } from "./audit.ts";
 import { matchPathInstructionsForFiles, type RepoReviewConfig } from "./config.ts";
 import {
   extractSymbolsFromFileMap,
@@ -104,6 +105,7 @@ export interface ReviewContext {
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
   readonly repoConfig?: RepoReviewConfig | null;
+  readonly auditLogger?: AuditLogger;
 }
 
 // Why: Large PRs (e.g. 50-150 files, >1 MB raw diff) exceed an LLM's effective
@@ -395,21 +397,21 @@ function getSubsystemGroupKey(filePath: string): string {
   if (parts.length <= 2) {
     return parts[0] ?? "root";
   }
-  // Group e.g. src/services/live/dhan/foo.rs -> src/services/live/dhan
-  return parts.slice(0, Math.min(4, parts.length - 1)).join("/");
+  // Group by 2-3 top-level subsystem segments (e.g. src/domain, src/exchange, src/services/live)
+  return parts.slice(0, Math.min(3, parts.length - 1)).join("/");
 }
 
 // Why: When a PR touches 10-60+ Rust files across multiple subsystems, a single
 // prompt cannot hold every file's diff hunks inline — causing single-call reviewers
 // to only inspect the first 1-2 files and miss bugs in the remaining subsystems.
-// Sharding modified files into subsystem cohorts (up to 4 files / 24k chars per
+// Sharding modified files into subsystem cohorts (up to 6 files / 26k chars per
 // cohort) ensures EVERY production Rust file in a large PR receives a dedicated,
 // path-instruction-aware audit without exceeding context limits.
 export function groupDiffFilesIntoCohorts(
   diffMap: Readonly<Record<string, DiffFileMap>>,
   crateGraph: CrateGraph,
-  maxFilesPerCohort = 4,
-  maxCharsPerCohort = 24_000,
+  maxFilesPerCohort = 6,
+  maxCharsPerCohort = 26_000,
 ): FileCohort[] {
   const allPaths = Object.keys(diffMap);
   if (allPaths.length === 0) {
@@ -710,11 +712,22 @@ export class OpenCodeMultiLensOrchestrator {
     const client = await this.clientFactory();
     const overallContextPrompt = buildReviewContextPrompt(context);
     const cohorts = groupDiffFilesIntoCohorts(context.diffMap, context.crateGraph);
+    const audit = context.auditLogger;
 
     // For small PRs (<= 1 cohort), run the 3 standard lenses (Walkthrough + Soundness + Idioms)
     if (cohorts.length <= 1) {
+      await audit?.logEvent(
+        "lenses.mode.selected",
+        `  ├─ Running 3 concurrent lenses (Walkthrough, Soundness/Concurrency, Idioms/Logic) on ${Object.keys(context.diffMap).length} file(s)...`,
+        {
+          mode: "standard-3-lens",
+          fileCount: Object.keys(context.diffMap).length,
+          model: `${this.model.providerID}/${this.model.id}`,
+        },
+      );
+
       const [walkthrough, soundnessFindings, idiomsFindings] = await Promise.all([
-        this.runWalkthroughLens(client, context.repoRoot, overallContextPrompt),
+        this.runWalkthroughLens(client, context.repoRoot, overallContextPrompt, audit),
         this.runFindingsLens(
           client,
           context.repoRoot,
@@ -722,6 +735,8 @@ export class OpenCodeMultiLensOrchestrator {
           SOUNDNESS_CONCURRENCY_LENS_PROMPT,
           overallContextPrompt,
           "soundness",
+          Object.keys(context.diffMap),
+          audit,
         ),
         this.runFindingsLens(
           client,
@@ -730,6 +745,8 @@ export class OpenCodeMultiLensOrchestrator {
           IDIOMS_LOGIC_LENS_PROMPT,
           overallContextPrompt,
           "idioms",
+          Object.keys(context.diffMap),
+          audit,
         ),
       ]);
 
@@ -739,21 +756,34 @@ export class OpenCodeMultiLensOrchestrator {
       };
     }
 
+    await audit?.logEvent(
+      "lenses.mode.selected",
+      `  ├─ Sharded ${Object.keys(context.diffMap).length} Rust files into ${cohorts.length} subsystem cohorts (+ Walkthrough lens)`,
+      {
+        mode: "sharded-cohorts",
+        cohortCount: cohorts.length,
+        cohorts: cohorts.map((c) => ({ id: c.id, label: c.label, files: c.filePaths })),
+        model: `${this.model.providerID}/${this.model.id}`,
+      },
+    );
+
     // For multi-subsystem PRs, run the Walkthrough lens alongside parallel Subsystem Cohort Audits
     // so every production Rust file in every subsystem cohort receives a full Tier 1 inline diff audit.
     const walkthroughPromise = this.runWalkthroughLens(
       client,
       context.repoRoot,
       overallContextPrompt,
+      audit,
     );
 
     const cohortFindings: Finding[] = [];
-    const concurrencyLimit = 4;
+    const concurrencyLimit = 6;
 
     for (let i = 0; i < cohorts.length; i += concurrencyLimit) {
       const batch = cohorts.slice(i, i + concurrencyLimit);
       const batchResults = await Promise.all(
-        batch.map(async (cohort) => {
+        batch.map(async (cohort, batchIdx) => {
+          const cohortOrdinal = i + batchIdx + 1;
           const cohortDiffMap: Record<string, DiffFileMap> = {};
           for (const fp of cohort.filePaths) {
             const fm = context.diffMap[fp];
@@ -790,10 +820,12 @@ export class OpenCodeMultiLensOrchestrator {
           return await this.runFindingsLens(
             client,
             context.repoRoot,
-            `peer-cohort-${cohort.id}`,
+            `peer-${cohort.id} (${cohortOrdinal}/${cohorts.length}: ${cohort.label})`,
             COHORT_DEEP_AUDIT_PROMPT,
             cohortPrompt,
             "soundness",
+            cohort.filePaths,
+            audit,
           );
         }),
       );
@@ -815,13 +847,28 @@ export class OpenCodeMultiLensOrchestrator {
     repoRoot: string,
     title: string,
     promptText: string,
-  ): Promise<string> {
+    files: readonly string[],
+    audit?: AuditLogger,
+  ): Promise<{ replyText: string; sessionID: string; durationMs: number; assistantTurns: number }> {
+    const t0 = Date.now();
     const session = await client.session.create({
       location: { directory: repoRoot },
       model: this.model,
       title,
       permissions: READONLY_SESSION_PERMISSIONS,
     });
+
+    await audit?.logEvent(
+      "lens.session.started",
+      `  ├─ ▶ Starting [${title}] (${files.length} file(s), ${(promptText.length / 1024).toFixed(1)} KiB prompt)...`,
+      {
+        title,
+        sessionID: session.id,
+        files,
+        promptChars: promptText.length,
+        model: `${this.model.providerID}/${this.model.id}`,
+      },
+    );
 
     try {
       await client.session.prompt({
@@ -838,7 +885,8 @@ export class OpenCodeMultiLensOrchestrator {
         type: "assistant",
       });
 
-      return messages.data
+      const assistantTurns = messages.data.filter((m) => m.type === "assistant").length;
+      const replyText = messages.data
         .flatMap((msg) => (msg.type === "assistant" && msg.content ? msg.content : []))
         .filter(
           (part): part is { type: "text"; text: string } =>
@@ -846,6 +894,13 @@ export class OpenCodeMultiLensOrchestrator {
         )
         .map((part) => part.text)
         .join("\n");
+
+      return {
+        replyText,
+        sessionID: session.id,
+        durationMs: Date.now() - t0,
+        assistantTurns,
+      };
     } finally {
       try {
         await client.session.remove({ sessionID: session.id });
@@ -859,16 +914,36 @@ export class OpenCodeMultiLensOrchestrator {
     client: OpenCodeClientLike,
     repoRoot: string,
     contextPrompt: string,
+    audit?: AuditLogger,
   ): Promise<WalkthroughReport> {
     const fullPrompt = `${WALKTHROUGH_LENS_PROMPT}\n\n${contextPrompt}`;
-    const reply = await this.executeReadOnlyPrompt(
+    const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
       client,
       repoRoot,
       "peer-lens-walkthrough",
       fullPrompt,
+      [],
+      audit,
     );
-    const jsonObj = extractJsonObject(reply);
-    return WalkthroughReportSchema.parse(jsonObj);
+    const jsonObj = extractJsonObject(replyText);
+    const parsed = WalkthroughReportSchema.parse(jsonObj);
+
+    await audit?.logEvent(
+      "lens.session.completed",
+      `  ├─ ✓ Finished [peer-lens-walkthrough] in ${(durationMs / 1000).toFixed(1)}s (effort=${parsed.triage.reviewEffort}/5, risk=${parsed.triage.mergeRisk}, ${parsed.changes.length} files summarized)`,
+      {
+        title: "peer-lens-walkthrough",
+        sessionID,
+        durationMs,
+        assistantTurns,
+        replyChars: replyText.length,
+        reviewEffort: parsed.triage.reviewEffort,
+        mergeRisk: parsed.triage.mergeRisk,
+        changesCount: parsed.changes.length,
+      },
+    );
+
+    return parsed;
   }
 
   private async runFindingsLens(
@@ -878,10 +953,19 @@ export class OpenCodeMultiLensOrchestrator {
     lensPrompt: string,
     contextPrompt: string,
     source: FindingSource,
+    files: readonly string[],
+    audit?: AuditLogger,
   ): Promise<Finding[]> {
     const fullPrompt = `${lensPrompt}\n\n${contextPrompt}`;
-    const reply = await this.executeReadOnlyPrompt(client, repoRoot, title, fullPrompt);
-    const jsonObj = extractJsonObject(reply);
+    const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
+      client,
+      repoRoot,
+      title,
+      fullPrompt,
+      files,
+      audit,
+    );
+    const jsonObj = extractJsonObject(replyText);
     const parsed = LensFindingsOutputSchema.parse(jsonObj);
 
     const results: Finding[] = [];
@@ -894,7 +978,7 @@ export class OpenCodeMultiLensOrchestrator {
       const endLine = Math.max(item.startLine, item.endLine);
       results.push(
         FindingSchema.parse({
-          id: `${source}-${i + 1}`,
+          id: `${source}-${title.replace(/[^a-z0-9]+/gi, "-")}-${i + 1}`,
           filePath: item.filePath.replace(/\\/g, "/").replace(/^\.\//, ""),
           startLine,
           endLine,
@@ -910,6 +994,30 @@ export class OpenCodeMultiLensOrchestrator {
         }),
       );
     }
+
+    await audit?.logEvent(
+      "lens.session.completed",
+      `  ├─ ✓ Finished [${title}] in ${(durationMs / 1000).toFixed(1)}s (${results.length} finding(s), ${assistantTurns} turn(s))`,
+      {
+        title,
+        sessionID,
+        durationMs,
+        assistantTurns,
+        files,
+        findingsCount: results.length,
+        findings: results.map((f) => ({
+          id: f.id,
+          filePath: f.filePath,
+          startLine: f.startLine,
+          endLine: f.endLine,
+          severity: f.severity,
+          type: f.type,
+          title: f.title,
+          hasSuggestion: f.suggestion !== null,
+        })),
+      },
+    );
+
     return results;
   }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { AuditLogger } from "./audit.ts";
 import { isAllowedByPathFilters, loadRepoReviewConfig } from "./config.ts";
 import { filterCodeOnlyDiffMap, parseUnifiedDiff } from "./diff.ts";
 import {
@@ -210,6 +211,30 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     const pr = await githubClient.getPullRequest(owner, repo, prNumber);
     const checkpointStore = new CheckpointStore(repoRoot);
+    const modelSpec = parseModelSpec(parsed.values.model);
+
+    const auditLogger = new AuditLogger({
+      repoRoot,
+      prNumber: pr.number,
+      onProgress: (line) => writeOut(line),
+    });
+
+    await auditLogger.logEvent(
+      "run.started",
+      `▶ Stage 1/6: Resolved PR #${pr.number} (${owner}/${repo}: "${pr.title}") head=${pr.headSha.slice(0, 7)} base=${pr.baseSha.slice(0, 7)}`,
+      {
+        owner,
+        repo,
+        prNumber: pr.number,
+        title: pr.title,
+        headSha: pr.headSha,
+        baseSha: pr.baseSha,
+        model: `${modelSpec.providerID}/${modelSpec.id}`,
+        fresh,
+        localOnly,
+        postToGitHub,
+      },
+    );
 
     const bundle = await withInPlaceCheckout(
       {
@@ -252,6 +277,28 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
               )
             : codeOnlyDiffMap;
         const modifiedFiles = new Set(Object.keys(diffMap));
+        const excludedFiles = Object.keys(rawDiffMap).filter((fp) => !modifiedFiles.has(fp));
+
+        await auditLogger.logEvent(
+          "stage.checkout_and_diff",
+          `▶ Stage 2/6: Checked out ${pr.headSha.slice(0, 7)} (${modifiedFiles.size} Rust code files kept, ${excludedFiles.length} non-code/filtered files skipped, profile=${profile})`,
+          {
+            diffBaseSha,
+            headSha: pr.headSha,
+            isIncremental,
+            profile,
+            hasCodeRabbitYaml: repoConfig !== null,
+            pathInstructionCount: repoConfig?.pathInstructions.length ?? 0,
+            keptRustFiles: Array.from(modifiedFiles),
+            excludedNonCodeFiles: excludedFiles,
+          },
+        );
+
+        await auditLogger.logEvent(
+          "stage.rust_ground_truth.started",
+          `▶ Stage 3/6: Collecting local Rust ground truth (cargo metadata + cargo clippy + symbol call-site graph)...`,
+        );
+        const gtStartMs = Date.now();
 
         const [crateGraph, clippyDiagnostics, symbolGraph, learnings] = await Promise.all([
           collectCrateGraph(repoRoot),
@@ -259,6 +306,26 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           buildRustSymbolGraph(repoRoot, diffMap),
           learningStore.getMatchingLearnings(modifiedFiles),
         ]);
+
+        await auditLogger.logEvent(
+          "stage.rust_ground_truth.completed",
+          `  ├─ ✓ Rust ground truth ready in ${Date.now() - gtStartMs}ms (${Object.keys(crateGraph.crates).length} crate(s), ${clippyDiagnostics.length} Clippy diagnostic(s), ${symbolGraph.nodes.length} modified symbol(s) graphed, ${learnings.length} repo learning(s))`,
+          {
+            durationMs: Date.now() - gtStartMs,
+            crateCount: Object.keys(crateGraph.crates).length,
+            clippyCount: clippyDiagnostics.length,
+            clippyDiagnostics,
+            symbolGraphNodes: symbolGraph.nodes.map((n) => ({
+              name: n.name,
+              kind: n.kind,
+              filePath: n.filePath,
+              line: n.line,
+              prodRefs: n.prodReferences.length,
+              testRefs: n.testReferences.length,
+            })),
+            learningsCount: learnings.length,
+          },
+        );
 
         const reviewContext: ReviewContext = {
           repoRoot,
@@ -272,13 +339,22 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           symbolGraph,
           learnings,
           repoConfig,
+          auditLogger,
         };
+
+        await auditLogger.logEvent(
+          "stage.lenses.started",
+          `▶ Stage 4/6: Running OpenCode review lenses (model: ${modelSpec.providerID}/${modelSpec.id})...`,
+          {
+            model: `${modelSpec.providerID}/${modelSpec.id}`,
+          },
+        );
 
         const lensRunner: LensRunnerFn =
           deps.lensRunner ??
           (async (ctx) => {
             const orchestrator = new OpenCodeMultiLensOrchestrator({
-              model: parseModelSpec(parsed.values.model),
+              model: modelSpec,
             });
             return await orchestrator.runAllLenses(ctx);
           });
@@ -296,15 +372,29 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           profile,
         );
 
+        await auditLogger.logEvent(
+          "stage.judge.completed",
+          `▶ Stage 5/6: Judge partitioned ${rawLensFindings.length + clippyFindings.length} raw findings -> ${partitioned.inlineFindings.length} inline, ${partitioned.outsideDiffFindings.length} outside-diff, ${partitioned.nitpickFindings.length} nitpicks. Running cargo check on suggestions...`,
+          {
+            rawLensFindingsCount: rawLensFindings.length,
+            clippyFindingsCount: clippyFindings.length,
+            inlineCount: partitioned.inlineFindings.length,
+            outsideDiffCount: partitioned.outsideDiffFindings.length,
+            nitpickCount: partitioned.nitpickFindings.length,
+          },
+        );
+
         // Step 4: Transactional cargo check verification of single-hunk suggestions
         const verifier = new SuggestionCompilerVerifier();
         const verifiedInline = await verifier.verifySuggestions(
           repoRoot,
           partitioned.inlineFindings,
+          auditLogger,
         );
         const verifiedOutside = await verifier.verifySuggestions(
           repoRoot,
           partitioned.outsideDiffFindings,
+          auditLogger,
         );
 
         return ReviewBundleSchema.parse({
@@ -332,6 +422,19 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       reviewedAt: bundle.generatedAt,
       profile: bundle.profile,
     });
+
+    await auditLogger.logEvent(
+      "run.completed",
+      `▶ Stage 6/6: Review complete! Artifacts & audit log written to ${artifactDir}`,
+      {
+        artifactDir,
+        auditJsonlPath: auditLogger.getLatestAuditJsonlPath(),
+        runAuditJsonlPath: auditLogger.getRunAuditJsonlPath(),
+        inlineFindingsCount: bundle.findings.length,
+        outsideDiffFindingsCount: bundle.outsideDiffFindings.length,
+        nitpickFindingsCount: bundle.nitpickFindings.length,
+      },
+    );
 
     writeOut(formatTerminalReport(bundle, repoRoot, artifactDir));
 
