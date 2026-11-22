@@ -68,4 +68,25 @@ describe("Streaming JSONL AuditLogger and live CLI stage progress", () => {
     expect((parsedLines[1]?.data as Record<string, unknown>)?.findingsCount).toBe(3);
     expect(parsedLines[2]?.event).toBe("run.completed");
   });
+
+  test("F-05: concurrent logEvent calls on a fresh AuditLogger await shared initialization without ENOENT or truncated events", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "peer-audit-concurrent-"));
+    tempDirs.push(repo);
+
+    const logger = new AuditLogger({
+      repoRoot: repo,
+      prNumber: 99,
+      runId: "concurrent-run",
+    });
+
+    await Promise.all(
+      Array.from({ length: 12 }, (_, idx) =>
+        logger.logEvent(`event.${idx}`, `Concurrent event ${idx}`, { idx }),
+      ),
+    );
+
+    const latestAuditText = await Bun.file(logger.getLatestAuditJsonlPath()).text();
+    const lines = latestAuditText.trim().split("\n");
+    expect(lines.length).toBe(12);
+  });
 });

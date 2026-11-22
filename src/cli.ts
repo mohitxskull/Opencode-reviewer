@@ -8,7 +8,7 @@ import {
   detectRepoOwnerAndName,
   ensureCleanWorkingTree,
   runGitSync,
-  tryGitSync,
+  tryGitRawSync,
   withInPlaceCheckout,
 } from "./git.ts";
 import {
@@ -254,13 +254,16 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         });
 
         let diffText: string;
-        const localDiffAttempt = tryGitSync(repoRoot, [
+        const diffRangeSpec = isIncremental
+          ? `${diffBaseSha}..${pr.headSha}`
+          : `${diffBaseSha}...${pr.headSha}`;
+        const localDiffAttempt = tryGitRawSync(repoRoot, [
           "diff",
           "--no-color",
           "--unified=3",
-          `${diffBaseSha}..${pr.headSha}`,
+          diffRangeSpec,
         ]);
-        if (localDiffAttempt.ok && localDiffAttempt.stdout.length > 0) {
+        if (localDiffAttempt.ok && (isIncremental || localDiffAttempt.stdout.length > 0)) {
           diffText = localDiffAttempt.stdout;
         } else {
           diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);

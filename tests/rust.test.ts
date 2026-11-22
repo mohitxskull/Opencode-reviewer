@@ -103,5 +103,12 @@ describe("Task 04: Rust ground-truth collector (cargo metadata & clippy)", () =>
     expect(first?.startLine).toBe(2);
     expect(first?.level).toBe("warning");
     expect(first?.message.length).toBeGreaterThan(0);
+    // F-04: Column-scoped Clippy suggested_replacement must be spliced into the full line
+    // ("    return x + 1;" -> "    x + 1"), not emitted as a bare expression fragment ("x + 1")
+    expect(first?.suggestedReplacement).toBe("    x + 1");
+
+    // F-13: Empty modifiedFiles set must return 0 warnings instead of bypassing the filter
+    const emptyDiagnostics = await collectClippyDiagnostics(crateDir, new Set());
+    expect(emptyDiagnostics.filter((d) => d.level === "warning").length).toBe(0);
   });
 });

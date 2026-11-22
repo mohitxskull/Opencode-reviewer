@@ -63,6 +63,21 @@ export function tryGitSync(
   };
 }
 
+export function tryGitRawSync(
+  repoRoot: string,
+  args: readonly string[],
+): { ok: boolean; stdout: string } {
+  const proc = Bun.spawnSync(["git", ...args], {
+    cwd: repoRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return {
+    ok: proc.exitCode === 0,
+    stdout: proc.stdout.toString(),
+  };
+}
+
 export function parseGitHubOwnerRepo(remoteUrl: string): { owner: string; repo: string } {
   const trimmed = remoteUrl.trim().replace(/\/+$/, "");
 

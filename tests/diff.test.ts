@@ -98,4 +98,35 @@ describe("Task 04: Unified diff line mapper", () => {
     expect("docs/plan.md" in filtered).toBe(false);
     expect("src/lib.rs" in filtered).toBe(true);
   });
+
+  test("F-06: parseUnifiedDiff using parse-diff preserves hunk lines starting with '-- ' or '++ ' and unquotes C-escaped paths", () => {
+    const trickyDiff = [
+      'diff --git "a/src/dir with space/query.rs" "b/src/dir with space/query.rs"',
+      "index 1111111..2222222 100644",
+      '--- "a/src/dir with space/query.rs"',
+      '+++ "b/src/dir with space/query.rs"',
+      "@@ -1,3 +1,4 @@",
+      " pub fn build_sql() {",
+      "- -- old sql comment at column 0",
+      "+ ++ new_counter_prefix;",
+      "+    let q = 1;",
+      " }",
+      "",
+    ].join("\n");
+
+    const map = parseUnifiedDiff(trickyDiff);
+    const fileMap = map["src/dir with space/query.rs"];
+    expect(fileMap).toBeDefined();
+    expect(fileMap?.hunks.length).toBe(1);
+    const hunk = fileMap?.hunks[0];
+    expect(hunk?.newStart).toBe(1);
+    expect(hunk?.newEnd).toBe(4);
+    expect(hunk?.rightSideLines).toEqual([1, 2, 3, 4]);
+    expect(hunk?.annotatedLines).toEqual([
+      "L0001 ( ): pub fn build_sql() {",
+      "L0002 (+):  ++ new_counter_prefix;",
+      "L0003 (+):     let q = 1;",
+      "L0004 ( ): }",
+    ]);
+  });
 });

@@ -38,7 +38,7 @@ export class AuditLogger {
   public readonly runId: string;
   private readonly startTimeMs: number;
   private readonly onProgress?: (formattedLine: string) => void;
-  private initialized = false;
+  private initPromise: Promise<void> | null = null;
 
   constructor(options: AuditLoggerOptions) {
     this.repoRoot = options.repoRoot;
@@ -62,6 +62,17 @@ export class AuditLogger {
     return join(this.getReviewDir(), "runs", `run-${this.runId}.jsonl`);
   }
 
+  private ensureInitialized(): Promise<void> {
+    if (!this.initPromise) {
+      this.initPromise = (async () => {
+        await mkdir(join(this.getReviewDir(), "runs"), { recursive: true });
+        await writeFile(this.getLatestAuditJsonlPath(), "");
+        await writeFile(this.getRunAuditJsonlPath(), "");
+      })();
+    }
+    return this.initPromise;
+  }
+
   public async logEvent(
     event: string,
     message: string,
@@ -70,12 +81,7 @@ export class AuditLogger {
     const now = new Date();
     const elapsedMs = Date.now() - this.startTimeMs;
 
-    if (!this.initialized) {
-      this.initialized = true;
-      await mkdir(join(this.getReviewDir(), "runs"), { recursive: true });
-      await writeFile(this.getLatestAuditJsonlPath(), "");
-      await writeFile(this.getRunAuditJsonlPath(), "");
-    }
+    await this.ensureInitialized();
 
     const record: AuditEventRecord = {
       timestamp: now.toISOString(),

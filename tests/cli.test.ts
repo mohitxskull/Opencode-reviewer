@@ -284,4 +284,65 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     expect(stderrChunks.join("\n")).toContain("src/lib.rs");
     expect(runGit(repoDir, ["rev-parse", "HEAD"])).toBe(baseSha);
   });
+
+  test("F-03: runCli uses 3-dot merge-base diff so commits added to main after PR branched do not appear as reverted in PR diff", async () => {
+    const { repoDir, baseSha, prHeadSha } = await createTempRustGitRepo();
+
+    // Advance main by modifying an existing file (`Cargo.toml`) AFTER pr-42 branched off `baseSha`
+    await writeFile(
+      join(repoDir, "Cargo.toml"),
+      `[package]\nname = "sample_rust"\nversion = "0.2.0"\nedition = "2021"\n`,
+    );
+    runGit(repoDir, ["add", "Cargo.toml"]);
+    runGit(repoDir, ["commit", "-m", "chore(main): bump version on main after PR branched"]);
+    const advancedMainSha = runGit(repoDir, ["rev-parse", "HEAD"]);
+    expect(advancedMainSha).not.toBe(baseSha);
+
+    const mockFetch = async (input: string | URL | Request): Promise<Response> => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.endsWith("/pulls/42")) {
+        return new Response(
+          JSON.stringify({
+            number: 42,
+            title: "feat: double before add",
+            body: "Doubles input.",
+            user: { login: "alice" },
+            head: { ref: "pr-42", sha: prHeadSha },
+            // GitHub reports base.sha as the current tip of main (advancedMainSha)
+            base: { ref: "main", sha: advancedMainSha },
+            html_url: "https://github.com/tikv/sample-rust/pull/42",
+            updated_at: "2026-11-22T00:00:00Z",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected GitHub call: ${url}`);
+    };
+
+    let observedDiffFiles: string[] = [];
+    const exitCode = await runCli(["review", "42", "--local-only", "--repo", repoDir], {
+      githubClient: new GitHubClient({
+        token: "fake",
+        fetch: mockFetch as unknown as typeof fetch,
+      }),
+      stdout: () => {},
+      lensRunner: async (ctx) => {
+        observedDiffFiles = Object.keys(ctx.diffMap);
+        return {
+          walkthrough: {
+            summary: "Clean.",
+            changes: [],
+            sequenceDiagram: null,
+            triage: { reviewEffort: 1, mergeRisk: "Low", rationale: "Small" },
+          },
+          findings: [],
+        };
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    // Only src/lib.rs from pr-42 should be in diffMap, NOT src/unrelated_on_main.rs
+    expect(observedDiffFiles).toEqual(["src/lib.rs"]);
+  });
 });

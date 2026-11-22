@@ -1,3 +1,4 @@
+import parseDiff from "parse-diff";
 import type { DiffFileMap, DiffHunk } from "./models.ts";
 
 // Why: LLMs frequently miscount line numbers when reading raw `@@ -a,b +c,d @@`
@@ -43,120 +44,100 @@ export function filterCodeOnlyDiffMap(
   return filtered;
 }
 
+function normalizeGitDiffPath(rawPath: string | undefined): string | null {
+  if (!rawPath) {
+    return null;
+  }
+  let cleaned = rawPath.trim();
+  if (cleaned.startsWith('"') && cleaned.endsWith('"') && cleaned.length >= 2) {
+    try {
+      cleaned = JSON.parse(cleaned) as string;
+    } catch {
+      cleaned = cleaned.slice(1, -1);
+    }
+  }
+  if (cleaned === "/dev/null") {
+    return null;
+  }
+  if (cleaned.startsWith("b/") || cleaned.startsWith("a/")) {
+    cleaned = cleaned.slice(2);
+  }
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 export function parseUnifiedDiff(diffText: string): Record<string, DiffFileMap> {
   const result: Record<string, DiffFileMap> = {};
-  const lines = diffText.replace(/\r\n/g, "\n").split("\n");
+  if (!diffText || diffText.trim().length === 0) {
+    return result;
+  }
 
-  let currentFilePath: string | null = null;
-  let currentHunk: {
-    oldStart: number;
-    oldCount: number;
-    newStart: number;
-    newCursor: number;
-    header: string;
-    annotatedLines: string[];
-    rightSideLines: number[];
-  } | null = null;
-
-  const flushHunk = () => {
-    if (!currentFilePath || !currentHunk || currentHunk.rightSideLines.length === 0) {
-      currentHunk = null;
-      return;
+  const parsedFiles = parseDiff(diffText);
+  for (const file of parsedFiles) {
+    if (file.deleted) {
+      continue;
     }
-    const lastLine =
-      currentHunk.rightSideLines[currentHunk.rightSideLines.length - 1] ?? currentHunk.newStart;
-    const hunk: DiffHunk = {
-      oldStart: currentHunk.oldStart,
-      oldCount: currentHunk.oldCount,
-      newStart: currentHunk.newStart,
-      newEnd: lastLine,
-      header: currentHunk.header,
-      annotatedLines: currentHunk.annotatedLines,
-      rightSideLines: currentHunk.rightSideLines,
-    };
-    const existing = result[currentFilePath];
-    if (existing) {
-      existing.hunks.push(hunk);
-    } else {
-      result[currentFilePath] = {
-        filePath: currentFilePath,
-        hunks: [hunk],
-      };
-    }
-    currentHunk = null;
-  };
-
-  for (const line of lines) {
-    if (line.startsWith("diff --git ")) {
-      flushHunk();
-      currentFilePath = null;
+    const filePath = normalizeGitDiffPath(file.to);
+    if (!filePath) {
       continue;
     }
 
-    if (line.startsWith("--- ")) {
-      flushHunk();
-      continue;
+    const hunks: DiffHunk[] = [];
+    for (const chunk of file.chunks) {
+      if (chunk.newLines === 0 || chunk.newStart < 1) {
+        continue;
+      }
+      const annotatedLines: string[] = [];
+      const rightSideLines: number[] = [];
+
+      for (const change of chunk.changes) {
+        if (change.type === "add") {
+          if (change.content === "\\ No newline at end of file") {
+            continue;
+          }
+          const lineNo = change.ln;
+          const content = change.content.startsWith("+") ? change.content.slice(1) : change.content;
+          rightSideLines.push(lineNo);
+          annotatedLines.push(formatAnnotatedDiffLine(lineNo, "+", content));
+        } else if (change.type === "normal") {
+          if (change.content === "\\ No newline at end of file") {
+            continue;
+          }
+          const lineNo = change.ln2;
+          const content = change.content.startsWith(" ") ? change.content.slice(1) : change.content;
+          rightSideLines.push(lineNo);
+          annotatedLines.push(formatAnnotatedDiffLine(lineNo, " ", content));
+        }
+      }
+
+      if (rightSideLines.length === 0) {
+        continue;
+      }
+
+      const lastLine = rightSideLines[rightSideLines.length - 1] ?? chunk.newStart;
+      hunks.push({
+        oldStart: chunk.oldStart,
+        oldCount: chunk.oldLines,
+        newStart: chunk.newStart,
+        newEnd: lastLine,
+        header: chunk.content,
+        annotatedLines,
+        rightSideLines,
+      });
     }
 
-    if (line.startsWith("+++ ")) {
-      flushHunk();
-      const target = line.slice(4).trim();
-      if (target === "/dev/null") {
-        currentFilePath = null;
+    if (hunks.length > 0) {
+      const existing = result[filePath];
+      if (existing) {
+        existing.hunks.push(...hunks);
       } else {
-        currentFilePath = target.startsWith("b/") ? target.slice(2) : target;
+        result[filePath] = {
+          filePath,
+          hunks,
+        };
       }
-      continue;
-    }
-
-    const hunkHeaderMatch = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/.exec(line);
-    if (hunkHeaderMatch) {
-      flushHunk();
-      if (!currentFilePath) {
-        continue;
-      }
-      const oldStart = Number.parseInt(hunkHeaderMatch[1] ?? "0", 10);
-      const oldCount = Number.parseInt(hunkHeaderMatch[2] ?? "1", 10);
-      const newStart = Number.parseInt(hunkHeaderMatch[3] ?? "1", 10);
-      const newCount = Number.parseInt(hunkHeaderMatch[4] ?? "1", 10);
-      if (newCount === 0 || newStart < 1) {
-        currentHunk = null;
-        continue;
-      }
-      currentHunk = {
-        oldStart,
-        oldCount,
-        newStart,
-        newCursor: newStart,
-        header: line,
-        annotatedLines: [],
-        rightSideLines: [],
-      };
-      continue;
-    }
-
-    if (!currentHunk || !currentFilePath) {
-      continue;
-    }
-
-    if (line.startsWith("+")) {
-      const content = line.slice(1);
-      const lineNo = currentHunk.newCursor;
-      currentHunk.rightSideLines.push(lineNo);
-      currentHunk.annotatedLines.push(formatAnnotatedDiffLine(lineNo, "+", content));
-      currentHunk.newCursor += 1;
-    } else if (line.startsWith(" ")) {
-      const content = line.slice(1);
-      const lineNo = currentHunk.newCursor;
-      currentHunk.rightSideLines.push(lineNo);
-      currentHunk.annotatedLines.push(formatAnnotatedDiffLine(lineNo, " ", content));
-      currentHunk.newCursor += 1;
-    } else if (line.startsWith("-")) {
-      // Removed line exists only on LEFT side; does not advance right-side line cursor
     }
   }
 
-  flushHunk();
   return result;
 }
 

@@ -155,11 +155,20 @@ export function resolveFileArchitecturalLayer(
   return { crateName, layer };
 }
 
+interface RustcSpanText {
+  text: string;
+  highlight_start: number;
+  highlight_end: number;
+}
+
 interface RustcSpan {
   file_name: string;
   line_start: number;
   line_end: number;
+  column_start?: number;
+  column_end?: number;
   is_primary: boolean;
+  text?: RustcSpanText[];
   suggested_replacement?: string | null;
   suggestion_applicability?: string | null;
 }
@@ -178,30 +187,102 @@ interface CargoJsonLine {
   message?: RustcCompilerMessage;
 }
 
+function spliceSpanReplacementIntoFullLine(span: RustcSpan): string | null {
+  if (typeof span.suggested_replacement !== "string" || span.line_start !== span.line_end) {
+    return null;
+  }
+  if (
+    span.suggestion_applicability &&
+    span.suggestion_applicability !== "MachineApplicable" &&
+    span.suggestion_applicability !== "MaybeIncorrect"
+  ) {
+    return null;
+  }
+
+  const lineEntry = span.text?.[0];
+  const colStart = span.column_start ?? lineEntry?.highlight_start;
+  const colEnd = span.column_end ?? lineEntry?.highlight_end;
+
+  if (
+    lineEntry &&
+    typeof lineEntry.text === "string" &&
+    typeof colStart === "number" &&
+    typeof colEnd === "number" &&
+    colStart >= 1 &&
+    colEnd >= colStart
+  ) {
+    const chars = Array.from(lineEntry.text);
+    if (colEnd - 1 <= chars.length) {
+      const prefix = chars.slice(0, colStart - 1).join("");
+      const suffix = chars.slice(colEnd - 1).join("");
+      const spliced = `${prefix}${span.suggested_replacement}${suffix}`;
+      return spliced.trim().length > 0 ? spliced : null;
+    }
+  }
+
+  return span.suggested_replacement.trim().length > 0 ? span.suggested_replacement : null;
+}
+
 function findSuggestedReplacement(msg: RustcCompilerMessage): string | null {
-  for (const span of msg.spans ?? []) {
-    if (
-      typeof span.suggested_replacement === "string" &&
-      span.suggested_replacement.trim().length > 0 &&
-      span.line_start === span.line_end
-    ) {
-      return span.suggested_replacement;
+  const candidates: Array<{ span: RustcSpan; spliced: string }> = [];
+  const collect = (node: RustcCompilerMessage) => {
+    for (const span of node.spans ?? []) {
+      const spliced = spliceSpanReplacementIntoFullLine(span);
+      if (spliced !== null) {
+        candidates.push({ span, spliced });
+      }
     }
-  }
-  for (const child of msg.children ?? []) {
-    const childSuggestion = findSuggestedReplacement(child);
-    if (childSuggestion !== null) {
-      return childSuggestion;
+    for (const child of node.children ?? []) {
+      collect(child);
     }
+  };
+  collect(msg);
+
+  if (candidates.length === 0) {
+    return null;
   }
-  return null;
+
+  // Group multi-span replacements on the same line (e.g. clippy::needless_return emits
+  // one span replacing `return x + 1` with `x + 1` and a second span deleting `;`)
+  const firstLine = candidates[0]?.span.line_start;
+  const sameLineSpans = candidates
+    .map((c) => c.span)
+    .filter(
+      (s) =>
+        s.line_start === firstLine &&
+        typeof s.column_start === "number" &&
+        typeof s.column_end === "number",
+    );
+
+  const lineText = sameLineSpans[0]?.text?.[0]?.text;
+  if (sameLineSpans.length > 1 && typeof lineText === "string") {
+    const sortedDesc = [...sameLineSpans].sort(
+      (a, b) => (b.column_start ?? 0) - (a.column_start ?? 0),
+    );
+    let chars = Array.from(lineText);
+    for (const span of sortedDesc) {
+      const cStart = (span.column_start ?? 1) - 1;
+      const cEnd = (span.column_end ?? 1) - 1;
+      if (cStart >= 0 && cEnd >= cStart && cEnd <= chars.length) {
+        chars = [
+          ...chars.slice(0, cStart),
+          ...Array.from(span.suggested_replacement ?? ""),
+          ...chars.slice(cEnd),
+        ];
+      }
+    }
+    const combined = chars.join("");
+    return combined.trim().length > 0 ? combined : null;
+  }
+
+  return candidates[0]?.spliced ?? null;
 }
 
 export async function collectClippyDiagnostics(
   repoRoot: string,
   modifiedFiles: ReadonlySet<string>,
 ): Promise<ClippyDiagnostic[]> {
-  const proc = Bun.spawnSync(
+  const proc = Bun.spawn(
     ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json"],
     {
       cwd: repoRoot,
@@ -210,7 +291,13 @@ export async function collectClippyDiagnostics(
     },
   );
 
-  const lines = proc.stdout.toString().split("\n");
+  const [stdoutText] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+
+  const lines = stdoutText.split("\n");
   const diagnostics: ClippyDiagnostic[] = [];
   const seenKeys = new Set<string>();
 
@@ -242,7 +329,7 @@ export async function collectClippyDiagnostics(
     const normalizedPath = primarySpan.file_name.replace(/\\/g, "/").replace(/^\.\//, "");
 
     // Keep all workspace errors, and warnings that touch modified files
-    if (msg.level === "warning" && modifiedFiles.size > 0 && !modifiedFiles.has(normalizedPath)) {
+    if (msg.level === "warning" && !modifiedFiles.has(normalizedPath)) {
       continue;
     }
 
