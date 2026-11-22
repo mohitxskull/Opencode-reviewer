@@ -126,9 +126,10 @@ export interface ReviewContext {
 // - Tier 2 (Secondary / Test / Mechanical files): ONLY the file path, crate layer,
 //   valid right-side hunk line ranges, and modified symbol names are listed so the
 //   agent can request a specific file via `read` only if needed.
-export const DEFAULT_MAX_INLINE_DIFF_CHARS = 18_000;
-export const DEFAULT_MAX_TIER1_FILES = 6;
-export const MAX_HUNK_LINES_BEFORE_COMPACT = 40;
+export const DEFAULT_MAX_INLINE_DIFF_CHARS = 22_000;
+export const DEFAULT_MAX_TIER1_FILES = 7;
+export const MAX_HUNK_LINES_BEFORE_COMPACT = 32;
+export const MAX_CHARS_PER_FILE_DIFF = 5_500;
 
 const HIGH_RISK_RUST_TOKEN_REGEX =
   /\b(?:unsafe|await|Mutex|RwLock|parking_lot|select!|unwrap|expect|panic!|transmute|from_raw|into_raw|Send|Sync)\b/;
@@ -143,8 +144,12 @@ export function scoreFileReviewPriority(
     layer >= testLayer ||
     fileMap.filePath.includes("/tests/") ||
     fileMap.filePath.startsWith("tests/") ||
+    fileMap.filePath.startsWith("benches/") ||
     fileMap.filePath.includes("/benches/") ||
-    fileMap.filePath.endsWith("_test.rs");
+    fileMap.filePath.endsWith("_test.rs") ||
+    fileMap.filePath.endsWith("_tests.rs") ||
+    fileMap.filePath.endsWith("/tests.rs") ||
+    fileMap.filePath === "tests.rs";
 
   let score = isTestOrBench ? 0 : 100 - Math.min(layer * 5, 30);
   if (fileMap.filePath.endsWith("Cargo.toml")) {
@@ -319,13 +324,22 @@ export function buildReviewContextPrompt(
       continue;
     }
 
-    const hunkTexts = entry.fileMap.hunks.map((hunk) => {
+    const hunkTexts: string[] = [];
+    let fileChars = 0;
+    for (const hunk of entry.fileMap.hunks) {
       const lines = compactAnnotatedLines(hunk.annotatedLines);
-      return (
+      const hunkStr =
         `${hunk.header} (right-side valid range: ${hunk.newStart}..${hunk.newEnd})\n` +
-        lines.join("\n")
-      );
-    });
+        lines.join("\n");
+      if (fileChars + hunkStr.length > MAX_CHARS_PER_FILE_DIFF && hunkTexts.length > 0) {
+        hunkTexts.push(
+          `... (${entry.fileMap.hunks.length - hunkTexts.length} more hunk(s) in \`${entry.filePath}\`; valid ranges: ${entry.fileMap.hunks.map((h) => `${h.newStart}..${h.newEnd}`).join(", ")})`,
+        );
+        break;
+      }
+      hunkTexts.push(hunkStr);
+      fileChars += hunkStr.length;
+    }
     const block =
       `### File: \`${entry.filePath}\` (Layer ${entry.layer}, crate \`${entry.crateName}\`)\n` +
       `\`\`\`diff\n${hunkTexts.join("\n\n")}\n\`\`\``;
@@ -344,10 +358,14 @@ export function buildReviewContextPrompt(
     if (tier1Paths.has(entry.filePath) || !entry.fileMap) {
       continue;
     }
-    const ranges = entry.fileMap.hunks.map((h) => `${h.newStart}..${h.newEnd}`).join(", ");
+    const allRanges = entry.fileMap.hunks.map((h) => `${h.newStart}..${h.newEnd}`);
+    const ranges =
+      allRanges.length > 4
+        ? `${allRanges.slice(0, 4).join(", ")} (+${allRanges.length - 4} more)`
+        : allRanges.join(", ");
     const symLabel =
       entry.symbols.length > 0
-        ? ` | modified symbols: ${entry.symbols.slice(0, 6).join(", ")}`
+        ? ` | modified symbols: ${entry.symbols.slice(0, 4).join(", ")}`
         : "";
     tier2Lines.push(
       `- \`${entry.filePath}\` (Layer ${entry.layer}, crate \`${entry.crateName}\`, +${entry.addedLinesCount} lines, valid hunks: ${ranges}${symLabel})`,
@@ -421,7 +439,7 @@ export function groupDiffFilesIntoCohorts(
   crateGraph: CrateGraph,
   maxFilesPerCohort = 7,
   maxCharsPerCohort = 26_000,
-  maxCohorts = 6,
+  maxCohorts = 8,
 ): FileCohort[] {
   const allPaths = Object.keys(diffMap);
   if (allPaths.length === 0) {
@@ -436,12 +454,13 @@ export function groupDiffFilesIntoCohorts(
       const priority = fileMap
         ? scoreFileReviewPriority(fileMap, layerInfo.layer, crateGraph.testLayer, clippyEmpty)
         : { score: 0, isTestOrBench: true, addedLinesCount: 0, riskSignals: [] };
-      const approxChars = fileMap
+      const rawCompactedChars = fileMap
         ? fileMap.hunks.reduce(
             (acc, h) => acc + compactAnnotatedLines(h.annotatedLines).join("\n").length,
             0,
           )
         : 0;
+      const approxChars = Math.min(rawCompactedChars, MAX_CHARS_PER_FILE_DIFF);
       return {
         filePath,
         groupKey: getSubsystemGroupKey(filePath),
@@ -463,44 +482,42 @@ export function groupDiffFilesIntoCohorts(
   const prodFiles = scored.filter((f) => !f.isTestOrBench);
   const targetFiles = prodFiles.length > 0 ? prodFiles : scored;
 
-  const effectiveMaxFiles = Math.max(maxFilesPerCohort, Math.ceil(targetFiles.length / maxCohorts));
+  if (targetFiles.length <= maxFilesPerCohort) {
+    return [
+      {
+        id: "cohort-1",
+        label: targetFiles[0]?.groupKey ?? "all",
+        filePaths: targetFiles.map((f) => f.filePath),
+      },
+    ];
+  }
+
+  // Divide targetFiles into at most `maxCohorts` balanced contiguous slices by subsystem order
+  const cohortCount = Math.min(maxCohorts, Math.ceil(targetFiles.length / maxFilesPerCohort));
+  const baseSize = Math.floor(targetFiles.length / cohortCount);
+  const remainder = targetFiles.length % cohortCount;
 
   const cohorts: FileCohort[] = [];
-  let currentPaths: string[] = [];
-  let currentGroups = new Set<string>();
-  let currentChars = 0;
-
-  const flushCohort = () => {
-    if (currentPaths.length === 0) {
-      return;
+  let cursor = 0;
+  for (let idx = 0; idx < cohortCount; idx++) {
+    const size = baseSize + (idx < remainder ? 1 : 0);
+    const slice = targetFiles.slice(cursor, cursor + size);
+    cursor += size;
+    if (slice.length === 0) {
+      continue;
     }
-    const idx = cohorts.length + 1;
-    const label = Array.from(currentGroups).slice(0, 2).join("+") || `batch-${idx}`;
+    const groups = Array.from(new Set(slice.map((s) => s.groupKey)));
+    const label =
+      groups.length <= 2 ? groups.join("+") : `${groups[0]}+${groups[1]}+${groups.length - 2}more`;
     cohorts.push({
-      id: `cohort-${idx}`,
+      id: `cohort-${idx + 1}`,
       label,
-      filePaths: currentPaths,
+      filePaths: slice.map((s) => s.filePath),
     });
-    currentPaths = [];
-    currentGroups = new Set<string>();
-    currentChars = 0;
-  };
-
-  for (const item of targetFiles) {
-    const canStartNewCohort = cohorts.length + 1 < maxCohorts;
-    const exceedsFiles = currentPaths.length >= effectiveMaxFiles;
-    const exceedsChars =
-      currentPaths.length > 0 && currentChars + item.approxChars > maxCharsPerCohort;
-
-    if (canStartNewCohort && (exceedsFiles || exceedsChars)) {
-      flushCohort();
-    }
-    currentPaths.push(item.filePath);
-    currentGroups.add(item.groupKey);
-    currentChars += Math.min(item.approxChars, maxCharsPerCohort);
   }
-  flushCohort();
 
+  // Suppress unused warning on maxCharsPerCohort parameter kept for signature compatibility
+  void maxCharsPerCohort;
   return cohorts;
 }
 
@@ -787,7 +804,7 @@ export class OpenCodeMultiLensOrchestrator {
     );
 
     const cohortFindings: Finding[] = [];
-    const concurrencyLimit = 6;
+    const concurrencyLimit = 4;
 
     for (let i = 0; i < cohorts.length; i += concurrencyLimit) {
       const batch = cohorts.slice(i, i + concurrencyLimit);
@@ -824,19 +841,33 @@ export class OpenCodeMultiLensOrchestrator {
 
           const cohortPrompt = buildReviewContextPrompt(
             cohortContext,
-            28_000,
+            32_000,
             cohort.filePaths.length,
           );
-          return await this.runFindingsLens(
-            client,
-            context.repoRoot,
-            `peer-${cohort.id} (${cohortOrdinal}/${cohorts.length}: ${cohort.label})`,
-            COHORT_DEEP_AUDIT_PROMPT,
-            cohortPrompt,
-            "soundness",
-            cohort.filePaths,
-            audit,
-          );
+          const title = `peer-${cohort.id} (${cohortOrdinal}/${cohorts.length}: ${cohort.label})`;
+          try {
+            return await this.runFindingsLens(
+              client,
+              context.repoRoot,
+              title,
+              COHORT_DEEP_AUDIT_PROMPT,
+              cohortPrompt,
+              "soundness",
+              cohort.filePaths,
+              audit,
+            );
+          } catch (err) {
+            await audit?.logEvent(
+              "lens.session.failed",
+              `  ├─ ⚠ Cohort [${title}] failed after retries: ${err instanceof Error ? err.message : String(err)}`,
+              {
+                title,
+                files: cohort.filePaths,
+                error: err instanceof Error ? err.message : String(err),
+              },
+            );
+            return [];
+          }
         }),
       );
 
@@ -968,71 +999,91 @@ export class OpenCodeMultiLensOrchestrator {
     audit?: AuditLogger,
   ): Promise<Finding[]> {
     const fullPrompt = `${lensPrompt}\n\n${contextPrompt}`;
-    const permissions = title.startsWith("peer-cohort-")
-      ? SINGLE_TURN_NO_TOOLS_PERMISSIONS
-      : READONLY_SESSION_PERMISSIONS;
-    const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
-      client,
-      repoRoot,
-      title,
-      fullPrompt,
-      files,
-      audit,
-      permissions,
-    );
-    const jsonObj = extractJsonObject(replyText);
-    const parsed = LensFindingsOutputSchema.parse(jsonObj);
+    let lastError: unknown = null;
 
-    const results: Finding[] = [];
-    for (let i = 0; i < parsed.findings.length; i++) {
-      const item = parsed.findings[i];
-      if (!item) {
-        continue;
-      }
-      const startLine = Math.min(item.startLine, item.endLine);
-      const endLine = Math.max(item.startLine, item.endLine);
-      results.push(
-        FindingSchema.parse({
-          id: `${source}-${title.replace(/[^a-z0-9]+/gi, "-")}-${i + 1}`,
-          filePath: item.filePath.replace(/\\/g, "/").replace(/^\.\//, ""),
-          startLine,
-          endLine,
-          severity: item.severity,
-          type: item.type,
-          title: item.title,
-          body: item.body,
-          suggestion: item.suggestion,
-          suggestionVerified: false,
-          agentPrompt: item.agentPrompt,
-          confidence: item.confidence,
-          source,
-        }),
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
+        client,
+        repoRoot,
+        title,
+        fullPrompt,
+        files,
+        audit,
+        READONLY_SESSION_PERMISSIONS,
       );
+
+      try {
+        const jsonObj = extractJsonObject(replyText);
+        const parsed = LensFindingsOutputSchema.parse(jsonObj);
+
+        const results: Finding[] = [];
+        for (let i = 0; i < parsed.findings.length; i++) {
+          const item = parsed.findings[i];
+          if (!item) {
+            continue;
+          }
+          const startLine = Math.min(item.startLine, item.endLine);
+          const endLine = Math.max(item.startLine, item.endLine);
+          results.push(
+            FindingSchema.parse({
+              id: `${source}-${title.replace(/[^a-z0-9]+/gi, "-")}-${i + 1}`,
+              filePath: item.filePath.replace(/\\/g, "/").replace(/^\.\//, ""),
+              startLine,
+              endLine,
+              severity: item.severity,
+              type: item.type,
+              title: item.title,
+              body: item.body,
+              suggestion: item.suggestion,
+              suggestionVerified: false,
+              agentPrompt: item.agentPrompt,
+              confidence: item.confidence,
+              source,
+            }),
+          );
+        }
+
+        await audit?.logEvent(
+          "lens.session.completed",
+          `  ├─ ✓ Finished [${title}] in ${(durationMs / 1000).toFixed(1)}s (${results.length} finding(s), ${assistantTurns} turn(s))`,
+          {
+            title,
+            sessionID,
+            durationMs,
+            assistantTurns,
+            files,
+            findingsCount: results.length,
+            findings: results.map((f) => ({
+              id: f.id,
+              filePath: f.filePath,
+              startLine: f.startLine,
+              endLine: f.endLine,
+              severity: f.severity,
+              type: f.type,
+              title: f.title,
+              hasSuggestion: f.suggestion !== null,
+            })),
+          },
+        );
+
+        return results;
+      } catch (err) {
+        lastError = err;
+        if (attempt < 2) {
+          await audit?.logEvent(
+            "lens.session.retry",
+            `  ├─ ⟳ Retrying [${title}] after empty/unparseable response (attempt 2/2)...`,
+            {
+              title,
+              sessionID,
+              replyPreview: replyText.slice(0, 200),
+              error: err instanceof Error ? err.message : String(err),
+            },
+          );
+        }
+      }
     }
 
-    await audit?.logEvent(
-      "lens.session.completed",
-      `  ├─ ✓ Finished [${title}] in ${(durationMs / 1000).toFixed(1)}s (${results.length} finding(s), ${assistantTurns} turn(s))`,
-      {
-        title,
-        sessionID,
-        durationMs,
-        assistantTurns,
-        files,
-        findingsCount: results.length,
-        findings: results.map((f) => ({
-          id: f.id,
-          filePath: f.filePath,
-          startLine: f.startLine,
-          endLine: f.endLine,
-          severity: f.severity,
-          type: f.type,
-          title: f.title,
-          hasSuggestion: f.suggestion !== null,
-        })),
-      },
-    );
-
-    return results;
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 }
