@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  clippyToFindings,
-  deduplicateAndFilterFindings,
-  partitionAndFilterFindings,
-} from "../src/judge.ts";
+import { clippyToFindings, partitionAndFilterFindings } from "../src/judge.ts";
 import type { ClippyDiagnostic, DiffFileMap, Finding } from "../src/models.ts";
 
 const SAMPLE_DIFF_MAP: Record<string, DiffFileMap> = {
@@ -57,11 +53,11 @@ describe("Task 06: Judge deduplication and profile filtering", () => {
       source: "soundness",
     };
 
-    const merged = deduplicateAndFilterFindings(
+    const merged = partitionAndFilterFindings(
       [...clippyFindings, lensFinding],
       SAMPLE_DIFF_MAP,
       "chill",
-    );
+    ).inlineFindings;
 
     expect(merged.length).toBe(1);
     expect(merged[0]?.severity).toBe("Major");
@@ -122,13 +118,21 @@ describe("Task 06: Judge deduplication and profile filtering", () => {
       },
     ];
 
-    const chillResult = deduplicateAndFilterFindings(findings, SAMPLE_DIFF_MAP, "chill");
+    const chillResult = partitionAndFilterFindings(
+      findings,
+      SAMPLE_DIFF_MAP,
+      "chill",
+    ).inlineFindings;
     expect(chillResult.length).toBe(1);
     expect(chillResult[0]?.id).toBe("f-snapped");
     expect(chillResult[0]?.startLine).toBe(10);
     expect(chillResult[0]?.endLine).toBe(12);
 
-    const assertiveResult = deduplicateAndFilterFindings(findings, SAMPLE_DIFF_MAP, "assertive");
+    const assertiveResult = partitionAndFilterFindings(
+      findings,
+      SAMPLE_DIFF_MAP,
+      "assertive",
+    ).inlineFindings;
     expect(assertiveResult.length).toBe(2);
     expect(assertiveResult.map((f) => f.id)).toEqual(["f-snapped", "f-trivial"]);
   });

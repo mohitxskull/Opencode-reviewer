@@ -99,6 +99,10 @@ describe("Task 03: GitHub client and auth resolver", () => {
     expect(() =>
       parsePrTarget("https://github.com/pingcap/tikv/issues/123", "tikv", "tikv"),
     ).toThrow();
+    // F-16: Reject trailing garbage in PR URL path segment
+    expect(() =>
+      parsePrTarget("https://github.com/pingcap/tikv/pull/42abc", "tikv", "tikv"),
+    ).toThrow();
   });
 
   test("upsertWalkthroughComment updates existing marker comment instead of duplicating", async () => {

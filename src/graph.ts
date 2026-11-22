@@ -53,24 +53,31 @@ const RUST_SYMBOL_DECL_REGEX =
 
 const ANNOTATED_LINE_REGEX = /^L(\d+)\s+\([+ ]\):\s*(.*)$/;
 
+function symbolKey(filePath: string, name: string): string {
+  return `${filePath}::${name}`;
+}
+
 export function extractSymbolsFromFileMap(fileMap: DiffFileMap): ModifiedRustSymbol[] {
   const results: ModifiedRustSymbol[] = [];
   const seen = new Set<string>();
 
   for (const hunk of fileMap.hunks) {
     // 1. Check hunk header context: @@ -a,b +c,d @@ pub fn enclosing_fn(...)
-    const headerMatch = RUST_SYMBOL_DECL_REGEX.exec(hunk.header);
-    if (headerMatch?.[1] && headerMatch[2]) {
-      const kind = headerMatch[1] as RustSymbolKind;
-      const name = headerMatch[2];
-      if (!IGNORED_COMMON_RUST_NAMES.has(name) && name.length >= 4 && !seen.has(name)) {
-        seen.add(name);
-        results.push({
-          name,
-          kind,
-          filePath: fileMap.filePath,
-          line: hunk.newStart,
-        });
+    const headerContext = hunk.header.replace(/^@@[^@]+@@\s*/, "").trim();
+    if (!headerContext.startsWith("//")) {
+      const headerMatch = RUST_SYMBOL_DECL_REGEX.exec(headerContext);
+      if (headerMatch?.[1] && headerMatch[2]) {
+        const kind = headerMatch[1] as RustSymbolKind;
+        const name = headerMatch[2];
+        if (!IGNORED_COMMON_RUST_NAMES.has(name) && name.length >= 4 && !seen.has(name)) {
+          seen.add(name);
+          results.push({
+            name,
+            kind,
+            filePath: fileMap.filePath,
+            line: hunk.newStart,
+          });
+        }
       }
     }
 
@@ -78,7 +85,10 @@ export function extractSymbolsFromFileMap(fileMap: DiffFileMap): ModifiedRustSym
     for (const rawLine of hunk.annotatedLines) {
       const lineMatch = ANNOTATED_LINE_REGEX.exec(rawLine);
       const lineNo = lineMatch?.[1] ? Number.parseInt(lineMatch[1], 10) : hunk.newStart;
-      const code = lineMatch?.[2] ?? rawLine;
+      const code = (lineMatch?.[2] ?? rawLine).trim();
+      if (code.startsWith("//") || code.startsWith("/*") || code.startsWith("*")) {
+        continue;
+      }
 
       const symMatch = RUST_SYMBOL_DECL_REGEX.exec(code);
       if (symMatch?.[1] && symMatch[2]) {
@@ -112,7 +122,7 @@ export function extractModifiedRustSymbols(
       continue;
     }
     for (const sym of extractSymbolsFromFileMap(fileMap)) {
-      const key = `${sym.name}`;
+      const key = symbolKey(sym.filePath, sym.name);
       if (seenGlobal.has(key)) {
         continue;
       }
@@ -154,30 +164,40 @@ export async function buildRustSymbolGraph(
     return { nodes: [] };
   }
 
+  const uniqueNames = Array.from(new Set(symbols.map((s) => s.name)));
   const patternArgs: string[] = [];
-  for (const sym of symbols) {
-    patternArgs.push("-e", sym.name);
+  for (const name of uniqueNames) {
+    patternArgs.push("-e", name);
   }
 
-  const proc = Bun.spawnSync(
-    ["git", "grep", "-n", "-w", "--no-color", ...patternArgs, "--", "*.rs"],
-    {
-      cwd: repoRoot,
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+  const proc = Bun.spawn(["git", "grep", "-n", "-w", "--no-color", ...patternArgs, "--", "*.rs"], {
+    cwd: repoRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 
-  const prodBySymbol = new Map<string, SymbolReferenceLocation[]>();
-  const testBySymbol = new Map<string, SymbolReferenceLocation[]>();
-  for (const sym of symbols) {
-    prodBySymbol.set(sym.name, []);
-    testBySymbol.set(sym.name, []);
+  const [stdoutText, , exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+
+  const prodByKey = new Map<string, SymbolReferenceLocation[]>();
+  const testByKey = new Map<string, SymbolReferenceLocation[]>();
+  const compiledBySymbol = symbols.map((sym) => ({
+    sym,
+    key: symbolKey(sym.filePath, sym.name),
+    wordRegex: new RegExp(`\\b${sym.name}\\b`),
+    declRegex: new RegExp(`\\b(?:fn|struct|enum|trait)\\s+${sym.name}\\b`),
+  }));
+
+  for (const entry of compiledBySymbol) {
+    prodByKey.set(entry.key, []);
+    testByKey.set(entry.key, []);
   }
 
-  if (proc.exitCode === 0) {
-    const output = proc.stdout.toString();
-    for (const rawLine of output.split("\n")) {
+  if (exitCode === 0) {
+    for (const rawLine of stdoutText.split("\n")) {
       if (!rawLine) {
         continue;
       }
@@ -197,19 +217,14 @@ export async function buildRustSymbolGraph(
         continue;
       }
 
-      for (const sym of symbols) {
-        // Skip the defining line itself
+      for (const { sym, key, wordRegex, declRegex } of compiledBySymbol) {
         if (filePath === sym.filePath && Math.abs(lineNo - sym.line) <= 1) {
           continue;
         }
-        // Ignore pure declaration lines matching the same symbol name
-        if (
-          new RegExp(`\\b(?:fn|struct|enum|trait)\\s+${sym.name}\\b`).test(snippet) &&
-          filePath === sym.filePath
-        ) {
+        if (filePath === sym.filePath && declRegex.test(snippet)) {
           continue;
         }
-        if (!new RegExp(`\\b${sym.name}\\b`).test(snippet)) {
+        if (!wordRegex.test(snippet)) {
           continue;
         }
 
@@ -219,18 +234,18 @@ export async function buildRustSymbolGraph(
           snippet: snippet.slice(0, 100),
         };
         if (isTestPath(filePath)) {
-          testBySymbol.get(sym.name)?.push(ref);
+          testByKey.get(key)?.push(ref);
         } else {
-          prodBySymbol.get(sym.name)?.push(ref);
+          prodByKey.get(key)?.push(ref);
         }
       }
     }
   }
 
-  const nodes: RustSymbolGraphNode[] = symbols.map((sym) => ({
+  const nodes: RustSymbolGraphNode[] = compiledBySymbol.map(({ sym, key }) => ({
     ...sym,
-    prodReferences: prodBySymbol.get(sym.name) ?? [],
-    testReferences: testBySymbol.get(sym.name) ?? [],
+    prodReferences: prodByKey.get(key) ?? [],
+    testReferences: testByKey.get(key) ?? [],
   }));
 
   return { nodes };

@@ -192,11 +192,3 @@ export function partitionAndFilterFindings(
     nitpickFindings,
   };
 }
-
-export function deduplicateAndFilterFindings(
-  findings: readonly Finding[],
-  diffMap: Readonly<Record<string, DiffFileMap>>,
-  profile: ReviewProfile,
-): Finding[] {
-  return partitionAndFilterFindings(findings, diffMap, profile).inlineFindings;
-}

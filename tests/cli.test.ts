@@ -345,4 +345,58 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     // Only src/lib.rs from pr-42 should be in diffMap, NOT src/unrelated_on_main.rs
     expect(observedDiffFiles).toEqual(["src/lib.rs"]);
   });
+
+  test("F-15 & F-16: runCli supports 'peer learn add/list/remove' subcommands and rejects conflicting --post --local-only flags", async () => {
+    const { repoDir } = await createTempRustGitRepo();
+
+    const out: string[] = [];
+    const err: string[] = [];
+
+    // 1. Conflicting --post and --local-only flags
+    const conflictCode = await runCli(
+      ["review", "42", "--post", "--local-only", "--repo", repoDir],
+      {
+        stdout: (t) => out.push(t),
+        stderr: (t) => err.push(t),
+      },
+    );
+    expect(conflictCode).toBe(1);
+    expect(err.join("\n")).toContain("Cannot combine --post and --local-only");
+
+    // 2. peer learn add -> list -> remove
+    out.length = 0;
+    const addCode = await runCli(
+      [
+        "learn",
+        "add",
+        "Prefer parking_lot::Mutex in OMS",
+        "--scope",
+        "src/oms/**",
+        "--repo",
+        repoDir,
+      ],
+      { stdout: (t) => out.push(t), stderr: (t) => err.push(t) },
+    );
+    expect(addCode).toBe(0);
+    const addedLine = out.join("\n");
+    expect(addedLine).toContain("Added learning [");
+
+    out.length = 0;
+    const listCode = await runCli(["learn", "list", "--repo", repoDir], {
+      stdout: (t) => out.push(t),
+    });
+    expect(listCode).toBe(0);
+    const listedText = out.join("\n");
+    expect(listedText).toContain("Prefer parking_lot::Mutex in OMS");
+    const idMatch = /^\[([a-f0-9]+)\]/.exec(listedText.trim());
+    const id = idMatch?.[1] ?? "";
+    expect(id.length).toBeGreaterThan(0);
+
+    out.length = 0;
+    const rmCode = await runCli(["learn", "remove", id, "--repo", repoDir], {
+      stdout: (t) => out.push(t),
+    });
+    expect(rmCode).toBe(0);
+    expect(out.join("\n")).toContain(`Removed learning [${id}]`);
+  });
 });

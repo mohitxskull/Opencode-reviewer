@@ -127,4 +127,30 @@ describe("Rust symbol and call-site code graph", () => {
     expect(summary).toContain("clear_funding_sync");
     expect(summary).toContain("0 production callers/refs outside definition");
   });
+
+  test("F-13: extractModifiedRustSymbols ignores commented-out fn declarations and keys symbols by filePath::name across files", () => {
+    const diff = [
+      "diff --git a/src/a.rs b/src/a.rs",
+      "--- a/src/a.rs",
+      "+++ b/src/a.rs",
+      "@@ -1,1 +1,3 @@",
+      " // header",
+      "+// pub fn fake_commented_function() {}",
+      "+pub fn validate_order() {}",
+      "diff --git a/src/b.rs b/src/b.rs",
+      "--- a/src/b.rs",
+      "+++ b/src/b.rs",
+      "@@ -1,1 +1,2 @@",
+      " // header",
+      "+pub fn validate_order() {}",
+      "",
+    ].join("\n");
+
+    const diffMap = parseUnifiedDiff(diff);
+    const symbols = extractModifiedRustSymbols(diffMap);
+    expect(symbols.map((s) => `${s.filePath}::${s.name}`)).toEqual([
+      "src/a.rs::validate_order",
+      "src/b.rs::validate_order",
+    ]);
+  });
 });

@@ -1,5 +1,7 @@
 import { Octokit } from "@octokit/rest";
 import {
+  type DiffFileMap,
+  isValidInlineRange,
   PEER_REVIEW_MARKER,
   type PullRequestMetadata,
   PullRequestMetadataSchema,
@@ -75,8 +77,15 @@ export function parsePrTarget(
     const url = new URL(trimmed);
     if (url.hostname.toLowerCase() === "github.com") {
       const segments = url.pathname.replace(/^\/+|\/+$/g, "").split("/");
-      if (segments.length >= 4 && segments[2] === "pull" && segments[0] && segments[1]) {
-        const prNumber = Number.parseInt(segments[3] ?? "", 10);
+      const prSegment = segments[3] ?? "";
+      if (
+        segments.length >= 4 &&
+        segments[2] === "pull" &&
+        segments[0] &&
+        segments[1] &&
+        /^\d+$/.test(prSegment)
+      ) {
+        const prNumber = Number.parseInt(prSegment, 10);
         if (Number.isInteger(prNumber) && prNumber >= 1) {
           return {
             owner: segments[0],
@@ -108,6 +117,7 @@ export interface PostPrReviewOptions {
   readonly prNumber: number;
   readonly commitId: string;
   readonly comments: readonly InlineReviewCommentInput[];
+  readonly diffMap?: Readonly<Record<string, DiffFileMap>>;
   readonly submit?: boolean;
   readonly summaryBody?: string;
 }
@@ -270,7 +280,14 @@ export class GitHubClient {
       ? rawSummary
       : `${PEER_REVIEW_MARKER}\n${rawSummary}`.trim();
 
-    const formattedComments = options.comments.map((c) => {
+    const validComments = options.diffMap
+      ? options.comments.filter((c) => {
+          const fm = options.diffMap?.[c.path];
+          return fm ? isValidInlineRange(fm, c.startLine, c.endLine) : false;
+        })
+      : options.comments;
+
+    const formattedComments = validComments.map((c) => {
       if (c.startLine < c.endLine) {
         return {
           path: c.path,

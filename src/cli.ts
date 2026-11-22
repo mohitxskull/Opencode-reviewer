@@ -160,6 +160,15 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const postToGitHub = parsed.values.post ?? false;
     const submitReview = parsed.values["submit-review"] ?? false;
 
+    if (postToGitHub && localOnly) {
+      writeErr("Error: Cannot combine --post and --local-only.");
+      return 1;
+    }
+    if (submitReview && !postToGitHub) {
+      writeErr("Error: --submit-review requires --post.");
+      return 1;
+    }
+
     // Step 1: Enforce clean working tree BEFORE any network or git mutation
     await ensureCleanWorkingTree(repoRoot);
 
