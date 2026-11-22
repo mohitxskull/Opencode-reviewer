@@ -1,2 +1,286 @@
 #!/usr/bin/env bun
-export {};
+import { resolve } from "node:path";
+import { parseArgs } from "node:util";
+import { parseUnifiedDiff } from "./diff.ts";
+import {
+  CheckpointStore,
+  detectRepoOwnerAndName,
+  ensureCleanWorkingTree,
+  runGitSync,
+  tryGitSync,
+  withInPlaceCheckout,
+} from "./git.ts";
+import {
+  GitHubClient,
+  type InlineReviewCommentInput,
+  parsePrTarget,
+  resolveGitHubToken,
+} from "./github.ts";
+import { clippyToFindings, deduplicateAndFilterFindings } from "./judge.ts";
+import { OpenCodeMultiLensOrchestrator, parseModelSpec, type ReviewContext } from "./lenses.ts";
+import {
+  type Finding,
+  ReviewBundleSchema,
+  type ReviewProfile,
+  ReviewProfileSchema,
+  type WalkthroughReport,
+} from "./models.ts";
+import {
+  renderInlineFindingComment,
+  renderWalkthroughComment,
+  writeLocalReviewArtifacts,
+} from "./render/markdown.ts";
+import { formatTerminalReport } from "./render/terminal.ts";
+import { collectClippyDiagnostics, collectCrateGraph } from "./rust.ts";
+import { SuggestionCompilerVerifier } from "./verifier.ts";
+
+export type LensRunnerFn = (
+  context: ReviewContext,
+) => Promise<{ walkthrough: WalkthroughReport; findings: Finding[] }>;
+
+export interface CliDependencies {
+  readonly githubClient?: GitHubClient;
+  readonly lensRunner?: LensRunnerFn;
+  readonly promptSelectPr?: (
+    prs: ReadonlyArray<{ number: number; title: string }>,
+  ) => Promise<number>;
+  readonly stdout?: (text: string) => void;
+  readonly stderr?: (text: string) => void;
+}
+
+const HELP_TEXT = `peer — Local-First Rust PR Reviewer (OpenCode SDK + Octokit)
+
+Usage:
+  peer [review] [PR_NUMBER_OR_URL] [options]
+
+Options:
+  --repo <path>              Target local Rust git repository (default: cwd)
+  --profile <profile>        Review profile: quiet | chill | assertive (default: chill)
+  --fresh                    Ignore saved checkpoint and review full PR diff
+  --local-only               Save local review artifacts without posting to GitHub
+  --post                     Post Walkthrough comment and PENDING draft review to GitHub
+  --submit-review            Submit review with event=COMMENT instead of PENDING draft
+  --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
+  -h, --help                 Show this help message
+`;
+
+export async function runCli(argv: readonly string[], deps: CliDependencies = {}): Promise<number> {
+  const writeOut = deps.stdout ?? ((text: string) => console.log(text));
+  const writeErr = deps.stderr ?? ((text: string) => console.error(text));
+
+  try {
+    const parsed = parseArgs({
+      args: [...argv],
+      options: {
+        repo: { type: "string" },
+        profile: { type: "string", default: "chill" },
+        fresh: { type: "boolean", default: false },
+        "local-only": { type: "boolean", default: false },
+        post: { type: "boolean", default: false },
+        "submit-review": { type: "boolean", default: false },
+        model: { type: "string" },
+        help: { type: "boolean", short: "h", default: false },
+      },
+      allowPositionals: true,
+    });
+
+    if (parsed.values.help) {
+      writeOut(HELP_TEXT);
+      return 0;
+    }
+
+    const repoRoot = resolve(parsed.values.repo ?? process.cwd());
+    const profile: ReviewProfile = ReviewProfileSchema.parse(parsed.values.profile ?? "chill");
+    const fresh = parsed.values.fresh ?? false;
+    const localOnly = parsed.values["local-only"] ?? false;
+    const postToGitHub = parsed.values.post ?? false;
+    const submitReview = parsed.values["submit-review"] ?? false;
+
+    // Step 1: Enforce clean working tree BEFORE any network or git mutation
+    await ensureCleanWorkingTree(repoRoot);
+
+    const positionals = [...parsed.positionals];
+    if (positionals[0] === "review") {
+      positionals.shift();
+    }
+    const rawPrTarget = positionals[0];
+
+    let defaultOwner = "unknown";
+    let defaultRepo = "unknown";
+    try {
+      const detected = detectRepoOwnerAndName(repoRoot);
+      defaultOwner = detected.owner;
+      defaultRepo = detected.repo;
+    } catch {
+      // Allow explicit full PR URL to supply owner/repo if origin remote isn't configured
+    }
+
+    const githubClient =
+      deps.githubClient ??
+      new GitHubClient({
+        token: await resolveGitHubToken(),
+      });
+
+    let owner = defaultOwner;
+    let repo = defaultRepo;
+    let prNumber: number;
+
+    if (rawPrTarget) {
+      const target = parsePrTarget(rawPrTarget, defaultOwner, defaultRepo);
+      owner = target.owner;
+      repo = target.repo;
+      prNumber = target.prNumber;
+    } else {
+      const openPrs = await githubClient.listOpenPrs(owner, repo);
+      if (openPrs.length === 0) {
+        writeErr(`No open Pull Requests found for ${owner}/${repo}.`);
+        return 1;
+      }
+      if (deps.promptSelectPr) {
+        prNumber = await deps.promptSelectPr(openPrs);
+      } else {
+        const firstPr = openPrs[0];
+        if (!firstPr) {
+          writeErr(`No open Pull Requests found for ${owner}/${repo}.`);
+          return 1;
+        }
+        prNumber = firstPr.number;
+      }
+    }
+
+    const pr = await githubClient.getPullRequest(owner, repo, prNumber);
+    const checkpointStore = new CheckpointStore(repoRoot);
+
+    const bundle = await withInPlaceCheckout(
+      {
+        repoRoot,
+        targetSha: pr.headSha,
+        prNumber: pr.number,
+      },
+      async () => {
+        const { diffBaseSha, isIncremental } = await checkpointStore.resolveDiffBase({
+          prNumber: pr.number,
+          prBaseSha: pr.baseSha,
+          currentHeadSha: pr.headSha,
+          fresh,
+        });
+
+        let diffText: string;
+        const localDiffAttempt = tryGitSync(repoRoot, [
+          "diff",
+          "--no-color",
+          "--unified=3",
+          `${diffBaseSha}..${pr.headSha}`,
+        ]);
+        if (localDiffAttempt.ok && localDiffAttempt.stdout.length > 0) {
+          diffText = localDiffAttempt.stdout;
+        } else {
+          diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
+        }
+
+        const diffMap = parseUnifiedDiff(diffText);
+        const modifiedFiles = new Set(Object.keys(diffMap));
+
+        const [crateGraph, clippyDiagnostics] = await Promise.all([
+          collectCrateGraph(repoRoot),
+          collectClippyDiagnostics(repoRoot, modifiedFiles),
+        ]);
+
+        const reviewContext: ReviewContext = {
+          repoRoot,
+          pr,
+          diffBaseSha,
+          headSha: pr.headSha,
+          isIncremental,
+          crateGraph,
+          diffMap,
+          clippyDiagnostics,
+        };
+
+        const lensRunner: LensRunnerFn =
+          deps.lensRunner ??
+          (async (ctx) => {
+            const orchestrator = new OpenCodeMultiLensOrchestrator({
+              model: parseModelSpec(parsed.values.model),
+            });
+            return await orchestrator.runAllLenses(ctx);
+          });
+
+        const { walkthrough, findings: rawLensFindings } = await lensRunner(reviewContext);
+
+        // Post-lens safety check: restore working tree if any external tool touched tracked files
+        runGitSync(repoRoot, ["checkout", "--", "."]);
+
+        // Step 3: Judge Pass (merge Clippy + lens findings, snap to diff hunks, filter by profile)
+        const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
+        const judgedFindings = deduplicateAndFilterFindings(
+          [...clippyFindings, ...rawLensFindings],
+          diffMap,
+          profile,
+        );
+
+        // Step 4: Transactional cargo check verification of single-hunk suggestions
+        const verifier = new SuggestionCompilerVerifier();
+        const verifiedFindings = await verifier.verifySuggestions(repoRoot, judgedFindings);
+
+        return ReviewBundleSchema.parse({
+          pr,
+          diffBaseSha,
+          headSha: pr.headSha,
+          isIncremental,
+          profile,
+          walkthrough,
+          findings: verifiedFindings,
+          clippyDiagnostics: [...clippyDiagnostics],
+          generatedAt: new Date().toISOString(),
+        });
+      },
+    );
+
+    // Step 5: Persist local artifacts & checkpoint inside .git/peer/reviews/pr-<num>/
+    const artifactDir = await writeLocalReviewArtifacts(repoRoot, bundle);
+    await checkpointStore.save({
+      prNumber: pr.number,
+      baseSha: pr.baseSha,
+      lastReviewedHeadSha: pr.headSha,
+      reviewedAt: bundle.generatedAt,
+      profile,
+    });
+
+    writeOut(formatTerminalReport(bundle, repoRoot, artifactDir));
+
+    // Step 6: Post to GitHub if --post was specified and --local-only was not
+    if (postToGitHub && !localOnly) {
+      const walkthroughCommentBody = renderWalkthroughComment(bundle);
+      await githubClient.upsertWalkthroughComment(owner, repo, pr.number, walkthroughCommentBody);
+
+      const inlineComments: InlineReviewCommentInput[] = bundle.findings.map((finding) => ({
+        path: finding.filePath,
+        startLine: finding.startLine,
+        endLine: finding.endLine,
+        body: renderInlineFindingComment(finding),
+      }));
+
+      await githubClient.postPrReview({
+        owner,
+        repo,
+        prNumber: pr.number,
+        commitId: pr.headSha,
+        comments: inlineComments,
+        submit: submitReview,
+        summaryBody: `Peer Rust Review (${bundle.findings.length} actionable findings, profile: \`${bundle.profile}\`).`,
+      });
+    }
+
+    return 0;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    writeErr(`Error: ${message}`);
+    return 1;
+  }
+}
+
+if (import.meta.main) {
+  const code = await runCli(process.argv.slice(2));
+  process.exit(code);
+}

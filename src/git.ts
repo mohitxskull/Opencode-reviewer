@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { type ReviewCheckpoint, ReviewCheckpointSchema } from "./models.ts";
@@ -131,6 +132,7 @@ export interface CheckoutOptions {
 export class InPlaceCheckoutSession {
   private readonly options: CheckoutOptions;
   private originalRef: string | null = null;
+  private hadCargoLockOnEntry = true;
   private restored = false;
   private sigintHandler: (() => void) | null = null;
   private sigtermHandler: (() => void) | null = null;
@@ -141,6 +143,7 @@ export class InPlaceCheckoutSession {
 
   public async enter(): Promise<void> {
     await ensureCleanWorkingTree(this.options.repoRoot);
+    this.hadCargoLockOnEntry = await Bun.file(join(this.options.repoRoot, "Cargo.lock")).exists();
 
     const symRef = tryGitSync(this.options.repoRoot, ["symbolic-ref", "--short", "-q", "HEAD"]);
     if (symRef.ok && symRef.stdout.length > 0) {
@@ -203,6 +206,20 @@ export class InPlaceCheckoutSession {
     }
     this.restored = true;
     runGitSync(this.options.repoRoot, ["checkout", "-f", this.originalRef]);
+    if (!this.hadCargoLockOnEntry) {
+      const trackedCheck = tryGitSync(this.options.repoRoot, [
+        "ls-files",
+        "--error-unmatch",
+        "Cargo.lock",
+      ]);
+      if (!trackedCheck.ok) {
+        try {
+          rmSync(join(this.options.repoRoot, "Cargo.lock"), { force: true });
+        } catch {
+          // Ignore removal error if absent
+        }
+      }
+    }
   }
 
   private removeSignalListeners(): void {
