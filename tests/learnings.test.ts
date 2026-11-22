@@ -88,4 +88,41 @@ describe("Persistent repository learning store", () => {
       CorruptLearningStoreError,
     );
   });
+
+  test("LearningStore merges version-controlled .peer/learnings.json with local .git/peer/learnings.json", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "peer-learnings-shared-"));
+    tempDirs.push(repo);
+
+    await mkdir(join(repo, ".peer"), { recursive: true });
+    await writeFile(
+      join(repo, ".peer", "learnings.json"),
+      JSON.stringify(
+        {
+          learnings: [
+            {
+              id: "team-001",
+              rule: "Team shared rule: never hold std::sync::Mutex across .await",
+              scope: "src/**",
+              createdAt: "2026-11-22T00:00:00Z",
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const store = new LearningStore(repo);
+    await store.add({
+      rule: "Local personal rule: ignore legacy compatibility module",
+      scope: "src/legacy/**",
+    });
+
+    const all = await store.list();
+    expect(all.length).toBe(2);
+    expect(all.map((l) => l.id)).toContain("team-001");
+
+    const matched = await store.getMatchingLearnings(["src/oms/engine.rs"]);
+    expect(matched.map((l) => l.id)).toEqual(["team-001"]);
+  });
 });

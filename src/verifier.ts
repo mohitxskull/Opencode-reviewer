@@ -23,11 +23,26 @@ async function defaultCargoCheckRunner(repoRoot: string): Promise<CargoCheckResu
     },
   );
 
-  const [stdoutText, stderrText, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  const unregisterKill = registerSignalCleanup(() => {
+    try {
+      proc.kill();
+    } catch {
+      // Ignore if process already exited
+    }
+  });
+
+  let stdoutText: string;
+  let stderrText: string;
+  let exitCode: number;
+  try {
+    [stdoutText, stderrText, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+  } finally {
+    unregisterKill();
+  }
 
   const errorMessages: string[] = [];
   for (const line of stdoutText.split("\n")) {

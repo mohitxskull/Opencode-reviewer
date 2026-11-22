@@ -7,6 +7,7 @@ export interface ModifiedRustSymbol {
   readonly kind: RustSymbolKind;
   readonly filePath: string;
   readonly line: number;
+  readonly isPublic?: boolean;
 }
 
 export interface SymbolReferenceLocation {
@@ -76,6 +77,7 @@ export function extractSymbolsFromFileMap(fileMap: DiffFileMap): ModifiedRustSym
             kind,
             filePath: fileMap.filePath,
             line: hunk.newStart,
+            isPublic: /\bpub\b/.test(headerContext),
           });
         }
       }
@@ -101,6 +103,7 @@ export function extractSymbolsFromFileMap(fileMap: DiffFileMap): ModifiedRustSym
             kind,
             filePath: fileMap.filePath,
             line: lineNo,
+            isPublic: /\bpub\b/.test(code),
           });
         }
       }

@@ -117,6 +117,7 @@ Rules:
 
 export const SOUNDNESS_CONCURRENCY_LENS_PROMPT = `LENS: SOUNDNESS_CONCURRENCY
 You are the Rust Soundness, \`unsafe\`, and Async/Concurrency Review Lens.
+Produce a root-cause, evidence-backed review that results in deletions, replacements, and rewrites where warranted — not layered patches. Every claim must be falsifiable.
 TOKEN EFFICIENCY RULE: The annotated diff hunks and line numbers are already provided below. To keep token usage low, make AT MOST 2 tool calls (\`read\`/\`grep\`) ONLY if strictly required to verify a critical invariant, then immediately return your JSON response. Prefer analyzing the provided diff directly in 0 tool calls.
 
 Focus strictly on:
@@ -133,11 +134,40 @@ Return ONLY a single JSON object matching this exact schema:
       "endLine": 12,
       "severity": "Critical" | "Major" | "Minor" | "Trivial" | "Info",
       "type": "Soundness" | "Concurrency" | "Security" | "Bug",
+      "epistemicState": "VERIFIED-DEFECT" | "NEEDS-RUNTIME-VERIFICATION" | "DESIGN-CONCERN" | "SYMPTOM-PATCH",
+      "evidenceMechanism": "Concurrency" | "Security" | "Performance" | "Correctness" | "Design",
       "title": "Short specific defect title",
       "body": "Concrete explanation of the root cause, mechanism of failure, and fix",
+      "rootCause": "One-line root cause summary for grouping and the Index Table",
+      "blastRadius": "Affected modules/callers/consumers",
+      "reversible": true,
+      "dependsOn": null,
+      "verificationCommand": "Runnable cargo test / clippy command",
+      "traceability": "Exact invariant, comment, or test violated",
       "suggestion": "Exact drop-in replacement lines for startLine..endLine (or null if multi-hunk)",
       "agentPrompt": "Actionable instructions for a coding agent to fix and test this defect",
       "confidence": 0.92
+    }
+  ],
+  "consideredAndRejected": [
+    {
+      "location": "relative/path.rs:10-15",
+      "hypothesis": "Suspicious pattern examined",
+      "reasonDismissed": "Concrete code evidence proving safety"
+    }
+  ],
+  "deletionsProposed": [
+    {
+      "pathOrSymbol": "fn/struct name (relative/path.rs:line)",
+      "reachabilityEvidence": "0 production callers in symbol graph",
+      "replacement": "none — remove obsolete code"
+    }
+  ],
+  "openQuestions": [
+    {
+      "location": "relative/path.rs:line",
+      "question": "[ASSUMPTION] / [UNKNOWN] description",
+      "impact": "What correctness decision depends on this answer"
     }
   ]
 }
@@ -147,12 +177,13 @@ Rules:
 
 export const IDIOMS_LOGIC_LENS_PROMPT = `LENS: IDIOMS_PERFORMANCE_LOGIC
 You are the Rust Idioms, Performance, and Domain Logic Review Lens, applying the PingCAP/TiKV Rust Style Guide (\`rust-conventions\`).
+Produce a root-cause, evidence-backed review where every claim is falsifiable.
 TOKEN EFFICIENCY RULE: The annotated diff hunks and line numbers are already provided below. To keep token usage low, make AT MOST 2 tool calls (\`read\`/\`grep\`) ONLY if strictly required, then immediately return your JSON response. Prefer analyzing the provided diff directly in 0 tool calls.
 
 Focus strictly on:
-1. Domain Logic & Edge Cases: off-by-one errors, wrong boolean conditions, partial state updates before fallible \`?\` returns, swallowed errors.
+1. Domain Logic & Edge Cases: off-by-one errors, wrong boolean conditions, partial state updates before fallible \`?\` returns, swallowed errors (\`let _ =\` discarding \`Result\`).
 2. Performance & Allocations: unnecessary \`.clone()\` or \`to_owned()\` in hot loops, missing \`Vec::with_capacity\`, taking owned \`String\`/\`Vec<T>\` where \`&str\`/\`&[T]\` suffices, large stack frames across \`.await\`.
-3. PingCAP/TiKV Rust Conventions: \`crate::\` module imports, \`as_\` (free) / \`to_\` (allocating) / \`into_\` (consuming) conversion naming, custom error types vs stringly-typed errors, visibility minimalism.
+3. PingCAP/TiKV Rust Conventions & Architecture: \`crate::\` module imports, \`as_\` (free) / \`to_\` (allocating) / \`into_\` (consuming) conversion naming, custom error types vs stringly-typed errors, visibility minimalism, no backward-compatibility shims.
 
 Return ONLY a single JSON object matching this exact schema:
 {
@@ -163,11 +194,40 @@ Return ONLY a single JSON object matching this exact schema:
       "endLine": 12,
       "severity": "Critical" | "Major" | "Minor" | "Trivial" | "Info",
       "type": "Bug" | "Performance" | "Idioms" | "Refactor",
+      "epistemicState": "VERIFIED-DEFECT" | "NEEDS-RUNTIME-VERIFICATION" | "DESIGN-CONCERN" | "SYMPTOM-PATCH",
+      "evidenceMechanism": "Concurrency" | "Security" | "Performance" | "Correctness" | "Design",
       "title": "Short specific defect title",
       "body": "Concrete explanation of the defect or performance/style issue",
+      "rootCause": "One-line root cause summary",
+      "blastRadius": "Affected modules/callers",
+      "reversible": true,
+      "dependsOn": null,
+      "verificationCommand": "Runnable cargo test / clippy command",
+      "traceability": "Exact invariant, comment, or test violated",
       "suggestion": "Exact drop-in replacement lines for startLine..endLine (or null if multi-hunk)",
       "agentPrompt": "Actionable instructions for a coding agent to fix this issue",
       "confidence": 0.88
+    }
+  ],
+  "consideredAndRejected": [
+    {
+      "location": "relative/path.rs:10-15",
+      "hypothesis": "Suspicious pattern examined",
+      "reasonDismissed": "Concrete code evidence proving safety"
+    }
+  ],
+  "deletionsProposed": [
+    {
+      "pathOrSymbol": "fn/struct name (relative/path.rs:line)",
+      "reachabilityEvidence": "0 production callers in symbol graph",
+      "replacement": "none — remove obsolete code"
+    }
+  ],
+  "openQuestions": [
+    {
+      "location": "relative/path.rs:line",
+      "question": "[ASSUMPTION] / [UNKNOWN] description",
+      "impact": "What design decision depends on this answer"
     }
   ]
 }

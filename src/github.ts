@@ -17,6 +17,18 @@ export class GitHubAuthError extends Error {
   }
 }
 
+export class ExistingManualPendingReviewError extends Error {
+  public readonly reviewId: number;
+
+  constructor(reviewId: number, prNumber: number) {
+    super(
+      `Found an existing manual PENDING draft review (id=${reviewId}) on PR #${prNumber} that was not created by peer. Submit or discard your manual draft review on GitHub before running 'peer --post'.`,
+    );
+    this.name = "ExistingManualPendingReviewError";
+    this.reviewId = reviewId;
+  }
+}
+
 async function defaultGhAuthTokenRunner(): Promise<string> {
   const proc = Bun.spawnSync(["gh", "auth", "token"], {
     stdout: "pipe",
@@ -261,17 +273,17 @@ export class GitHubClient {
     });
 
     for (const review of existingReviews) {
-      if (
-        review.state === "PENDING" &&
-        review.user?.login === myLogin &&
-        review.body?.includes(PEER_REVIEW_MARKER)
-      ) {
-        await this.octokit.rest.pulls.deletePendingReview({
-          owner: options.owner,
-          repo: options.repo,
-          pull_number: options.prNumber,
-          review_id: review.id,
-        });
+      if (review.state === "PENDING" && review.user?.login === myLogin) {
+        if (review.body?.includes(PEER_REVIEW_MARKER)) {
+          await this.octokit.rest.pulls.deletePendingReview({
+            owner: options.owner,
+            repo: options.repo,
+            pull_number: options.prNumber,
+            review_id: review.id,
+          });
+        } else {
+          throw new ExistingManualPendingReviewError(review.id, options.prNumber);
+        }
       }
     }
 

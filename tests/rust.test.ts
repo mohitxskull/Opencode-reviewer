@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   collectClippyDiagnostics,
   collectCrateGraph,
+  findSuggestedReplacementForMessage,
   resolveFileArchitecturalLayer,
 } from "../src/rust.ts";
 
@@ -110,5 +111,69 @@ describe("Task 04: Rust ground-truth collector (cargo metadata & clippy)", () =>
     // F-13: Empty modifiedFiles set must return 0 warnings instead of bypassing the filter
     const emptyDiagnostics = await collectClippyDiagnostics(crateDir, new Set());
     expect(emptyDiagnostics.filter((d) => d.level === "warning").length).toBe(0);
+  });
+
+  test("findSuggestedReplacementForMessage ignores MaybeIncorrect and does not merge alternative child suggestions on the same line", () => {
+    const lineText = "    let y = foo(x);";
+    const msgWithTwoAlternatives = {
+      level: "warning",
+      message: "two alternative suggestions",
+      spans: [],
+      children: [
+        {
+          level: "help",
+          message: "option A (MaybeIncorrect)",
+          spans: [
+            {
+              file_name: "src/lib.rs",
+              line_start: 10,
+              line_end: 10,
+              column_start: 13,
+              column_end: 19,
+              is_primary: true,
+              suggested_replacement: "bar(x)",
+              suggestion_applicability: "MaybeIncorrect",
+              text: [{ text: lineText, highlight_start: 13, highlight_end: 19 }],
+            },
+          ],
+        },
+        {
+          level: "help",
+          message: "option B (MachineApplicable)",
+          spans: [
+            {
+              file_name: "src/lib.rs",
+              line_start: 10,
+              line_end: 10,
+              column_start: 13,
+              column_end: 19,
+              is_primary: true,
+              suggested_replacement: "baz(x)",
+              suggestion_applicability: "MachineApplicable",
+              text: [{ text: lineText, highlight_start: 13, highlight_end: 19 }],
+            },
+          ],
+        },
+        {
+          level: "help",
+          message: "option C (second MachineApplicable alternative on same line)",
+          spans: [
+            {
+              file_name: "src/lib.rs",
+              line_start: 10,
+              line_end: 10,
+              column_start: 13,
+              column_end: 19,
+              is_primary: true,
+              suggested_replacement: "qux(x)",
+              suggestion_applicability: "MachineApplicable",
+              text: [{ text: lineText, highlight_start: 13, highlight_end: 19 }],
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(findSuggestedReplacementForMessage(msgWithTwoAlternatives)).toBe("    let y = baz(x);");
   });
 });

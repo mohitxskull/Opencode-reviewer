@@ -46,6 +46,7 @@ describe("Rust symbol and call-site code graph", () => {
       { name: "clear_funding_sync", kind: "fn", filePath: "src/funding.rs" },
       { name: "FundingLedger", kind: "struct", filePath: "src/funding.rs" },
     ]);
+    expect(symbols.every((s) => s.isPublic === true)).toBe(true);
   });
 
   test("buildRustSymbolGraph resolves cross-workspace production vs test callers and flags uncalled symbols", async () => {

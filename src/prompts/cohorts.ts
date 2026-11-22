@@ -114,6 +114,7 @@ export function groupDiffFilesIntoCohorts(
   crateGraph: CrateGraph,
   maxFilesPerCohort = 7,
   maxCohorts = 8,
+  maxCharsPerCohort = 26_000,
 ): FileCohort[] {
   const allPaths = Object.keys(diffMap);
   if (allPaths.length === 0) {
@@ -128,11 +129,19 @@ export function groupDiffFilesIntoCohorts(
       const priority = fileMap
         ? scoreFileReviewPriority(fileMap, layerInfo.layer, crateGraph.testLayer, clippyEmpty)
         : { score: 0, isTestOrBench: true, addedLinesCount: 0, riskSignals: [] };
+      const rawCompactedChars = fileMap
+        ? fileMap.hunks.reduce(
+            (acc, h) => acc + compactAnnotatedLines(h.annotatedLines).join("\n").length,
+            0,
+          )
+        : 0;
+      const approxChars = Math.min(rawCompactedChars, MAX_CHARS_PER_FILE_DIFF);
       return {
         filePath,
         groupKey: getSubsystemGroupKey(filePath),
         layer: layerInfo.layer,
         ...priority,
+        approxChars,
       };
     })
     .sort((a, b) => {
@@ -147,8 +156,9 @@ export function groupDiffFilesIntoCohorts(
 
   const prodFiles = scored.filter((f) => !f.isTestOrBench);
   const targetFiles = prodFiles.length > 0 ? prodFiles : scored;
+  const totalApproxChars = targetFiles.reduce((acc, f) => acc + f.approxChars, 0);
 
-  if (targetFiles.length <= maxFilesPerCohort) {
+  if (targetFiles.length <= maxFilesPerCohort && totalApproxChars <= maxCharsPerCohort) {
     return [
       {
         id: "cohort-1",
@@ -158,7 +168,12 @@ export function groupDiffFilesIntoCohorts(
     ];
   }
 
-  const cohortCount = Math.min(maxCohorts, Math.ceil(targetFiles.length / maxFilesPerCohort));
+  const neededByCount = Math.ceil(targetFiles.length / maxFilesPerCohort);
+  const neededByChars = Math.ceil(Math.max(1, totalApproxChars) / maxCharsPerCohort);
+  const cohortCount = Math.min(
+    targetFiles.length,
+    Math.min(maxCohorts, Math.max(neededByCount, neededByChars)),
+  );
   const baseSize = Math.floor(targetFiles.length / cohortCount);
   const remainder = targetFiles.length % cohortCount;
 

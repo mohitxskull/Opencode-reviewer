@@ -52,20 +52,26 @@ interface CargoMetadataPayload {
 }
 
 export async function collectCrateGraph(repoRoot: string): Promise<CrateGraph> {
-  const proc = Bun.spawnSync(["cargo", "metadata", "--format-version", "1", "--no-deps"], {
+  const proc = Bun.spawn(["cargo", "metadata", "--format-version", "1", "--no-deps"], {
     cwd: repoRoot,
     stdout: "pipe",
     stderr: "pipe",
   });
 
-  if (proc.exitCode !== 0) {
+  const [stdoutText, , exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+
+  if (exitCode !== 0) {
     return CrateGraphSchema.parse({
       crates: {},
       testLayer: 1,
     });
   }
 
-  const payload = JSON.parse(proc.stdout.toString()) as CargoMetadataPayload;
+  const payload = JSON.parse(stdoutText) as CargoMetadataPayload;
   const memberIds = new Set(payload.workspace_members);
   const memberPackages = payload.packages.filter((pkg) => memberIds.has(pkg.id));
   const memberNames = new Set(memberPackages.map((pkg) => pkg.name));
@@ -155,13 +161,13 @@ export function resolveFileArchitecturalLayer(
   return { crateName, layer };
 }
 
-interface RustcSpanText {
+export interface RustcSpanText {
   text: string;
   highlight_start: number;
   highlight_end: number;
 }
 
-interface RustcSpan {
+export interface RustcSpan {
   file_name: string;
   line_start: number;
   line_end: number;
@@ -173,7 +179,7 @@ interface RustcSpan {
   suggestion_applicability?: string | null;
 }
 
-interface RustcCompilerMessage {
+export interface RustcCompilerMessage {
   level: string;
   message: string;
   code?: { code: string } | null;
@@ -187,87 +193,60 @@ interface CargoJsonLine {
   message?: RustcCompilerMessage;
 }
 
-function spliceSpanReplacementIntoFullLine(span: RustcSpan): string | null {
-  if (typeof span.suggested_replacement !== "string" || span.line_start !== span.line_end) {
+function spliceSingleNodeSpans(node: RustcCompilerMessage): string | null {
+  const validSpans = (node.spans ?? []).filter(
+    (span) =>
+      typeof span.suggested_replacement === "string" &&
+      span.line_start === span.line_end &&
+      (!span.suggestion_applicability || span.suggestion_applicability === "MachineApplicable"),
+  );
+
+  if (validSpans.length === 0) {
     return null;
   }
-  if (
-    span.suggestion_applicability &&
-    span.suggestion_applicability !== "MachineApplicable" &&
-    span.suggestion_applicability !== "MaybeIncorrect"
-  ) {
+
+  const firstSpan = validSpans[0];
+  if (!firstSpan) {
     return null;
   }
 
-  const lineEntry = span.text?.[0];
-  const colStart = span.column_start ?? lineEntry?.highlight_start;
-  const colEnd = span.column_end ?? lineEntry?.highlight_end;
+  const targetLine = firstSpan.line_start;
+  const sameLineSpans = validSpans.filter((s) => s.line_start === targetLine);
+  const lineText = sameLineSpans[0]?.text?.[0]?.text;
 
   if (
-    lineEntry &&
-    typeof lineEntry.text === "string" &&
-    typeof colStart === "number" &&
-    typeof colEnd === "number" &&
-    colStart >= 1 &&
-    colEnd >= colStart
+    sameLineSpans.length >= 1 &&
+    typeof lineText === "string" &&
+    sameLineSpans.every(
+      (s) =>
+        typeof (s.column_start ?? s.text?.[0]?.highlight_start) === "number" &&
+        typeof (s.column_end ?? s.text?.[0]?.highlight_end) === "number",
+    )
   ) {
-    const chars = Array.from(lineEntry.text);
-    if (colEnd - 1 <= chars.length) {
-      const prefix = chars.slice(0, colStart - 1).join("");
-      const suffix = chars.slice(colEnd - 1).join("");
-      const spliced = `${prefix}${span.suggested_replacement}${suffix}`;
-      return spliced.trim().length > 0 ? spliced : null;
-    }
-  }
+    const withCols = sameLineSpans
+      .map((s) => ({
+        span: s,
+        start: (s.column_start ?? s.text?.[0]?.highlight_start ?? 1) - 1,
+        end: (s.column_end ?? s.text?.[0]?.highlight_end ?? 1) - 1,
+      }))
+      .sort((a, b) => b.start - a.start);
 
-  return span.suggested_replacement.trim().length > 0 ? span.suggested_replacement : null;
-}
-
-function findSuggestedReplacement(msg: RustcCompilerMessage): string | null {
-  const candidates: Array<{ span: RustcSpan; spliced: string }> = [];
-  const collect = (node: RustcCompilerMessage) => {
-    for (const span of node.spans ?? []) {
-      const spliced = spliceSpanReplacementIntoFullLine(span);
-      if (spliced !== null) {
-        candidates.push({ span, spliced });
+    // Reject overlapping column intervals within the same node
+    for (let i = 0; i < withCols.length - 1; i++) {
+      const right = withCols[i];
+      const left = withCols[i + 1];
+      if (right && left && left.end > right.start) {
+        return null;
       }
     }
-    for (const child of node.children ?? []) {
-      collect(child);
-    }
-  };
-  collect(msg);
 
-  if (candidates.length === 0) {
-    return null;
-  }
-
-  // Group multi-span replacements on the same line (e.g. clippy::needless_return emits
-  // one span replacing `return x + 1` with `x + 1` and a second span deleting `;`)
-  const firstLine = candidates[0]?.span.line_start;
-  const sameLineSpans = candidates
-    .map((c) => c.span)
-    .filter(
-      (s) =>
-        s.line_start === firstLine &&
-        typeof s.column_start === "number" &&
-        typeof s.column_end === "number",
-    );
-
-  const lineText = sameLineSpans[0]?.text?.[0]?.text;
-  if (sameLineSpans.length > 1 && typeof lineText === "string") {
-    const sortedDesc = [...sameLineSpans].sort(
-      (a, b) => (b.column_start ?? 0) - (a.column_start ?? 0),
-    );
     let chars = Array.from(lineText);
-    for (const span of sortedDesc) {
-      const cStart = (span.column_start ?? 1) - 1;
-      const cEnd = (span.column_end ?? 1) - 1;
-      if (cStart >= 0 && cEnd >= cStart && cEnd <= chars.length) {
+    for (const item of withCols) {
+      if (item.start >= 0 && item.end >= item.start && item.end <= chars.length) {
         chars = [
-          ...chars.slice(0, cStart),
-          ...Array.from(span.suggested_replacement ?? ""),
-          ...chars.slice(cEnd),
+          ...chars.slice(0, item.start),
+          ...Array.from(item.span.suggested_replacement ?? ""),
+          ...chars.slice(item.end),
         ];
       }
     }
@@ -275,13 +254,32 @@ function findSuggestedReplacement(msg: RustcCompilerMessage): string | null {
     return combined.trim().length > 0 ? combined : null;
   }
 
-  return candidates[0]?.spliced ?? null;
+  const raw = firstSpan.suggested_replacement ?? "";
+  return raw.trim().length > 0 ? raw : null;
+}
+
+export function findSuggestedReplacementForMessage(msg: RustcCompilerMessage): string | null {
+  const direct = spliceSingleNodeSpans(msg);
+  if (direct !== null) {
+    return direct;
+  }
+  for (const child of msg.children ?? []) {
+    const childResult = findSuggestedReplacementForMessage(child);
+    if (childResult !== null) {
+      return childResult;
+    }
+  }
+  return null;
 }
 
 export async function collectClippyDiagnostics(
   repoRoot: string,
   modifiedFiles: ReadonlySet<string>,
 ): Promise<ClippyDiagnostic[]> {
+  if (modifiedFiles.size === 0) {
+    return [];
+  }
+
   const proc = Bun.spawn(
     ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json"],
     {
@@ -351,7 +349,7 @@ export async function collectClippyDiagnostics(
         code,
         message: msg.message,
         rendered: msg.rendered ?? msg.message,
-        suggestedReplacement: findSuggestedReplacement(msg),
+        suggestedReplacement: findSuggestedReplacementForMessage(msg),
       }),
     );
   }

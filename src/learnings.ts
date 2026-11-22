@@ -36,7 +36,6 @@ export function scopeGlobMatchesFile(scopeGlob: string, filePath: string): boole
   if (glob.match(normalizedPath)) {
     return true;
   }
-  // Support trailing `/**` matching files anywhere beneath the prefix
   if (normalizedPattern.endsWith("/**")) {
     const prefix = normalizedPattern.slice(0, -3);
     if (normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`)) {
@@ -47,9 +46,9 @@ export function scopeGlobMatchesFile(scopeGlob: string, filePath: string): boole
 }
 
 // Why: Persistent repository learnings prevent the reviewer from re-litigating
-// intentional architectural decisions (like CodeRabbit's organizational learnings)
-// without sending proprietary code to an external SaaS database. Learnings live
-// locally in `.git/peer/learnings.json` and filter by file path glob via `Bun.Glob`.
+// intentional architectural decisions without sending proprietary code to an
+// external SaaS database. Learnings merge version-controlled `.peer/learnings.json`
+// (shared team invariants) with local `.git/peer/learnings.json` (personal rules).
 export class LearningStore {
   private readonly repoRoot: string;
 
@@ -61,8 +60,11 @@ export class LearningStore {
     return join(resolvePeerStateDir(this.repoRoot), "learnings.json");
   }
 
-  public async list(): Promise<RepoLearning[]> {
-    const path = this.getLearningsPath();
+  public getSharedLearningsPath(): string {
+    return join(this.repoRoot, ".peer", "learnings.json");
+  }
+
+  private async readLearningsFile(path: string): Promise<RepoLearning[]> {
     const file = Bun.file(path);
     if (!(await file.exists())) {
       return [];
@@ -77,26 +79,46 @@ export class LearningStore {
     }
   }
 
+  public async listLocal(): Promise<RepoLearning[]> {
+    return await this.readLearningsFile(this.getLearningsPath());
+  }
+
+  public async list(): Promise<RepoLearning[]> {
+    const [shared, local] = await Promise.all([
+      this.readLearningsFile(this.getSharedLearningsPath()),
+      this.listLocal(),
+    ]);
+    const seenIds = new Set<string>();
+    const merged: RepoLearning[] = [];
+    for (const item of [...shared, ...local]) {
+      if (!seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        merged.push(item);
+      }
+    }
+    return merged;
+  }
+
   public async add(input: { rule: string; scope?: string | null }): Promise<RepoLearning> {
-    const existing = await this.list();
+    const existingLocal = await this.listLocal();
     const entry = RepoLearningSchema.parse({
       id: randomUUID().slice(0, 8),
       rule: input.rule.trim(),
       scope: input.scope?.trim() || null,
       createdAt: new Date().toISOString(),
     });
-    existing.push(entry);
-    await this.saveAll(existing);
+    existingLocal.push(entry);
+    await this.saveAllLocal(existingLocal);
     return entry;
   }
 
   public async remove(id: string): Promise<boolean> {
-    const existing = await this.list();
-    const filtered = existing.filter((item) => item.id !== id);
-    if (filtered.length === existing.length) {
+    const existingLocal = await this.listLocal();
+    const filtered = existingLocal.filter((item) => item.id !== id);
+    if (filtered.length === existingLocal.length) {
       return false;
     }
-    await this.saveAll(filtered);
+    await this.saveAllLocal(filtered);
     return true;
   }
 
@@ -112,7 +134,7 @@ export class LearningStore {
     });
   }
 
-  private async saveAll(learnings: readonly RepoLearning[]): Promise<void> {
+  private async saveAllLocal(learnings: readonly RepoLearning[]): Promise<void> {
     const dir = resolvePeerStateDir(this.repoRoot);
     await mkdir(dir, { recursive: true });
     const targetPath = this.getLearningsPath();

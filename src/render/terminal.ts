@@ -18,12 +18,21 @@ export function formatTerminalReport(
     `Range: ${baseShort}..${headShort} (${bundle.isIncremental ? "incremental" : "full"}) | Profile: ${bundle.profile}`,
     `Effort: ${walkthrough.triage.reviewEffort}/5 | Merge Risk: ${walkthrough.triage.mergeRisk}`,
     `Rationale: ${walkthrough.triage.rationale}`,
+  ];
+
+  if (bundle.failedCohorts && bundle.failedCohorts.length > 0) {
+    lines.push(
+      `WARNING: Partial review (${bundle.failedCohorts.length} cohort(s) failed: ${bundle.failedCohorts.join(", ")})`,
+    );
+  }
+
+  lines.push(
     ``,
     `--- Walkthrough Summary ---`,
     walkthrough.summary.trim(),
     ``,
     `--- Architectural Layers ---`,
-  ];
+  );
 
   const sortedChanges = [...walkthrough.changes].sort(
     (a, b) => a.layer - b.layer || a.filePath.localeCompare(b.filePath),

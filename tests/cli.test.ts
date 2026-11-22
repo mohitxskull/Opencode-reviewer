@@ -399,4 +399,70 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     expect(rmCode).toBe(0);
     expect(out.join("\n")).toContain(`Removed learning [${id}]`);
   });
+
+  test("runCli fails fast before network calls when origin remote is missing and no PR URL is given, and exits 2 on partial cohort failures unless --allow-partial is passed", async () => {
+    const { repoDir, baseSha, prHeadSha } = await createTempRustGitRepo();
+
+    // 1. Remove origin remote and run `peer review` with no positional target
+    runGit(repoDir, ["remote", "remove", "origin"]);
+    let listPrsCalled = false;
+    const errOut: string[] = [];
+    const noOriginCode = await runCli(["review", "--local-only", "--repo", repoDir], {
+      githubClient: {
+        listOpenPrs: async () => {
+          listPrsCalled = true;
+          return [];
+        },
+      } as unknown as GitHubClient,
+      stderr: (t) => errOut.push(t),
+    });
+    expect(noOriginCode).toBe(1);
+    expect(listPrsCalled).toBe(false);
+    expect(errOut.join("\n")).toContain("Unable to determine GitHub repository owner/name");
+
+    // Restore origin remote and test partial cohort failure exit code (2) without posting
+    runGit(repoDir, ["remote", "add", "origin", "https://github.com/tikv/sample-rust.git"]);
+    let reviewPosted = false;
+    const partialCode = await runCli(["review", "42", "--post", "--repo", repoDir], {
+      githubClient: {
+        getPullRequest: async () => ({
+          owner: "tikv",
+          repo: "sample-rust",
+          number: 42,
+          title: "feat: partial test",
+          body: "",
+          author: "alice",
+          headRefName: "pr-42",
+          baseRefName: "main",
+          headSha: prHeadSha,
+          baseSha,
+          htmlUrl: "https://github.com/tikv/sample-rust/pull/42",
+          updatedAt: "2026-11-22T00:00:00Z",
+        }),
+        upsertWalkthroughComment: async () => {
+          reviewPosted = true;
+          return 1;
+        },
+        postPrReview: async () => {
+          reviewPosted = true;
+          return 2;
+        },
+      } as unknown as GitHubClient,
+      stdout: () => {},
+      stderr: (t) => errOut.push(t),
+      lensRunner: async () => ({
+        walkthrough: {
+          summary: "Partial review.",
+          changes: [],
+          sequenceDiagram: null,
+          triage: { reviewEffort: 1, mergeRisk: "Low", rationale: "test" },
+        },
+        findings: [],
+        failedCohorts: ["peer-cohort-1 (1/2: src)"],
+      }),
+    });
+
+    expect(partialCode).toBe(2);
+    expect(reviewPosted).toBe(false);
+  });
 });

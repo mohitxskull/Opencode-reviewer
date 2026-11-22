@@ -9,8 +9,6 @@ import { type ReviewCheckpoint, ReviewCheckpointSchema } from "./models.ts";
 // review state inside git's administrative directory so in-place branch checkouts
 // never collide with generated files and `git status --porcelain` stays clean
 // without modifying the user's .gitignore.
-export const PEER_GIT_REVIEWS_REL_PATH = ".git/peer/reviews";
-
 export function resolveGitCommonDir(repoRoot: string): string {
   const res = tryGitSync(repoRoot, ["rev-parse", "--git-common-dir"]);
   if (res.ok && res.stdout.length > 0) {

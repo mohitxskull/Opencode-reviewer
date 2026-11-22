@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { GitHubAuthError, GitHubClient, parsePrTarget, resolveGitHubToken } from "../src/github.ts";
+import {
+  ExistingManualPendingReviewError,
+  GitHubAuthError,
+  GitHubClient,
+  parsePrTarget,
+  resolveGitHubToken,
+} from "../src/github.ts";
 import { PEER_REVIEW_MARKER, WALKTHROUGH_MARKER } from "../src/models.ts";
 
 interface RecordedRequest {
@@ -157,12 +163,6 @@ describe("Task 03: GitHub client and auth resolver", () => {
               user: { login: "skull-reviewer" },
               body: `${PEER_REVIEW_MARKER}\nOld peer draft`,
             },
-            {
-              id: 503,
-              state: "PENDING",
-              user: { login: "skull-reviewer" },
-              body: "Manual human pending review without peer marker",
-            },
           ],
         };
       }
@@ -265,5 +265,42 @@ describe("Task 03: GitHub client and auth resolver", () => {
     );
     const postBody = postReq?.body as Record<string, unknown>;
     expect(postBody.event).toBe("COMMENT");
+  });
+
+  test("postPrReview throws ExistingManualPendingReviewError without deleting when user has a manual non-peer PENDING review", async () => {
+    const { fetch, requests } = createMockFetch((req) => {
+      if (req.method === "GET" && req.url.endsWith("/user")) {
+        return { body: { login: "skull-reviewer", id: 77 } };
+      }
+      if (req.method === "GET" && req.url.includes("/pulls/42/reviews")) {
+        return {
+          body: [
+            {
+              id: 503,
+              state: "PENDING",
+              user: { login: "skull-reviewer" },
+              body: "Manual human pending review without peer marker",
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected request: ${req.method} ${req.url}`);
+    });
+
+    const client = new GitHubClient({ token: "test-token", fetch });
+    await expect(
+      client.postPrReview({
+        owner: "tikv",
+        repo: "tikv",
+        prNumber: 42,
+        commitId: "abcdef1234567",
+        submit: false,
+        summaryBody: "Peer review summary",
+        comments: [],
+      }),
+    ).rejects.toThrow(ExistingManualPendingReviewError);
+
+    expect(requests.some((r) => r.method === "DELETE")).toBe(false);
+    expect(requests.some((r) => r.method === "POST")).toBe(false);
   });
 });

@@ -261,6 +261,7 @@ export const ReviewBundleSchema = z.object({
   deletionsProposed: z.array(DeletionProposedItemSchema).default([]).optional(),
   openQuestions: z.array(OpenQuestionItemSchema).default([]).optional(),
   notReviewed: z.array(z.string()).default([]).optional(),
+  failedCohorts: z.array(z.string()).default([]).optional(),
   clippyDiagnostics: z.array(ClippyDiagnosticSchema),
   generatedAt: z.string(),
 });

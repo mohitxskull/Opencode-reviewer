@@ -115,9 +115,12 @@ export function extractJsonObject(rawText: string): unknown {
   );
 }
 
+export const DEFAULT_SESSION_WAIT_TIMEOUT_MS = 300_000;
+
 export interface MultiLensOrchestratorOptions {
   readonly model?: ModelSpec;
   readonly clientFactory?: () => Promise<OpenCodeClientLike>;
+  readonly sessionWaitTimeoutMs?: number;
 }
 
 export interface MultiLensRunResult {
@@ -132,10 +135,12 @@ export interface MultiLensRunResult {
 export class OpenCodeMultiLensOrchestrator {
   private readonly model: ModelSpec;
   private readonly clientFactory: () => Promise<OpenCodeClientLike>;
+  private readonly sessionWaitTimeoutMs: number;
 
   constructor(options: MultiLensOrchestratorOptions = {}) {
     this.model = options.model ?? parseModelSpec();
     this.clientFactory = options.clientFactory ?? createDefaultOpenCodeClient;
+    this.sessionWaitTimeoutMs = options.sessionWaitTimeoutMs ?? DEFAULT_SESSION_WAIT_TIMEOUT_MS;
   }
 
   public async runAllLenses(context: ReviewContext): Promise<MultiLensRunResult> {
@@ -343,9 +348,27 @@ export class OpenCodeMultiLensOrchestrator {
         text: promptText,
       });
 
-      await client.experimental.session.wait({
-        sessionID: session.id,
-      });
+      let timerId: ReturnType<typeof setTimeout> | null = null;
+      try {
+        await Promise.race([
+          client.experimental.session.wait({
+            sessionID: session.id,
+          }),
+          new Promise<never>((_, reject) => {
+            timerId = setTimeout(() => {
+              reject(
+                new Error(
+                  `OpenCode session [${title}] timed out after ${this.sessionWaitTimeoutMs}ms`,
+                ),
+              );
+            }, this.sessionWaitTimeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timerId !== null) {
+          clearTimeout(timerId);
+        }
+      }
 
       const messages = await client.message.list({
         sessionID: session.id,

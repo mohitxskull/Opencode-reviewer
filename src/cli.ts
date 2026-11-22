@@ -68,11 +68,12 @@ Usage:
 
 Options:
   --repo <path>              Target local Rust git repository (default: cwd)
-  --profile <profile>        Review profile: quiet | chill | assertive (default: chill)
+  --profile <profile>        Review profile: quiet | chill | assertive (default: assertive)
   --fresh                    Ignore saved checkpoint and review full PR diff
   --local-only               Save local review artifacts without posting to GitHub
   --post                     Post Walkthrough comment and PENDING draft review to GitHub
   --submit-review            Submit review with event=COMMENT instead of PENDING draft
+  --allow-partial            Exit 0 and allow posting even if one or more review cohorts fail
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
   -h, --help                 Show this help message
@@ -92,6 +93,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         "local-only": { type: "boolean", default: false },
         post: { type: "boolean", default: false },
         "submit-review": { type: "boolean", default: false },
+        "allow-partial": { type: "boolean", default: false },
         model: { type: "string" },
         scope: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
@@ -159,6 +161,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const localOnly = parsed.values["local-only"] ?? false;
     const postToGitHub = parsed.values.post ?? false;
     const submitReview = parsed.values["submit-review"] ?? false;
+    const allowPartial = parsed.values["allow-partial"] ?? false;
 
     if (postToGitHub && localOnly) {
       writeErr("Error: Cannot combine --post and --local-only.");
@@ -188,22 +191,31 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       // Allow explicit full PR URL to supply owner/repo if origin remote isn't configured
     }
 
-    const githubClient =
-      deps.githubClient ??
-      new GitHubClient({
-        token: await resolveGitHubToken(),
-      });
-
     let owner = defaultOwner;
     let repo = defaultRepo;
-    let prNumber: number;
+    let prNumber = 0;
 
     if (rawPrTarget) {
       const target = parsePrTarget(rawPrTarget, defaultOwner, defaultRepo);
       owner = target.owner;
       repo = target.repo;
       prNumber = target.prNumber;
-    } else {
+    }
+
+    if (owner === "unknown" || repo === "unknown") {
+      writeErr(
+        "Unable to determine GitHub repository owner/name from 'origin' remote. Configure a GitHub 'origin' remote or pass a full GitHub PR URL (https://github.com/<owner>/<repo>/pull/<number>).",
+      );
+      return 1;
+    }
+
+    const githubClient =
+      deps.githubClient ??
+      new GitHubClient({
+        token: await resolveGitHubToken(),
+      });
+
+    if (!rawPrTarget) {
       const openPrs = await githubClient.listOpenPrs(owner, repo);
       if (openPrs.length === 0) {
         writeErr(`No open Pull Requests found for ${owner}/${repo}.`);
@@ -219,13 +231,6 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         }
         prNumber = firstPr.number;
       }
-    }
-
-    if (owner === "unknown" || repo === "unknown") {
-      writeErr(
-        "Unable to determine GitHub repository owner/name from 'origin' remote. Configure a GitHub 'origin' remote or pass a full GitHub PR URL (https://github.com/<owner>/<repo>/pull/<number>).",
-      );
-      return 1;
     }
 
     const pr = await githubClient.getPullRequest(owner, repo, prNumber);
@@ -256,6 +261,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     );
 
     let failedCohortsCount = 0;
+    let activeDiffMap: Record<string, import("./models.ts").DiffFileMap> = {};
     const bundle = await withInPlaceCheckout(
       {
         repoRoot,
@@ -263,7 +269,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         prNumber: pr.number,
       },
       async () => {
-        const { diffBaseSha, isIncremental } = await checkpointStore.resolveDiffBase({
+        let { diffBaseSha, isIncremental } = await checkpointStore.resolveDiffBase({
           prNumber: pr.number,
           prBaseSha: pr.baseSha,
           currentHeadSha: pr.headSha,
@@ -283,11 +289,21 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         if (localDiffAttempt.ok && (isIncremental || localDiffAttempt.stdout.length > 0)) {
           diffText = localDiffAttempt.stdout;
         } else {
+          if (isIncremental) {
+            isIncremental = false;
+            diffBaseSha = pr.baseSha;
+            await auditLogger.logEvent(
+              "diff.incremental.fallback",
+              `  ├─ ⚠ Local incremental diff (${diffRangeSpec}) unavailable; falling back to full GitHub PR diff`,
+              { diffRangeSpec, fallbackBaseSha: pr.baseSha },
+            );
+          }
           diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
         }
 
         const rawDiffMap = parseUnifiedDiff(diffText);
         const diffMap = filterCodeOnlyDiffMap(rawDiffMap);
+        activeDiffMap = diffMap;
         const modifiedFiles = new Set(Object.keys(diffMap));
         const excludedFiles = Object.keys(rawDiffMap).filter((fp) => !modifiedFiles.has(fp));
 
@@ -303,6 +319,44 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             excludedNonCodeFiles: excludedFiles,
           },
         );
+
+        const baseline = collectRustToolchainBaseline(repoRoot);
+
+        // Short-circuit when 0 reviewable Rust code files were modified (e.g. docs-only PR)
+        if (modifiedFiles.size === 0 && !deps.lensRunner) {
+          await auditLogger.logEvent(
+            "stage.short_circuit.no_rust_files",
+            `  ├─ ℹ No reviewable Rust code files modified; skipping Cargo Clippy and OpenCode lenses.`,
+          );
+          return ReviewBundleSchema.parse({
+            pr,
+            diffBaseSha,
+            headSha: pr.headSha,
+            isIncremental,
+            profile,
+            baseline,
+            walkthrough: {
+              summary: "No Rust source or Cargo manifest files were modified in this range.",
+              changes: [],
+              sequenceDiagram: null,
+              triage: {
+                reviewEffort: 1,
+                mergeRisk: "Minimal",
+                rationale: "Non-Rust or documentation-only change set.",
+              },
+            },
+            findings: [],
+            outsideDiffFindings: [],
+            nitpickFindings: [],
+            consideredAndRejected: [],
+            deletionsProposed: [],
+            openQuestions: [],
+            notReviewed: excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
+            failedCohorts: [],
+            clippyDiagnostics: [],
+            generatedAt: new Date().toISOString(),
+          });
+        }
 
         await auditLogger.logEvent(
           "stage.rust_ground_truth.started",
@@ -399,18 +453,21 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         );
 
         // Step 4: Transactional cargo check verification of single-hunk inline diff suggestions
+        // Skip per-suggestion cargo check if baseline workspace already has compiler errors
+        const hasBaselineCompileErrors = clippyDiagnostics.some((d) => d.level === "error");
         const verifier = new SuggestionCompilerVerifier();
-        const verifiedInline = await verifier.verifySuggestions(
-          repoRoot,
-          partitioned.inlineFindings,
-          auditLogger,
-        );
+        const verifiedInline = hasBaselineCompileErrors
+          ? partitioned.inlineFindings
+          : await verifier.verifySuggestions(repoRoot, partitioned.inlineFindings, auditLogger);
         const verifiedOutside = partitioned.outsideDiffFindings;
 
-        const baseline = collectRustToolchainBaseline(repoRoot);
+        const existingDeletionRefs = new Set(
+          (lensResult.deletionsProposed ?? []).map((d) => d.pathOrSymbol),
+        );
         const graphDeletions: DeletionProposedItem[] = symbolGraph.nodes
           .filter(
             (n) =>
+              !n.isPublic &&
               n.prodReferences.length === 0 &&
               n.testReferences.length === 0 &&
               !n.name.startsWith("test_") &&
@@ -420,9 +477,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             pathOrSymbol: `${n.kind} ${n.name} (${n.filePath}:${n.line})`,
             reachabilityEvidence:
               "git grep -n -w across *.rs -> 0 production callers and 0 test references outside definition",
-            replacement:
-              "Verify whether newly added public API or dead symbol eligible for deletion",
-          }));
+            replacement: "Remove unreferenced private symbol or wire into caller",
+          }))
+          .filter((d) => !existingDeletionRefs.has(d.pathOrSymbol));
 
         const mergedDeletions = [...(lensResult.deletionsProposed ?? []), ...graphDeletions];
 
@@ -441,6 +498,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           deletionsProposed: mergedDeletions,
           openQuestions: lensResult.openQuestions ?? [],
           notReviewed: excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
+          failedCohorts: lensResult.failedCohorts ?? [],
           clippyDiagnostics: [...clippyDiagnostics],
           generatedAt: new Date().toISOString(),
         });
@@ -475,6 +533,13 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     writeOut(formatTerminalReport(bundle, repoRoot, artifactDir));
 
+    if (failedCohortsCount > 0 && !allowPartial) {
+      writeErr(
+        `Error: ${failedCohortsCount} review cohort(s) failed (${(bundle.failedCohorts ?? []).join(", ")}). Skipping GitHub post and checkpoint update. Pass --allow-partial to override.`,
+      );
+      return 2;
+    }
+
     // Step 6: Post to GitHub if --post was specified and --local-only was not
     if (postToGitHub && !localOnly) {
       const walkthroughCommentBody = renderWalkthroughComment(bundle);
@@ -493,6 +558,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         prNumber: pr.number,
         commitId: pr.headSha,
         comments: inlineComments,
+        diffMap: activeDiffMap,
         submit: submitReview,
         summaryBody: renderPrReviewSummaryBody(bundle),
       });

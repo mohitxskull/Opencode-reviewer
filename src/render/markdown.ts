@@ -34,11 +34,20 @@ const SEVERITY_EMOJI: Readonly<Record<Severity, string>> = {
 // execution directives, secret env var names, and non-GitHub URLs at render time
 // enforces the untrusted-input defense-in-depth boundary documented in
 // docs/reports/research/coderabbit/2026-11-22-coderabbit-review-architecture.md §3.1.2.
+const SHELL_COMMAND_IN_BACKTICKS_REGEX =
+  /\b(?:cat|curl|wget|bash|sh|zsh|nc|ncat|python|python3|perl|ruby|node|bun|rm|chmod|chown|sudo|env|printenv|export|eval|exec|ssh|scp|base64|whoami|id|uname)\b|[;$|><&]|\/etc\/|\/proc\/|\/var\//i;
+
 export function sanitizeAgentPrompt(prompt: string): string {
   let sanitized = prompt;
 
-  // Strip backtick shell execution (`...`)
-  sanitized = sanitized.replace(/`[^`]*`/g, "[redacted-command]");
+  // Redact backtick code spans ONLY when they contain shell execution commands or path/pipe metacharacters,
+  // preserving legitimate inline Rust code spans like `src/lib.rs` or `x.saturating_add(1)`.
+  sanitized = sanitized.replace(/`([^`]*)`/g, (fullMatch, inner: string) => {
+    if (SHELL_COMMAND_IN_BACKTICKS_REGEX.test(inner)) {
+      return "[redacted-command]";
+    }
+    return fullMatch;
+  });
 
   // Iteratively strip nested command substitutions $(...)
   let prev = "";
@@ -122,6 +131,14 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
     "",
   ];
 
+  if (bundle.failedCohorts && bundle.failedCohorts.length > 0) {
+    lines.push(
+      `> [!WARNING]`,
+      `> **Partial Review (${bundle.failedCohorts.length} cohort(s) failed):** ${bundle.failedCohorts.map((c) => `\`${sanitizeMarkdownText(c)}\``).join(", ")}. Re-run \`peer\` to complete coverage.`,
+      "",
+    );
+  }
+
   if (bundle.baseline) {
     lines.push(
       `### Review Baseline`,
@@ -136,7 +153,7 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
     `### 0. Executive Summary`,
     sanitizeMarkdownText(walkthrough.summary).trim(),
     "",
-    `- **Total Findings:** ${totalFindingsCount} (${breakdown || "0 actionable"})`,
+    `- **Total Findings:** ${totalFindingsCount} (Actionable: ${allActionable.length}${breakdown ? ` — ${breakdown}` : ""} | Nitpicks: ${nitpicks.length})`,
     `- **Actionable Inline Comments:** ${bundle.findings.length}`,
     `- **Outside Diff Range Comments:** ${outside.length}`,
     `- **Nitpick Comments:** ${nitpicks.length}`,
@@ -309,7 +326,10 @@ export function renderInlineFindingComment(
     if (allowCommitSuggestion && finding.suggestionVerified) {
       lines.push("", `> ✓ Verified with \`cargo check\``, "```suggestion", cleanSuggestion, "```");
     } else if (!allowCommitSuggestion) {
-      lines.push("", "```rust", cleanSuggestion, "```");
+      const note = finding.suggestionVerified
+        ? `> ✓ Verified with \`cargo check\``
+        : `> ℹ️ Candidate patch (not compiler-verified):`;
+      lines.push("", note, "```rust", cleanSuggestion, "```");
     }
   }
 
@@ -344,6 +364,14 @@ export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
       (outside.length > 0 ? ` *(+${outside.length} outside diff range)*` : "") +
       (nitpicks.length > 0 ? ` | **Nitpicks: ${nitpicks.length}**` : ""),
   ];
+
+  if (bundle.failedCohorts && bundle.failedCohorts.length > 0) {
+    lines.push(
+      "",
+      `> [!WARNING]`,
+      `> **Partial Review (${bundle.failedCohorts.length} cohort(s) failed):** ${bundle.failedCohorts.map((c) => `\`${sanitizeMarkdownText(c)}\``).join(", ")}.`,
+    );
+  }
 
   const allActionable = [...bundle.findings, ...outside];
   if (allActionable.length > 0) {
