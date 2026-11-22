@@ -136,6 +136,7 @@ export interface MultiLensOrchestratorOptions {
   readonly model?: ModelSpec;
   readonly clientFactory?: () => Promise<OpenCodeClientLike>;
   readonly sessionWaitTimeoutMs?: number;
+  readonly concurrencyLimit?: number;
 }
 
 export interface MultiLensRunResult {
@@ -151,11 +152,13 @@ export class OpenCodeMultiLensOrchestrator {
   private readonly model: ModelSpec;
   private readonly clientFactory: () => Promise<OpenCodeClientLike>;
   private readonly sessionWaitTimeoutMs: number;
+  private readonly concurrencyLimit: number;
 
   constructor(options: MultiLensOrchestratorOptions = {}) {
     this.model = options.model ?? parseModelSpec();
     this.clientFactory = options.clientFactory ?? createDefaultOpenCodeClient;
     this.sessionWaitTimeoutMs = options.sessionWaitTimeoutMs ?? DEFAULT_SESSION_WAIT_TIMEOUT_MS;
+    this.concurrencyLimit = Math.max(1, options.concurrencyLimit ?? 4);
   }
 
   public async runAllLenses(context: ReviewContext): Promise<MultiLensRunResult> {
@@ -233,21 +236,24 @@ export class OpenCodeMultiLensOrchestrator {
       },
     );
 
-    const walkthroughPromise = this.runWalkthroughLens(
-      client,
-      context.repoRoot,
-      walkthroughContextPrompt,
-      cacheDir,
-      audit,
-    );
-    walkthroughPromise.catch(() => {});
+    let walkthroughPromise: Promise<WalkthroughReport> | null = null;
+    if (this.concurrencyLimit > 1) {
+      walkthroughPromise = this.runWalkthroughLens(
+        client,
+        context.repoRoot,
+        walkthroughContextPrompt,
+        cacheDir,
+        audit,
+      );
+      walkthroughPromise.catch(() => {});
+    }
 
     const cohortFindings: Finding[] = [];
     const consideredAndRejected: ConsideredAndRejectedItem[] = [];
     const deletionsProposed: DeletionProposedItem[] = [];
     const openQuestions: OpenQuestionItem[] = [];
     const failedCohorts: string[] = [];
-    const concurrencyLimit = 4;
+    const concurrencyLimit = this.concurrencyLimit;
 
     for (let i = 0; i < cohorts.length; i += concurrencyLimit) {
       const batch = cohorts.slice(i, i + concurrencyLimit);
@@ -332,7 +338,16 @@ export class OpenCodeMultiLensOrchestrator {
       }
     }
 
-    const walkthrough = await walkthroughPromise;
+    const walkthrough =
+      walkthroughPromise !== null
+        ? await walkthroughPromise
+        : await this.runWalkthroughLens(
+            client,
+            context.repoRoot,
+            walkthroughContextPrompt,
+            cacheDir,
+            audit,
+          );
     return {
       walkthrough,
       findings: cohortFindings,

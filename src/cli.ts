@@ -74,6 +74,7 @@ Options:
   --post                     Post Walkthrough comment and PENDING draft review to GitHub
   --submit-review            Submit review with event=COMMENT instead of PENDING draft
   --allow-partial            Exit 0 and allow posting even if one or more review cohorts fail
+  --concurrency <n>          Max parallel OpenCode lens sessions (default: 4; use 1 for single-GPU local models)
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
   -h, --help                 Show this help message
@@ -94,6 +95,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         post: { type: "boolean", default: false },
         "submit-review": { type: "boolean", default: false },
         "allow-partial": { type: "boolean", default: false },
+        concurrency: { type: "string" },
         model: { type: "string" },
         scope: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
@@ -162,6 +164,16 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const postToGitHub = parsed.values.post ?? false;
     const submitReview = parsed.values["submit-review"] ?? false;
     const allowPartial = parsed.values["allow-partial"] ?? false;
+    const rawConcurrency = parsed.values.concurrency;
+    let concurrencyLimit = 4;
+    if (rawConcurrency !== undefined) {
+      const parsedConcurrency = Number.parseInt(rawConcurrency, 10);
+      if (!/^\d+$/.test(rawConcurrency.trim()) || parsedConcurrency < 1 || parsedConcurrency > 16) {
+        writeErr("Error: --concurrency must be an integer between 1 and 16.");
+        return 1;
+      }
+      concurrencyLimit = parsedConcurrency;
+    }
 
     if (postToGitHub && localOnly) {
       writeErr("Error: Cannot combine --post and --local-only.");
@@ -418,6 +430,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           (async (ctx) => {
             const orchestrator = new OpenCodeMultiLensOrchestrator({
               model: modelSpec,
+              concurrencyLimit,
             });
             return await orchestrator.runAllLenses(ctx);
           });
