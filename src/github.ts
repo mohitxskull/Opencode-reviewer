@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import {
+  PEER_REVIEW_MARKER,
   type PullRequestMetadata,
   PullRequestMetadataSchema,
   type PullRequestSummary,
@@ -204,14 +205,14 @@ export class GitHubClient {
   ): Promise<number> {
     const ensuredBody = body.includes(WALKTHROUGH_MARKER) ? body : `${WALKTHROUGH_MARKER}\n${body}`;
 
-    const commentsResponse = await this.octokit.rest.issues.listComments({
+    const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
       owner,
       repo,
       issue_number: pullNumber,
       per_page: 100,
     });
 
-    const existing = commentsResponse.data.find((c) => c.body?.includes(WALKTHROUGH_MARKER));
+    const existing = comments.find((c) => c.body?.includes(WALKTHROUGH_MARKER));
     if (existing) {
       const updated = await this.octokit.rest.issues.updateComment({
         owner,
@@ -236,20 +237,25 @@ export class GitHubClient {
   // only to the authenticated developer until they review and submit it in the
   // GitHub UI (or pass --submit-review). Because GitHub allows only one PENDING
   // review per user per PR (returning HTTP 422 on a second POST), we delete any
-  // prior PENDING review owned by the same user before creating a fresh one.
+  // prior PENDING review owned by the same user that carries `PEER_REVIEW_MARKER`
+  // before creating a fresh one — leaving manually authored human PENDING drafts untouched.
   public async postPrReview(options: PostPrReviewOptions): Promise<number> {
     const me = await this.octokit.rest.users.getAuthenticated();
     const myLogin = me.data.login;
 
-    const existingReviews = await this.octokit.rest.pulls.listReviews({
+    const existingReviews = await this.octokit.paginate(this.octokit.rest.pulls.listReviews, {
       owner: options.owner,
       repo: options.repo,
       pull_number: options.prNumber,
       per_page: 100,
     });
 
-    for (const review of existingReviews.data) {
-      if (review.state === "PENDING" && review.user?.login === myLogin) {
+    for (const review of existingReviews) {
+      if (
+        review.state === "PENDING" &&
+        review.user?.login === myLogin &&
+        review.body?.includes(PEER_REVIEW_MARKER)
+      ) {
         await this.octokit.rest.pulls.deletePendingReview({
           owner: options.owner,
           repo: options.repo,
@@ -258,6 +264,11 @@ export class GitHubClient {
         });
       }
     }
+
+    const rawSummary = options.summaryBody ?? "";
+    const markedSummary = rawSummary.includes(PEER_REVIEW_MARKER)
+      ? rawSummary
+      : `${PEER_REVIEW_MARKER}\n${rawSummary}`.trim();
 
     const formattedComments = options.comments.map((c) => {
       if (c.startLine < c.endLine) {
@@ -283,7 +294,7 @@ export class GitHubClient {
       repo: options.repo,
       pull_number: options.prNumber,
       commit_id: options.commitId,
-      body: options.summaryBody ?? "",
+      body: markedSummary,
       comments: formattedComments,
       ...(options.submit ? { event: "COMMENT" as const } : {}),
     };

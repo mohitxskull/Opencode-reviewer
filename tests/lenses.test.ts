@@ -360,4 +360,104 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
     expect(prompt).toContain("- `tests/heavy_integration.rs`");
     expect(prompt).not.toContain("L0003 (+):     assert_eq!(1, 1);");
   });
+
+  test("F-07: OpenCodeMultiLensOrchestrator retries walkthrough parse failure and records failedCohorts when a cohort fails all attempts", async () => {
+    const diffMap: Record<string, (typeof SAMPLE_CONTEXT.diffMap)[string]> = {};
+    for (let idx = 1; idx <= 8; idx++) {
+      const path = `src/sub${idx}/mod.rs`;
+      const sampleFile = SAMPLE_CONTEXT.diffMap["components/raftstore/src/lib.rs"];
+      if (sampleFile) {
+        diffMap[path] = { ...sampleFile, filePath: path };
+      }
+    }
+
+    let walkthroughAttempts = 0;
+    const promptsBySession = new Map<string, string>();
+    let sessSeq = 0;
+
+    const fakeClient: OpenCodeClientLike = {
+      session: {
+        create: async () => {
+          sessSeq += 1;
+          return { id: `s-${sessSeq}` };
+        },
+        prompt: async (input) => {
+          promptsBySession.set(input.sessionID, input.text);
+        },
+        remove: async () => {},
+      },
+      experimental: {
+        session: {
+          wait: async () => {},
+        },
+      },
+      message: {
+        list: async (input) => {
+          const text = promptsBySession.get(input.sessionID) ?? "";
+          if (text.includes("LENS: WALKTHROUGH_ARCHITECTURE")) {
+            walkthroughAttempts += 1;
+            if (walkthroughAttempts === 1) {
+              return {
+                data: [{ type: "assistant", content: [{ type: "text", text: "not json" }] }],
+              };
+            }
+            return {
+              data: [
+                {
+                  type: "assistant",
+                  content: [
+                    {
+                      type: "text",
+                      text: JSON.stringify({
+                        summary: "Walkthrough succeeded on retry 2.",
+                        changes: [],
+                        sequenceDiagram: null,
+                        triage: { reviewEffort: 2, mergeRisk: "Low", rationale: "ok" },
+                      }),
+                    },
+                  ],
+                },
+              ],
+            };
+          }
+          // Fail cohort-1 on both attempts, succeed on cohort-2
+          if (text.includes("src/sub1/mod.rs")) {
+            return { data: [{ type: "assistant", content: [{ type: "text", text: "bad json" }] }] };
+          }
+          return {
+            data: [
+              {
+                type: "assistant",
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      findings: [],
+                      consideredAndRejected: [],
+                      deletionsProposed: [],
+                      openQuestions: [],
+                    }),
+                  },
+                ],
+              },
+            ],
+          };
+        },
+      },
+    };
+
+    const orchestrator = new OpenCodeMultiLensOrchestrator({
+      clientFactory: async () => fakeClient,
+    });
+
+    const res = await orchestrator.runAllLenses({
+      ...SAMPLE_CONTEXT,
+      diffMap,
+    });
+
+    expect(walkthroughAttempts).toBe(2);
+    expect(res.walkthrough.summary).toBe("Walkthrough succeeded on retry 2.");
+    expect(res.failedCohorts?.length).toBe(1);
+    expect(res.failedCohorts?.[0]).toContain("cohort-1");
+  });
 });

@@ -779,6 +779,7 @@ export interface MultiLensRunResult {
   readonly consideredAndRejected?: ConsideredAndRejectedItem[];
   readonly deletionsProposed?: DeletionProposedItem[];
   readonly openQuestions?: OpenQuestionItem[];
+  readonly failedCohorts?: string[];
 }
 
 export class OpenCodeMultiLensOrchestrator {
@@ -861,11 +862,15 @@ export class OpenCodeMultiLensOrchestrator {
       overallContextPrompt,
       audit,
     );
+    // Attach a no-op catch handler immediately so an early walkthrough rejection
+    // while cohort batches are still awaiting does not trigger an unhandledRejection
+    walkthroughPromise.catch(() => {});
 
     const cohortFindings: Finding[] = [];
     const consideredAndRejected: ConsideredAndRejectedItem[] = [];
     const deletionsProposed: DeletionProposedItem[] = [];
     const openQuestions: OpenQuestionItem[] = [];
+    const failedCohorts: string[] = [];
     const concurrencyLimit = 4;
 
     for (let i = 0; i < cohorts.length; i += concurrencyLimit) {
@@ -919,6 +924,7 @@ export class OpenCodeMultiLensOrchestrator {
               audit,
             );
           } catch (err) {
+            failedCohorts.push(title);
             await audit?.logEvent(
               "lens.session.failed",
               `  ├─ ⚠ Cohort [${title}] failed after retries: ${err instanceof Error ? err.message : String(err)}`,
@@ -953,6 +959,7 @@ export class OpenCodeMultiLensOrchestrator {
       consideredAndRejected,
       deletionsProposed,
       openQuestions,
+      failedCohorts,
     };
   }
 
@@ -1032,33 +1039,56 @@ export class OpenCodeMultiLensOrchestrator {
     audit?: AuditLogger,
   ): Promise<WalkthroughReport> {
     const fullPrompt = `${WALKTHROUGH_LENS_PROMPT}\n\n${contextPrompt}`;
-    const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
-      client,
-      repoRoot,
-      "peer-lens-walkthrough",
-      fullPrompt,
-      [],
-      audit,
-    );
-    const jsonObj = extractJsonObject(replyText);
-    const parsed = WalkthroughReportSchema.parse(jsonObj);
+    let lastError: unknown = null;
 
-    await audit?.logEvent(
-      "lens.session.completed",
-      `  ├─ ✓ Finished [peer-lens-walkthrough] in ${(durationMs / 1000).toFixed(1)}s (effort=${parsed.triage.reviewEffort}/5, risk=${parsed.triage.mergeRisk}, ${parsed.changes.length} files summarized)`,
-      {
-        title: "peer-lens-walkthrough",
-        sessionID,
-        durationMs,
-        assistantTurns,
-        replyChars: replyText.length,
-        reviewEffort: parsed.triage.reviewEffort,
-        mergeRisk: parsed.triage.mergeRisk,
-        changesCount: parsed.changes.length,
-      },
-    );
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
+        client,
+        repoRoot,
+        "peer-lens-walkthrough",
+        fullPrompt,
+        [],
+        audit,
+      );
 
-    return parsed;
+      try {
+        const jsonObj = extractJsonObject(replyText);
+        const parsed = WalkthroughReportSchema.parse(jsonObj);
+
+        await audit?.logEvent(
+          "lens.session.completed",
+          `  ├─ ✓ Finished [peer-lens-walkthrough] in ${(durationMs / 1000).toFixed(1)}s (effort=${parsed.triage.reviewEffort}/5, risk=${parsed.triage.mergeRisk}, ${parsed.changes.length} files summarized)`,
+          {
+            title: "peer-lens-walkthrough",
+            sessionID,
+            durationMs,
+            assistantTurns,
+            replyChars: replyText.length,
+            reviewEffort: parsed.triage.reviewEffort,
+            mergeRisk: parsed.triage.mergeRisk,
+            changesCount: parsed.changes.length,
+          },
+        );
+
+        return parsed;
+      } catch (err) {
+        lastError = err;
+        if (attempt < 2) {
+          await audit?.logEvent(
+            "lens.session.retry",
+            `  ├─ ⟳ Retrying [peer-lens-walkthrough] after empty/unparseable response (attempt 2/2)...`,
+            {
+              title: "peer-lens-walkthrough",
+              sessionID,
+              replyPreview: replyText.slice(0, 200),
+              error: err instanceof Error ? err.message : String(err),
+            },
+          );
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
   private async runFindingsLens(

@@ -1,9 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { PEER_GIT_REVIEWS_REL_PATH } from "../git.ts";
+import { resolvePeerReviewsDir } from "../git.ts";
 import {
   type Finding,
   type FindingType,
+  PEER_REVIEW_MARKER,
   type ReviewBundle,
   type Severity,
   WALKTHROUGH_MARKER,
@@ -338,6 +339,7 @@ export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
   const actionableTotal = inlineCount + outside.length;
 
   const lines: string[] = [
+    PEER_REVIEW_MARKER,
     `**Actionable comments posted: ${inlineCount}**` +
       (outside.length > 0 ? ` *(+${outside.length} outside diff range)*` : "") +
       (nitpicks.length > 0 ? ` | **Nitpicks: ${nitpicks.length}**` : ""),
@@ -477,7 +479,7 @@ export async function writeLocalReviewArtifacts(
   repoRoot: string,
   bundle: ReviewBundle,
 ): Promise<string> {
-  const artifactDir = join(repoRoot, PEER_GIT_REVIEWS_REL_PATH, `pr-${bundle.pr.number}`);
+  const artifactDir = resolvePeerReviewsDir(repoRoot, bundle.pr.number);
   await mkdir(artifactDir, { recursive: true });
 
   const walkthroughMd = renderWalkthroughComment(bundle);

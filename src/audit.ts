@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { PEER_GIT_REVIEWS_REL_PATH } from "./git.ts";
+import { resolvePeerReviewsDir } from "./git.ts";
 
 export interface AuditEventRecord {
   readonly timestamp: string;
@@ -51,7 +51,7 @@ export class AuditLogger {
   }
 
   public getReviewDir(): string {
-    return join(this.repoRoot, PEER_GIT_REVIEWS_REL_PATH, `pr-${this.prNumber}`);
+    return resolvePeerReviewsDir(this.repoRoot, this.prNumber);
   }
 
   public getLatestAuditJsonlPath(): string {

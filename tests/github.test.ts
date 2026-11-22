@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { GitHubAuthError, GitHubClient, parsePrTarget, resolveGitHubToken } from "../src/github.ts";
-import { WALKTHROUGH_MARKER } from "../src/models.ts";
+import { PEER_REVIEW_MARKER, WALKTHROUGH_MARKER } from "../src/models.ts";
 
 interface RecordedRequest {
   method: string;
@@ -146,8 +146,19 @@ describe("Task 03: GitHub client and auth resolver", () => {
       if (req.method === "GET" && req.url.includes("/pulls/42/reviews")) {
         return {
           body: [
-            { id: 501, state: "COMMENTED", user: { login: "other-user" } },
-            { id: 502, state: "PENDING", user: { login: "skull-reviewer" } },
+            { id: 501, state: "COMMENTED", user: { login: "other-user" }, body: "" },
+            {
+              id: 502,
+              state: "PENDING",
+              user: { login: "skull-reviewer" },
+              body: `${PEER_REVIEW_MARKER}\nOld peer draft`,
+            },
+            {
+              id: 503,
+              state: "PENDING",
+              user: { login: "skull-reviewer" },
+              body: "Manual human pending review without peer marker",
+            },
           ],
         };
       }
@@ -188,6 +199,10 @@ describe("Task 03: GitHub client and auth resolver", () => {
     expect(
       requests.some((r) => r.method === "DELETE" && r.url.endsWith("/pulls/42/reviews/502")),
     ).toBe(true);
+    // F-09: Manual human PENDING review (503) without PEER_REVIEW_MARKER must NOT be deleted
+    expect(
+      requests.some((r) => r.method === "DELETE" && r.url.endsWith("/pulls/42/reviews/503")),
+    ).toBe(false);
 
     const postReq = requests.find(
       (r) => r.method === "POST" && r.url.endsWith("/pulls/42/reviews"),

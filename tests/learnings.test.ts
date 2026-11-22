@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatLearningsPromptSection, LearningStore } from "../src/learnings.ts";
+import {
+  CorruptLearningStoreError,
+  formatLearningsPromptSection,
+  LearningStore,
+} from "../src/learnings.ts";
 
 const tempDirs: string[] = [];
 
@@ -51,5 +55,37 @@ describe("Persistent repository learning store", () => {
     const removed = await store.remove(otherScopedRule.id);
     expect(removed).toBe(true);
     expect((await store.list()).length).toBe(2);
+  });
+
+  test("F-10 & F-11: LearningStore matches zero-segment ** globs and brace expansion via Bun.Glob and throws CorruptLearningStoreError on malformed learnings.json", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "peer-learnings-glob-"));
+    tempDirs.push(repo);
+
+    const store = new LearningStore(repo);
+    await store.add({
+      rule: "Zero-segment glob rule",
+      scope: "src/**/*.rs",
+    });
+    await store.add({
+      rule: "Brace expansion rule",
+      scope: "crates/{oms,core}/**/*.rs",
+    });
+
+    // F-11: `src/**/*.rs` must match zero-segment `src/lib.rs` as well as `src/sub/mod.rs`
+    const matchedRoot = await store.getMatchingLearnings(["src/lib.rs"]);
+    expect(matchedRoot.map((m) => m.rule)).toEqual(["Zero-segment glob rule"]);
+
+    // F-11: `crates/{oms,core}/**/*.rs` must match `crates/oms/src/lib.rs`
+    const matchedBraces = await store.getMatchingLearnings(["crates/oms/src/lib.rs"]);
+    expect(matchedBraces.map((m) => m.rule)).toEqual(["Brace expansion rule"]);
+
+    // F-10: Corrupt learnings.json must throw CorruptLearningStoreError instead of silently wiping on add()
+    await mkdir(join(repo, ".git", "peer"), { recursive: true });
+    await writeFile(store.getLearningsPath(), "{ corrupt json");
+
+    await expect(store.list()).rejects.toThrow(CorruptLearningStoreError);
+    await expect(store.add({ rule: "Should not overwrite corrupt file" })).rejects.toThrow(
+      CorruptLearningStoreError,
+    );
   });
 });

@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, rename } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import { registerSignalCleanup, triggerSignalCleanup } from "./lifecycle.ts";
 import { type ReviewCheckpoint, ReviewCheckpointSchema } from "./models.ts";
 
@@ -9,6 +10,22 @@ import { type ReviewCheckpoint, ReviewCheckpointSchema } from "./models.ts";
 // never collide with generated files and `git status --porcelain` stays clean
 // without modifying the user's .gitignore.
 export const PEER_GIT_REVIEWS_REL_PATH = ".git/peer/reviews";
+
+export function resolveGitCommonDir(repoRoot: string): string {
+  const res = tryGitSync(repoRoot, ["rev-parse", "--git-common-dir"]);
+  if (res.ok && res.stdout.length > 0) {
+    return isAbsolute(res.stdout) ? res.stdout : resolve(repoRoot, res.stdout);
+  }
+  return join(repoRoot, ".git");
+}
+
+export function resolvePeerStateDir(repoRoot: string): string {
+  return join(resolveGitCommonDir(repoRoot), "peer");
+}
+
+export function resolvePeerReviewsDir(repoRoot: string, prNumber: number): string {
+  return join(resolvePeerStateDir(repoRoot), "reviews", `pr-${prNumber}`);
+}
 
 export class GitRemoteError extends Error {
   constructor(message: string) {
@@ -266,7 +283,7 @@ export class CheckpointStore {
   }
 
   public getPrReviewDir(prNumber: number): string {
-    return join(this.repoRoot, PEER_GIT_REVIEWS_REL_PATH, `pr-${prNumber}`);
+    return resolvePeerReviewsDir(this.repoRoot, prNumber);
   }
 
   public getCheckpointPath(prNumber: number): string {
@@ -290,7 +307,10 @@ export class CheckpointStore {
     const validated = ReviewCheckpointSchema.parse(checkpoint);
     const dir = this.getPrReviewDir(validated.prNumber);
     await mkdir(dir, { recursive: true });
-    await Bun.write(this.getCheckpointPath(validated.prNumber), JSON.stringify(validated, null, 2));
+    const targetPath = this.getCheckpointPath(validated.prNumber);
+    const tmpPath = `${targetPath}.${randomUUID().slice(0, 8)}.tmp`;
+    await Bun.write(tmpPath, JSON.stringify(validated, null, 2));
+    await rename(tmpPath, targetPath);
   }
 
   public async resolveDiffBase(

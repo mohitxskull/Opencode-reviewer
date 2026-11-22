@@ -239,4 +239,27 @@ describe("Task 02: Git session and checkpoint store", () => {
       isIncremental: false,
     });
   });
+
+  test("F-10: CheckpointStore resolves common git dir inside a linked git worktree where .git is a file", async () => {
+    const mainRepo = await createTempGitRepo();
+    const worktreeDir = await mkdtemp(join(tmpdir(), "peer-git-wt-"));
+    tempDirs.push(worktreeDir);
+    await rm(worktreeDir, { recursive: true, force: true });
+
+    gitOutput(mainRepo, ["worktree", "add", "-b", "wt-branch", worktreeDir]);
+
+    const store = new CheckpointStore(worktreeDir);
+    const headSha = gitOutput(worktreeDir, ["rev-parse", "HEAD"]);
+    await store.save({
+      prNumber: 77,
+      baseSha: headSha,
+      lastReviewedHeadSha: headSha,
+      reviewedAt: new Date().toISOString(),
+      profile: "assertive",
+    });
+
+    const loaded = await store.load(77);
+    expect(loaded?.prNumber).toBe(77);
+    expect(loaded?.lastReviewedHeadSha).toBe(headSha);
+  });
 });

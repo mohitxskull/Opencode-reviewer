@@ -212,6 +212,13 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       }
     }
 
+    if (owner === "unknown" || repo === "unknown") {
+      writeErr(
+        "Unable to determine GitHub repository owner/name from 'origin' remote. Configure a GitHub 'origin' remote or pass a full GitHub PR URL (https://github.com/<owner>/<repo>/pull/<number>).",
+      );
+      return 1;
+    }
+
     const pr = await githubClient.getPullRequest(owner, repo, prNumber);
     const checkpointStore = new CheckpointStore(repoRoot);
     const modelSpec = parseModelSpec(parsed.values.model);
@@ -239,6 +246,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       },
     );
 
+    let failedCohortsCount = 0;
     const bundle = await withInPlaceCheckout(
       {
         repoRoot,
@@ -352,6 +360,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           });
 
         const lensResult = await lensRunner(reviewContext);
+        failedCohortsCount = lensResult.failedCohorts?.length ?? 0;
         const { walkthrough, findings: rawLensFindings } = lensResult;
 
         // Post-lens safety check: restore working tree if any external tool touched tracked files
@@ -430,14 +439,17 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     );
 
     // Step 5: Persist local artifacts & checkpoint inside .git/peer/reviews/pr-<num>/
+    // Do not advance incremental checkpoint if any cohort failed (F-07)
     const artifactDir = await writeLocalReviewArtifacts(repoRoot, bundle);
-    await checkpointStore.save({
-      prNumber: pr.number,
-      baseSha: pr.baseSha,
-      lastReviewedHeadSha: pr.headSha,
-      reviewedAt: bundle.generatedAt,
-      profile: bundle.profile,
-    });
+    if (failedCohortsCount === 0) {
+      await checkpointStore.save({
+        prNumber: pr.number,
+        baseSha: pr.baseSha,
+        lastReviewedHeadSha: pr.headSha,
+        reviewedAt: bundle.generatedAt,
+        profile: bundle.profile,
+      });
+    }
 
     await auditLogger.logEvent(
       "run.completed",

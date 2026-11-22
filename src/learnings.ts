@@ -1,7 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { resolvePeerStateDir } from "./git.ts";
+
+export class CorruptLearningStoreError extends Error {
+  public readonly filePath: string;
+
+  constructor(filePath: string, causeMessage: string) {
+    super(`Corrupt repository learnings file at ${filePath}: ${causeMessage}`);
+    this.name = "CorruptLearningStoreError";
+    this.filePath = filePath;
+  }
+}
 
 export const RepoLearningSchema = z.object({
   id: z.string().min(1),
@@ -15,25 +26,30 @@ const LearningFilePayloadSchema = z.object({
   learnings: z.array(RepoLearningSchema),
 });
 
-function scopeGlobMatchesFile(scopeGlob: string, filePath: string): boolean {
+export function scopeGlobMatchesFile(scopeGlob: string, filePath: string): boolean {
   const normalizedPattern = scopeGlob.replace(/\\/g, "/").replace(/^\.\//, "");
   const normalizedPath = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
   if (normalizedPattern === "*" || normalizedPattern === "**") {
     return true;
   }
-  const regexSource = normalizedPattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "___DOUBLE_STAR___")
-    .replace(/\*/g, "[^/]*")
-    .replace(/___DOUBLE_STAR___/g, ".*")
-    .replace(/\?/g, ".");
-  return new RegExp(`^${regexSource}$`).test(normalizedPath);
+  const glob = new Bun.Glob(normalizedPattern);
+  if (glob.match(normalizedPath)) {
+    return true;
+  }
+  // Support trailing `/**` matching files anywhere beneath the prefix
+  if (normalizedPattern.endsWith("/**")) {
+    const prefix = normalizedPattern.slice(0, -3);
+    if (normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Why: Persistent repository learnings prevent the reviewer from re-litigating
 // intentional architectural decisions (like CodeRabbit's organizational learnings)
 // without sending proprietary code to an external SaaS database. Learnings live
-// locally in `.git/peer/learnings.json` and filter by file path glob.
+// locally in `.git/peer/learnings.json` and filter by file path glob via `Bun.Glob`.
 export class LearningStore {
   private readonly repoRoot: string;
 
@@ -42,11 +58,12 @@ export class LearningStore {
   }
 
   public getLearningsPath(): string {
-    return join(this.repoRoot, ".git", "peer", "learnings.json");
+    return join(resolvePeerStateDir(this.repoRoot), "learnings.json");
   }
 
   public async list(): Promise<RepoLearning[]> {
-    const file = Bun.file(this.getLearningsPath());
+    const path = this.getLearningsPath();
+    const file = Bun.file(path);
     if (!(await file.exists())) {
       return [];
     }
@@ -54,8 +71,9 @@ export class LearningStore {
       const raw: unknown = await file.json();
       const parsed = LearningFilePayloadSchema.parse(raw);
       return parsed.learnings;
-    } catch {
-      return [];
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new CorruptLearningStoreError(path, msg);
     }
   }
 
@@ -95,9 +113,12 @@ export class LearningStore {
   }
 
   private async saveAll(learnings: readonly RepoLearning[]): Promise<void> {
-    const dir = join(this.repoRoot, ".git", "peer");
+    const dir = resolvePeerStateDir(this.repoRoot);
     await mkdir(dir, { recursive: true });
-    await Bun.write(this.getLearningsPath(), JSON.stringify({ learnings }, null, 2));
+    const targetPath = this.getLearningsPath();
+    const tmpPath = `${targetPath}.${randomUUID().slice(0, 8)}.tmp`;
+    await Bun.write(tmpPath, JSON.stringify({ learnings }, null, 2));
+    await rename(tmpPath, targetPath);
   }
 }
 

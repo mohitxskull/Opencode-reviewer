@@ -7,6 +7,7 @@ import { z } from "zod";
 // anchored and committed on GitHub.
 export const CHILL_MINOR_MIN_CONFIDENCE = 0.8;
 export const WALKTHROUGH_MARKER = "<!-- peer-walkthrough-comment -->";
+export const PEER_REVIEW_MARKER = "<!-- peer-review-body -->";
 
 export const SeveritySchema = z.enum(["Critical", "Major", "Minor", "Trivial", "Info", "None"]);
 export type Severity = z.infer<typeof SeveritySchema>;
