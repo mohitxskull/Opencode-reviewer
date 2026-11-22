@@ -37,6 +37,52 @@ export type ReviewProfile = z.infer<typeof ReviewProfileSchema>;
 export const FindingSourceSchema = z.enum(["clippy", "soundness", "idioms"]);
 export type FindingSource = z.infer<typeof FindingSourceSchema>;
 
+export const EpistemicStateSchema = z.enum([
+  "VERIFIED-DEFECT",
+  "NEEDS-RUNTIME-VERIFICATION",
+  "DESIGN-CONCERN",
+  "SYMPTOM-PATCH",
+]);
+export type EpistemicState = z.infer<typeof EpistemicStateSchema>;
+
+export const EvidenceMechanismSchema = z.enum([
+  "Concurrency",
+  "Security",
+  "Performance",
+  "Correctness",
+  "Design",
+]);
+export type EvidenceMechanism = z.infer<typeof EvidenceMechanismSchema>;
+
+export const ConsideredAndRejectedItemSchema = z.object({
+  location: z.string().min(1),
+  hypothesis: z.string().min(1),
+  reasonDismissed: z.string().min(1),
+});
+export type ConsideredAndRejectedItem = z.infer<typeof ConsideredAndRejectedItemSchema>;
+
+export const DeletionProposedItemSchema = z.object({
+  pathOrSymbol: z.string().min(1),
+  reachabilityEvidence: z.string().min(1),
+  replacement: z.string().min(1),
+});
+export type DeletionProposedItem = z.infer<typeof DeletionProposedItemSchema>;
+
+export const OpenQuestionItemSchema = z.object({
+  location: z.string().min(1),
+  question: z.string().min(1),
+  impact: z.string().min(1),
+});
+export type OpenQuestionItem = z.infer<typeof OpenQuestionItemSchema>;
+
+export const ReviewBaselineHeaderSchema = z.object({
+  mode: z.enum(["REVIEW", "REMEDIATE", "HYBRID"]).default("REVIEW"),
+  rustcVersion: z.string().min(1),
+  cargoVersion: z.string().min(1),
+  verificationCommands: z.array(z.string()),
+});
+export type ReviewBaselineHeader = z.infer<typeof ReviewBaselineHeaderSchema>;
+
 export const MergeRiskSchema = z.enum(["Minimal", "Low", "Medium", "High", "Critical"]);
 export type MergeRisk = z.infer<typeof MergeRiskSchema>;
 
@@ -71,8 +117,19 @@ export const FindingSchema = z
     endLine: z.number().int().min(1),
     severity: SeveritySchema,
     type: FindingTypeSchema,
+    epistemicState: EpistemicStateSchema.default("VERIFIED-DEFECT").optional(),
+    evidenceMechanism: EvidenceMechanismSchema.default("Correctness").optional(),
     title: z.string().min(1),
     body: z.string().min(1),
+    rootCause: z.string().default("").optional(),
+    blastRadius: z.string().default("Local module").optional(),
+    reversible: z.boolean().default(true).optional(),
+    dependsOn: z.string().nullable().default(null).optional(),
+    verificationCommand: z
+      .string()
+      .default("cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings")
+      .optional(),
+    traceability: z.string().default("").optional(),
     suggestion: z.string().nullable(),
     suggestionVerified: z.boolean().default(false),
     agentPrompt: z.string().min(1),
@@ -93,13 +150,26 @@ export const LensFindingsOutputSchema = z.object({
       endLine: z.number().int().min(1),
       severity: SeveritySchema,
       type: FindingTypeSchema,
+      epistemicState: EpistemicStateSchema.default("VERIFIED-DEFECT"),
+      evidenceMechanism: EvidenceMechanismSchema.default("Correctness"),
       title: z.string().min(1),
       body: z.string().min(1),
+      rootCause: z.string().default(""),
+      blastRadius: z.string().default("Local module"),
+      reversible: z.boolean().default(true),
+      dependsOn: z.string().nullable().default(null),
+      verificationCommand: z
+        .string()
+        .default("cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings"),
+      traceability: z.string().default(""),
       suggestion: z.string().nullable().default(null),
       agentPrompt: z.string().min(1),
       confidence: z.number().min(0).max(1).default(0.9),
     }),
   ),
+  consideredAndRejected: z.array(ConsideredAndRejectedItemSchema).default([]),
+  deletionsProposed: z.array(DeletionProposedItemSchema).default([]),
+  openQuestions: z.array(OpenQuestionItemSchema).default([]),
 });
 export type LensFindingsOutput = z.infer<typeof LensFindingsOutputSchema>;
 
@@ -181,10 +251,15 @@ export const ReviewBundleSchema = z.object({
   headSha: z.string().min(7),
   isIncremental: z.boolean(),
   profile: ReviewProfileSchema,
+  baseline: ReviewBaselineHeaderSchema.optional(),
   walkthrough: WalkthroughReportSchema,
   findings: z.array(FindingSchema),
-  outsideDiffFindings: z.array(FindingSchema).default([]),
-  nitpickFindings: z.array(FindingSchema).default([]),
+  outsideDiffFindings: z.array(FindingSchema).default([]).optional(),
+  nitpickFindings: z.array(FindingSchema).default([]).optional(),
+  consideredAndRejected: z.array(ConsideredAndRejectedItemSchema).default([]).optional(),
+  deletionsProposed: z.array(DeletionProposedItemSchema).default([]).optional(),
+  openQuestions: z.array(OpenQuestionItemSchema).default([]).optional(),
+  notReviewed: z.array(z.string()).default([]).optional(),
   clippyDiagnostics: z.array(ClippyDiagnosticSchema),
   generatedAt: z.string(),
 });

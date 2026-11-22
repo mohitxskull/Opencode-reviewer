@@ -20,13 +20,17 @@ import {
 import { buildRustSymbolGraph } from "./graph.ts";
 import { clippyToFindings, partitionAndFilterFindings } from "./judge.ts";
 import { LearningStore } from "./learnings.ts";
-import { OpenCodeMultiLensOrchestrator, parseModelSpec, type ReviewContext } from "./lenses.ts";
 import {
-  type Finding,
+  type MultiLensRunResult,
+  OpenCodeMultiLensOrchestrator,
+  parseModelSpec,
+  type ReviewContext,
+} from "./lenses.ts";
+import {
+  type DeletionProposedItem,
   ReviewBundleSchema,
   type ReviewProfile,
   ReviewProfileSchema,
-  type WalkthroughReport,
 } from "./models.ts";
 import {
   renderInlineFindingComment,
@@ -35,12 +39,14 @@ import {
   writeLocalReviewArtifacts,
 } from "./render/markdown.ts";
 import { formatTerminalReport } from "./render/terminal.ts";
-import { collectClippyDiagnostics, collectCrateGraph } from "./rust.ts";
+import {
+  collectClippyDiagnostics,
+  collectCrateGraph,
+  collectRustToolchainBaseline,
+} from "./rust.ts";
 import { SuggestionCompilerVerifier } from "./verifier.ts";
 
-export type LensRunnerFn = (
-  context: ReviewContext,
-) => Promise<{ walkthrough: WalkthroughReport; findings: Finding[] }>;
+export type LensRunnerFn = (context: ReviewContext) => Promise<MultiLensRunResult>;
 
 export interface CliDependencies {
   readonly githubClient?: GitHubClient;
@@ -342,7 +348,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             return await orchestrator.runAllLenses(ctx);
           });
 
-        const { walkthrough, findings: rawLensFindings } = await lensRunner(reviewContext);
+        const lensResult = await lensRunner(reviewContext);
+        const { walkthrough, findings: rawLensFindings } = lensResult;
 
         // Post-lens safety check: restore working tree if any external tool touched tracked files
         runGitSync(repoRoot, ["checkout", "--", "."]);
@@ -357,13 +364,16 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
         await auditLogger.logEvent(
           "stage.judge.completed",
-          `▶ Stage 5/6: Judge partitioned ${rawLensFindings.length + clippyFindings.length} raw findings -> ${partitioned.inlineFindings.length} inline, ${partitioned.outsideDiffFindings.length} outside-diff, ${partitioned.nitpickFindings.length} nitpicks. Running cargo check on suggestions...`,
+          `▶ Stage 5/6: Judge partitioned ${rawLensFindings.length + clippyFindings.length} raw findings -> ${partitioned.inlineFindings.length} inline, ${partitioned.outsideDiffFindings.length} outside-diff, ${partitioned.nitpickFindings.length} nitpicks (${lensResult.consideredAndRejected?.length ?? 0} hypotheses considered & rejected). Running cargo check on suggestions...`,
           {
             rawLensFindingsCount: rawLensFindings.length,
             clippyFindingsCount: clippyFindings.length,
             inlineCount: partitioned.inlineFindings.length,
             outsideDiffCount: partitioned.outsideDiffFindings.length,
             nitpickCount: partitioned.nitpickFindings.length,
+            consideredAndRejectedCount: lensResult.consideredAndRejected?.length ?? 0,
+            deletionsProposedCount: lensResult.deletionsProposed?.length ?? 0,
+            openQuestionsCount: lensResult.openQuestions?.length ?? 0,
           },
         );
 
@@ -380,16 +390,40 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           auditLogger,
         );
 
+        const baseline = collectRustToolchainBaseline(repoRoot);
+        const graphDeletions: DeletionProposedItem[] = symbolGraph.nodes
+          .filter(
+            (n) =>
+              n.prodReferences.length === 0 &&
+              n.testReferences.length === 0 &&
+              !n.name.startsWith("test_") &&
+              !n.filePath.includes("tests"),
+          )
+          .map((n) => ({
+            pathOrSymbol: `${n.kind} ${n.name} (${n.filePath}:${n.line})`,
+            reachabilityEvidence:
+              "git grep -n -w across *.rs -> 0 production callers and 0 test references outside definition",
+            replacement:
+              "Verify whether newly added public API or dead symbol eligible for deletion",
+          }));
+
+        const mergedDeletions = [...(lensResult.deletionsProposed ?? []), ...graphDeletions];
+
         return ReviewBundleSchema.parse({
           pr,
           diffBaseSha,
           headSha: pr.headSha,
           isIncremental,
           profile,
+          baseline,
           walkthrough,
           findings: verifiedInline,
           outsideDiffFindings: verifiedOutside,
           nitpickFindings: partitioned.nitpickFindings,
+          consideredAndRejected: lensResult.consideredAndRejected ?? [],
+          deletionsProposed: mergedDeletions,
+          openQuestions: lensResult.openQuestions ?? [],
+          notReviewed: excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
           clippyDiagnostics: [...clippyDiagnostics],
           generatedAt: new Date().toISOString(),
         });
@@ -414,8 +448,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         auditJsonlPath: auditLogger.getLatestAuditJsonlPath(),
         runAuditJsonlPath: auditLogger.getRunAuditJsonlPath(),
         inlineFindingsCount: bundle.findings.length,
-        outsideDiffFindingsCount: bundle.outsideDiffFindings.length,
-        nitpickFindingsCount: bundle.nitpickFindings.length,
+        outsideDiffFindingsCount: bundle.outsideDiffFindings?.length ?? 0,
+        nitpickFindingsCount: bundle.nitpickFindings?.length ?? 0,
       },
     );
 

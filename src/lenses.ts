@@ -9,10 +9,13 @@ import {
 import { formatLearningsPromptSection, type RepoLearning } from "./learnings.ts";
 import type {
   ClippyDiagnostic,
+  ConsideredAndRejectedItem,
   CrateGraph,
+  DeletionProposedItem,
   DiffFileMap,
   Finding,
   FindingSource,
+  OpenQuestionItem,
   PullRequestMetadata,
   WalkthroughReport,
 } from "./models.ts";
@@ -501,20 +504,44 @@ export function groupDiffFilesIntoCohorts(
 }
 
 export const COHORT_DEEP_AUDIT_PROMPT = `LENS: SUBSYSTEM_COHORT_AUDIT
-You are a strict Senior Rust Architecture, Soundness, Concurrency, and Domain-Logic Auditor reviewing a specific subsystem cohort of a Pull Request.
-Produce root-cause, falsifiable, evidence-backed findings citing concrete failure mechanisms. Reject backward-compat shims, layered patches, sleeps, swallowed errors, and unsupported aesthetic nitpicks.
+You are a senior Rust code reviewer and architecture auditor.
+Produce a root-cause, evidence-backed review of this subsystem cohort that results in deletions, replacements, and rewrites where warranted — not layered patches.
+Every claim must be falsifiable. Every fix must be verifiable.
 TOKEN EFFICIENCY RULE: The full annotated diff hunks (\`L0042 (+):\`) and cross-workspace symbol call-site graph for your assigned cohort files are provided below. Make AT MOST 1 targeted \`read\` tool call ONLY if an external struct/fn outside the diff is strictly required; otherwise use 0 tool calls and emit your JSON response immediately.
 
-Audit EVERY assigned Tier 1 file in this cohort thoroughly for:
-1. Standing Rust Architecture & Correctness Laws:
-   - Source of truth hierarchy: (1) Code & type signatures, (2) Tests, (3) Code comments (flag code-vs-comment divergences as defects).
-   - Anti-patterns to flag: time-based sleeps, swallowed errors (\`let _ =\` or \`if let Ok(...)\` discarding failures) instead of \`Result\` propagation, unbounded queues/maps/sets/retries in long-running services, mutex guards held across \`.await\` or disk I/O, and floating-point arithmetic where exact decimal/integer precision is required.
-2. Soundness, Concurrency & Crash Safety:
-   - Locks (\`std::sync::Mutex\`, \`RwLock\`, \`parking_lot\`) held across \`.await\` or disk I/O, nested double-lock AB-BA deadlocks, barrier inversions, cancellation safety in \`tokio::select!\`, unbounded teardown drain loops, panics/\`unwrap()\`/\`expect()\`/unchecked indexing or arithmetic on production inputs, and \`unsafe\` invariants.
-3. State-Machine, Data Integrity & Edge-Case Bugs:
-   - Partial state mutations before fallible \`?\` returns, releasing reservations before durable status writes succeed, stale snapshots overwriting newer state, uncalled cleanup/reset methods (check the Symbol Call-Site Graph!), inconsistent status transitions, and off-by-one boundary bugs.
-4. Performance & PingCAP/TiKV Rust Idioms:
-   - Hot-path clones/allocations, \`crate::\` module imports, \`as_\`/\`to_\`/\`into_\` conversion naming, and visibility minimalism.
+# Source of Truth (strict precedence)
+1. Code — authoritative for actual behavior.
+2. Tests and type signatures — executable requirements.
+3. Code comments — claims about intent. MUST be verified against code. Any comment/code divergence is a defect: determine which is correct, fix the other. Stale comments are findings, not requirements.
+4. No external docs, READMEs, wikis, or guides are authoritative.
+
+# Standing Constraints
+- Structure is non-negotiable: clear module boundaries, naming, ownership, dependency direction. Enforce layering. Flag cycles, god modules, hidden globals, unstable interfaces, stringly-typed contracts.
+- No backward-compatibility shims, adapters, deprecation layers, or legacy paths. Keep only current architecture.
+- Breaking changes must be COMPLETE AND ATOMIC: all call sites, configs, serialized formats, schemas, tests, and comments updated in the same change. Half-migrations are defects.
+- Delete obsolete code instead of degrading it — backed by reachability evidence (see Symbol Call-Site Graph).
+- Anti-patterns to flag explicitly: time-based sleeps, swallowed errors (\`let _ =\` or \`if let Ok(...)\` discarding failures) instead of \`Result\` propagation, non-idempotent retries, unbounded queues/maps/sets in long-running loops, mutex guards (\`std::sync::Mutex\`, \`RwLock\`, \`parking_lot\`) held across \`.await\` or disk I/O, nested double-lock AB-BA deadlocks, partial state mutations before fallible \`?\` returns, and panics/\`unwrap()\`/\`expect()\`/unchecked indexing on production inputs.
+
+# Evidence Standard & Epistemic States
+Every finding in \`findings\` MUST be falsifiable and cite one \`evidenceMechanism\`:
+- \`"Concurrency"\`: the specific interleaving, lock-order inversion, or memory-ordering violation.
+- \`"Security"\`: the concrete attack and its prerequisites.
+- \`"Performance"\`: the complexity class, hot-path allocation, or unbounded memory growth.
+- \`"Correctness"\`: the concrete input or state transition producing wrong output or data loss.
+- \`"Design"\`: the violated invariant stated in code, tests, or comments (Invariant Ledger).
+
+Assign each finding one \`epistemicState\`:
+- \`"VERIFIED-DEFECT"\`
+- \`"NEEDS-RUNTIME-VERIFICATION"\` (state the exact test/experiment in \`verificationCommand\`)
+- \`"DESIGN-CONCERN"\`
+- \`"SYMPTOM-PATCH"\`
+
+# False-Positive Discipline (Considered & Rejected + Self-Check Pass)
+Before outputting JSON, re-attack your candidate findings:
+- Any hypothesis that you examined and confirmed is safe (or lacks falsifiable evidence) MUST be moved OUT of \`findings\` and recorded in \`consideredAndRejected\` with the concrete reason it was dismissed.
+- Any unverified assumption or missing requirement where every fix would be a guess MUST be placed in \`openQuestions\`.
+- Any dead symbol/shim with 0 callers in the Symbol Call-Site Graph belongs in \`deletionsProposed\`.
+- Never emit duplicate findings — one entry per root cause.
 
 Return ONLY a single JSON object matching this exact schema:
 {
@@ -525,17 +552,46 @@ Return ONLY a single JSON object matching this exact schema:
       "endLine": 12,
       "severity": "Critical" | "Major" | "Minor" | "Trivial" | "Info",
       "type": "Bug" | "Soundness" | "Concurrency" | "Security" | "Performance" | "Idioms" | "Refactor",
-      "title": "Imperative, specific defect title (e.g. 'Derive Dhan status from durable fill count')",
-      "body": "Concrete root-cause explanation: name the exact variable/line, trace the failure mechanism step-by-step, and state the required fix.",
+      "epistemicState": "VERIFIED-DEFECT" | "NEEDS-RUNTIME-VERIFICATION" | "DESIGN-CONCERN" | "SYMPTOM-PATCH",
+      "evidenceMechanism": "Concurrency" | "Security" | "Performance" | "Correctness" | "Design",
+      "title": "Imperative, specific defect title",
+      "body": "Concrete root-cause explanation: name the exact variable/line, trace the failure mechanism step-by-step, and state the smallest-correct-fix (or justify rewrite vs targeted fix).",
+      "rootCause": "One-line root cause summary for grouping and the Index Table",
+      "blastRadius": "Affected modules/callers/consumers",
+      "reversible": true,
+      "dependsOn": null,
+      "verificationCommand": "Runnable command (e.g. 'cargo test -p <crate> <test_filter> && cargo clippy --workspace --all-targets -- -D warnings')",
+      "traceability": "Exact invariant, comment, or test violated",
       "suggestion": "Exact drop-in replacement lines for startLine..endLine (or null if multi-hunk)",
       "agentPrompt": "Actionable instructions for a coding agent at @filePath around lines startLine - endLine to fix and validate this issue.",
       "confidence": 0.92
     }
+  ],
+  "consideredAndRejected": [
+    {
+      "location": "relative/path.rs:100-115",
+      "hypothesis": "What looked suspicious and was checked",
+      "reasonDismissed": "Concrete code evidence proving why it is safe or not a defect"
+    }
+  ],
+  "deletionsProposed": [
+    {
+      "pathOrSymbol": "fn/struct name (relative/path.rs:line)",
+      "reachabilityEvidence": "Tool/symbol-graph evidence showing 0 production callers or obsolete shim",
+      "replacement": "none — remove obsolete code (or name replacement)"
+    }
+  ],
+  "openQuestions": [
+    {
+      "location": "relative/path.rs:line",
+      "question": "[ASSUMPTION] / [UNKNOWN] description",
+      "impact": "What architectural or correctness decision depends on this answer"
+    }
   ]
 }
 Rules:
-- Thoroughly inspect ALL Tier 1 files in this cohort — do not stop after the first file. Report every genuine, falsifiable defect you find across the cohort files.
-- Use the explicit right-side line numbers (\`L0042\`) from the annotated diff hunks. If a defect is inside a diff hunk, \`startLine..endLine\` MUST fall inside that single right-side hunk. If you discover a critical defect in a file outside the diff hunk lines, you may still report its exact file lines (it will be classified as an Outside Diff Range comment).`;
+- Thoroughly inspect ALL Tier 1 files in this cohort — do not stop after the first file.
+- Use the explicit right-side line numbers (\`L0042\`) from the annotated diff hunks. If a defect is inside a diff hunk, \`startLine..endLine\` MUST fall inside that single right-side hunk.`;
 
 export const SOUNDNESS_CONCURRENCY_LENS_PROMPT = `LENS: SOUNDNESS_CONCURRENCY
 You are the Rust Soundness, \`unsafe\`, and Async/Concurrency Review Lens.
@@ -709,6 +765,14 @@ export interface MultiLensOrchestratorOptions {
   readonly clientFactory?: () => Promise<OpenCodeClientLike>;
 }
 
+export interface MultiLensRunResult {
+  readonly walkthrough: WalkthroughReport;
+  readonly findings: Finding[];
+  readonly consideredAndRejected?: ConsideredAndRejectedItem[];
+  readonly deletionsProposed?: DeletionProposedItem[];
+  readonly openQuestions?: OpenQuestionItem[];
+}
+
 export class OpenCodeMultiLensOrchestrator {
   private readonly model: ModelSpec;
   private readonly clientFactory: () => Promise<OpenCodeClientLike>;
@@ -718,9 +782,7 @@ export class OpenCodeMultiLensOrchestrator {
     this.clientFactory = options.clientFactory ?? createDefaultOpenCodeClient;
   }
 
-  public async runAllLenses(
-    context: ReviewContext,
-  ): Promise<{ walkthrough: WalkthroughReport; findings: Finding[] }> {
+  public async runAllLenses(context: ReviewContext): Promise<MultiLensRunResult> {
     const client = await this.clientFactory();
     const overallContextPrompt = buildReviewContextPrompt(context);
     const cohorts = groupDiffFilesIntoCohorts(context.diffMap, context.crateGraph);
@@ -738,7 +800,7 @@ export class OpenCodeMultiLensOrchestrator {
         },
       );
 
-      const [walkthrough, soundnessFindings, idiomsFindings] = await Promise.all([
+      const [walkthrough, soundnessOut, idiomsOut] = await Promise.all([
         this.runWalkthroughLens(client, context.repoRoot, overallContextPrompt, audit),
         this.runFindingsLens(
           client,
@@ -764,7 +826,13 @@ export class OpenCodeMultiLensOrchestrator {
 
       return {
         walkthrough,
-        findings: [...soundnessFindings, ...idiomsFindings],
+        findings: [...soundnessOut.findings, ...idiomsOut.findings],
+        consideredAndRejected: [
+          ...soundnessOut.consideredAndRejected,
+          ...idiomsOut.consideredAndRejected,
+        ],
+        deletionsProposed: [...soundnessOut.deletionsProposed, ...idiomsOut.deletionsProposed],
+        openQuestions: [...soundnessOut.openQuestions, ...idiomsOut.openQuestions],
       };
     }
 
@@ -779,8 +847,6 @@ export class OpenCodeMultiLensOrchestrator {
       },
     );
 
-    // For multi-subsystem PRs, run the Walkthrough lens alongside parallel Subsystem Cohort Audits
-    // so every production Rust file in every subsystem cohort receives a full Tier 1 inline diff audit.
     const walkthroughPromise = this.runWalkthroughLens(
       client,
       context.repoRoot,
@@ -789,6 +855,9 @@ export class OpenCodeMultiLensOrchestrator {
     );
 
     const cohortFindings: Finding[] = [];
+    const consideredAndRejected: ConsideredAndRejectedItem[] = [];
+    const deletionsProposed: DeletionProposedItem[] = [];
+    const openQuestions: OpenQuestionItem[] = [];
     const concurrencyLimit = 4;
 
     for (let i = 0; i < cohorts.length; i += concurrencyLimit) {
@@ -851,13 +920,21 @@ export class OpenCodeMultiLensOrchestrator {
                 error: err instanceof Error ? err.message : String(err),
               },
             );
-            return [];
+            return {
+              findings: [],
+              consideredAndRejected: [],
+              deletionsProposed: [],
+              openQuestions: [],
+            };
           }
         }),
       );
 
       for (const res of batchResults) {
-        cohortFindings.push(...res);
+        cohortFindings.push(...res.findings);
+        consideredAndRejected.push(...res.consideredAndRejected);
+        deletionsProposed.push(...res.deletionsProposed);
+        openQuestions.push(...res.openQuestions);
       }
     }
 
@@ -865,6 +942,9 @@ export class OpenCodeMultiLensOrchestrator {
     return {
       walkthrough,
       findings: cohortFindings,
+      consideredAndRejected,
+      deletionsProposed,
+      openQuestions,
     };
   }
 
@@ -982,7 +1062,12 @@ export class OpenCodeMultiLensOrchestrator {
     source: FindingSource,
     files: readonly string[],
     audit?: AuditLogger,
-  ): Promise<Finding[]> {
+  ): Promise<{
+    findings: Finding[];
+    consideredAndRejected: ConsideredAndRejectedItem[];
+    deletionsProposed: DeletionProposedItem[];
+    openQuestions: OpenQuestionItem[];
+  }> {
     const fullPrompt = `${lensPrompt}\n\n${contextPrompt}`;
     let lastError: unknown = null;
 
@@ -1017,8 +1102,16 @@ export class OpenCodeMultiLensOrchestrator {
               endLine,
               severity: item.severity,
               type: item.type,
+              epistemicState: item.epistemicState,
+              evidenceMechanism: item.evidenceMechanism,
               title: item.title,
               body: item.body,
+              rootCause: item.rootCause || item.title,
+              blastRadius: item.blastRadius,
+              reversible: item.reversible,
+              dependsOn: item.dependsOn,
+              verificationCommand: item.verificationCommand,
+              traceability: item.traceability,
               suggestion: item.suggestion,
               suggestionVerified: false,
               agentPrompt: item.agentPrompt,
@@ -1030,7 +1123,7 @@ export class OpenCodeMultiLensOrchestrator {
 
         await audit?.logEvent(
           "lens.session.completed",
-          `  ├─ ✓ Finished [${title}] in ${(durationMs / 1000).toFixed(1)}s (${results.length} finding(s), ${assistantTurns} turn(s))`,
+          `  ├─ ✓ Finished [${title}] in ${(durationMs / 1000).toFixed(1)}s (${results.length} finding(s), ${parsed.consideredAndRejected.length} rejected, ${assistantTurns} turn(s))`,
           {
             title,
             sessionID,
@@ -1038,6 +1131,9 @@ export class OpenCodeMultiLensOrchestrator {
             assistantTurns,
             files,
             findingsCount: results.length,
+            consideredAndRejectedCount: parsed.consideredAndRejected.length,
+            deletionsProposedCount: parsed.deletionsProposed.length,
+            openQuestionsCount: parsed.openQuestions.length,
             findings: results.map((f) => ({
               id: f.id,
               filePath: f.filePath,
@@ -1045,13 +1141,21 @@ export class OpenCodeMultiLensOrchestrator {
               endLine: f.endLine,
               severity: f.severity,
               type: f.type,
+              epistemicState: f.epistemicState,
+              evidenceMechanism: f.evidenceMechanism,
               title: f.title,
+              rootCause: f.rootCause,
               hasSuggestion: f.suggestion !== null,
             })),
           },
         );
 
-        return results;
+        return {
+          findings: results,
+          consideredAndRejected: parsed.consideredAndRejected,
+          deletionsProposed: parsed.deletionsProposed,
+          openQuestions: parsed.openQuestions,
+        };
       } catch (err) {
         lastError = err;
         if (attempt < 2) {

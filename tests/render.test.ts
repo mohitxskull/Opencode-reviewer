@@ -196,4 +196,92 @@ describe("Task 07: CodeRabbit-grade Markdown renderers and prompt sanitizer", ()
     expect(reviewSummary).toContain("<details>\n<summary>🧹 Nitpick comments (1)</summary>");
     expect(reviewSummary).toContain("Prefer crate:: import prefix");
   });
+
+  test("renderWalkthroughComment renders Review Baseline, Root-Cause Index Table, Deletions Proposed, Considered & Rejected, Open Questions, and Not Reviewed", () => {
+    const richBundle: ReviewBundle = {
+      ...SAMPLE_BUNDLE,
+      baseline: {
+        mode: "REVIEW",
+        rustcVersion: "rustc 1.96.1",
+        cargoVersion: "cargo 1.96.1",
+        verificationCommands: [
+          "cargo clippy --workspace --all-targets -- -D warnings",
+          "cargo test --workspace",
+        ],
+      },
+      findings: [
+        {
+          id: "F1",
+          filePath: "src/services/common/ledger.rs",
+          startLine: 79,
+          endLine: 81,
+          severity: "Major",
+          type: "Bug",
+          epistemicState: "VERIFIED-DEFECT",
+          evidenceMechanism: "Correctness",
+          title: "Panic in writer job kills single ledger thread",
+          body: "Unwrapped job() panics unwind the writer loop.",
+          rootCause: "Unprotected job() execution on single-consumer channel loop",
+          blastRadius: "All durable ledger writes across engine",
+          reversible: true,
+          dependsOn: null,
+          verificationCommand: "cargo test --lib services::common::ledger",
+          traceability: "Violates line 107 error message contract",
+          suggestion: "let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));",
+          suggestionVerified: true,
+          agentPrompt: "Wrap job() in catch_unwind.",
+          confidence: 0.96,
+          source: "soundness",
+        },
+      ],
+      consideredAndRejected: [
+        {
+          location: "src/services/common/ledger.rs:459",
+          hypothesis: "Potential deadlock in enable_derivatives_mode",
+          reasonDismissed: "Does not hold outer OMS lock while calling run_sync.",
+        },
+      ],
+      deletionsProposed: [
+        {
+          pathOrSymbol: "fn unused_helper (src/old.rs:10)",
+          reachabilityEvidence: "0 production callers, 0 test refs in symbol graph",
+          replacement: "none — delete dead code",
+        },
+      ],
+      openQuestions: [
+        {
+          location: "src/exchange/dhan/mod.rs:44",
+          question: "[UNKNOWN] Expected max burst rate on Dhan WS reconnect",
+          impact: "Backoff ceiling sizing",
+        },
+      ],
+      notReviewed: ["docs/plans/04-oms/README.md (non-code markdown excluded)"],
+    };
+
+    const walkthroughMd = renderWalkthroughComment(richBundle);
+
+    expect(walkthroughMd).toContain("### Review Baseline");
+    expect(walkthroughMd).toContain("**Mode:** `REVIEW`");
+    expect(walkthroughMd).toContain("rustc 1.96.1");
+    expect(walkthroughMd).toContain("### 0. Executive Summary");
+    expect(walkthroughMd).toContain("### 1. Root-Cause Index Table");
+    expect(walkthroughMd).toContain("VERIFIED-DEFECT");
+    expect(walkthroughMd).toContain("Unprotected job() execution on single-consumer channel loop");
+    expect(walkthroughMd).toContain("### 3. Deletions Proposed");
+    expect(walkthroughMd).toContain("fn unused_helper (src/old.rs:10)");
+    expect(walkthroughMd).toContain("5. Considered & Rejected (1)");
+    expect(walkthroughMd).toContain("Potential deadlock in enable_derivatives_mode");
+    expect(walkthroughMd).toContain("### 6. Open Questions / Blockers");
+    expect(walkthroughMd).toContain("7. Not Reviewed (1)");
+
+    const firstFinding = richBundle.findings[0];
+    if (!firstFinding) {
+      throw new Error("Expected finding");
+    }
+    const inlineMd = renderInlineFindingComment(firstFinding);
+    expect(inlineMd).toContain("`VERIFIED-DEFECT`");
+    expect(inlineMd).toContain("**Mechanism:** `Correctness`");
+    expect(inlineMd).toContain("**Root Cause:** Unprotected job() execution");
+    expect(inlineMd).toContain("cargo test --lib services::common::ledger");
+  });
 });

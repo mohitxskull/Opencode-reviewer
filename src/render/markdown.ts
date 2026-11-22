@@ -69,23 +69,87 @@ export function sanitizeAgentPrompt(prompt: string): string {
   return sanitized.trim();
 }
 
+function escapeTableCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+}
+
 export function renderWalkthroughComment(bundle: ReviewBundle): string {
   const baseShort = bundle.diffBaseSha.slice(0, 7);
   const headShort = bundle.headSha.slice(0, 7);
   const modeLabel = bundle.isIncremental ? "Incremental Delta" : "Full PR Review";
   const { walkthrough } = bundle;
+  const outside = bundle.outsideDiffFindings ?? [];
+  const nitpicks = bundle.nitpickFindings ?? [];
+  const allActionable = [...bundle.findings, ...outside];
+  const totalFindingsCount = allActionable.length + nitpicks.length;
+
+  const bySeverity = (items: readonly Finding[]) => {
+    const counts: Record<string, number> = {};
+    for (const item of items) {
+      counts[item.severity] = (counts[item.severity] ?? 0) + 1;
+    }
+    return Object.entries(counts)
+      .map(([sev, cnt]) => `${SEVERITY_EMOJI[sev as Severity] ?? ""} ${sev}: ${cnt}`)
+      .join(" | ");
+  };
+
+  const breakdown = bySeverity(allActionable);
 
   const lines: string[] = [
     WALKTHROUGH_MARKER,
-    `## 🦀 Peer Rust PR Walkthrough`,
+    `## 🦀 Peer Rust PR Walkthrough & Architecture Audit`,
     "",
     `**Review Effort:** \`${walkthrough.triage.reviewEffort}/5\` | **Merge Risk:** \`${walkthrough.triage.mergeRisk}\` | **Profile:** \`${bundle.profile}\` | **Range:** \`${baseShort}..${headShort}\` (${modeLabel})`,
     `> **Triage Rationale:** ${walkthrough.triage.rationale}`,
     "",
-    `### Summary`,
+  ];
+
+  if (bundle.baseline) {
+    lines.push(
+      `### Review Baseline`,
+      `- **Mode:** \`${bundle.baseline.mode}\` | **Commit Range:** \`${baseShort}..${headShort}\` | **Date:** \`${bundle.generatedAt}\``,
+      `- **Toolchain:** \`${bundle.baseline.rustcVersion}\` | \`${bundle.baseline.cargoVersion}\``,
+      `- **Verification Commands:** ${bundle.baseline.verificationCommands.map((c) => `\`${c}\``).join(" · ")}`,
+      "",
+    );
+  }
+
+  lines.push(
+    `### 0. Executive Summary`,
     walkthrough.summary.trim(),
     "",
-  ];
+    `- **Total Findings:** ${totalFindingsCount} (${breakdown || "0 actionable"})`,
+    `- **Actionable Inline Comments:** ${bundle.findings.length}`,
+    `- **Outside Diff Range Comments:** ${outside.length}`,
+    `- **Nitpick Comments:** ${nitpicks.length}`,
+    `- **Cargo Clippy / Compiler Diagnostics Checked:** ${bundle.clippyDiagnostics.length}`,
+    "",
+  );
+
+  if (allActionable.length > 0) {
+    lines.push(
+      `### 1. Root-Cause Index Table`,
+      `| # | Severity | State | Mechanism | Confidence | Root Cause | Location | Blast Radius | Reversible? | Depends on |`,
+      `| :---: | :--- | :--- | :--- | :---: | :--- | :--- | :--- | :---: | :--- |`,
+    );
+    for (let i = 0; i < allActionable.length; i++) {
+      const f = allActionable[i];
+      if (!f) {
+        continue;
+      }
+      const sevIcon = SEVERITY_EMOJI[f.severity];
+      const confPct = `${Math.round(f.confidence * 100)}%`;
+      const rootCauseText = escapeTableCell(f.rootCause || f.title);
+      const locText = `\`${f.filePath}:${f.startLine}-${f.endLine}\``;
+      const blastText = escapeTableCell(f.blastRadius || "Local module");
+      const revText = f.reversible ? "Yes" : "No";
+      const depText = escapeTableCell(f.dependsOn ?? "—");
+      lines.push(
+        `| \`F${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState}\` | \`${f.evidenceMechanism}\` | ${confPct} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`,
+      );
+    }
+    lines.push("");
+  }
 
   const sortedChanges = [...walkthrough.changes].sort(
     (a, b) => a.layer - b.layer || a.filePath.localeCompare(b.filePath),
@@ -98,7 +162,7 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
   );
 
   for (const entry of sortedChanges) {
-    const safeSummary = entry.summary.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+    const safeSummary = escapeTableCell(entry.summary);
     lines.push(
       `| \`L${entry.layer}\` | \`${entry.crateName}\` | \`${entry.filePath}\` | ${safeSummary} |`,
     );
@@ -114,45 +178,101 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
     lines.push(`### Sequence Diagram`, "```mermaid", rawDiagram, "```", "");
   }
 
-  const outsideCount = bundle.outsideDiffFindings?.length ?? 0;
-  const nitpickCount = bundle.nitpickFindings?.length ?? 0;
-  const totalFindingsCount = bundle.findings.length + outsideCount + nitpickCount;
-
-  const bySeverity = (items: readonly Finding[]) => {
-    const counts: Record<string, number> = {};
-    for (const item of items) {
-      counts[item.severity] = (counts[item.severity] ?? 0) + 1;
+  const deletions = bundle.deletionsProposed ?? [];
+  if (deletions.length > 0) {
+    lines.push(
+      `### 3. Deletions Proposed`,
+      `| Symbol / Path | Reachability Evidence | Replacement |`,
+      `| :--- | :--- | :--- |`,
+    );
+    for (const d of deletions) {
+      lines.push(
+        `| \`${escapeTableCell(d.pathOrSymbol)}\` | ${escapeTableCell(d.reachabilityEvidence)} | ${escapeTableCell(d.replacement)} |`,
+      );
     }
-    return Object.entries(counts)
-      .map(([sev, cnt]) => `${SEVERITY_EMOJI[sev as Severity] ?? ""} ${sev}: ${cnt}`)
-      .join(" | ");
-  };
+    lines.push("");
+  }
 
-  const breakdown = bySeverity([...bundle.findings, ...(bundle.outsideDiffFindings ?? [])]);
+  const rejected = bundle.consideredAndRejected ?? [];
+  if (rejected.length > 0) {
+    lines.push(
+      `<details>`,
+      `<summary><strong>5. Considered & Rejected (${rejected.length})</strong> — Examined hypotheses dismissed with code evidence</summary>`,
+      "",
+      `| Location | Hypothesis Examined | Reason Dismissed |`,
+      `| :--- | :--- | :--- |`,
+    );
+    for (const r of rejected) {
+      lines.push(
+        `| \`${escapeTableCell(r.location)}\` | ${escapeTableCell(r.hypothesis)} | ${escapeTableCell(r.reasonDismissed)} |`,
+      );
+    }
+    lines.push("", `</details>`, "");
+  }
 
-  lines.push(
-    `### Findings Summary`,
-    `- **Total Findings:** ${totalFindingsCount} (${breakdown || "0 actionable"})`,
-    `- **Actionable Inline Comments:** ${bundle.findings.length}`,
-    `- **Outside Diff Range Comments:** ${outsideCount}`,
-    `- **Nitpick Comments:** ${nitpickCount}`,
-    `- **Cargo Clippy / Compiler Diagnostics Checked:** ${bundle.clippyDiagnostics.length}`,
-  );
+  const openQuestions = bundle.openQuestions ?? [];
+  if (openQuestions.length > 0) {
+    lines.push(
+      `### 6. Open Questions / Blockers`,
+      `| Location | Question / Unverified Assumption | Impact |`,
+      `| :--- | :--- | :--- |`,
+    );
+    for (const q of openQuestions) {
+      lines.push(
+        `| \`${escapeTableCell(q.location)}\` | ${escapeTableCell(q.question)} | ${escapeTableCell(q.impact)} |`,
+      );
+    }
+    lines.push("");
+  }
 
-  return lines.join("\n");
+  const notReviewed = bundle.notReviewed ?? [];
+  if (notReviewed.length > 0) {
+    lines.push(
+      `<details>`,
+      `<summary><strong>7. Not Reviewed (${notReviewed.length})</strong> — Non-code or out-of-scope paths</summary>`,
+      "",
+      ...notReviewed.map((item) => `- \`${item}\``),
+      "",
+      `</details>`,
+      "",
+    );
+  }
+
+  return lines.join("\n").trimEnd();
 }
 
 export function renderInlineFindingComment(finding: Finding): string {
   const typeIcon = TYPE_EMOJI[finding.type];
   const sevIcon = SEVERITY_EMOJI[finding.severity];
+  const stateLabel = finding.epistemicState ?? "VERIFIED-DEFECT";
+  const mechanismLabel = finding.evidenceMechanism ?? "Correctness";
 
   const lines: string[] = [
-    `_${typeIcon} ${finding.type}_ | _${sevIcon} ${finding.severity}_`,
+    `_${typeIcon} ${finding.type}_ | _${sevIcon} ${finding.severity}_ | \`${stateLabel}\` | **Mechanism:** \`${mechanismLabel}\``,
     "",
     `**${finding.title}**`,
     "",
     finding.body.trim(),
   ];
+
+  const metaBullets: string[] = [];
+  if (finding.rootCause && finding.rootCause.trim().length > 0) {
+    metaBullets.push(`- **Root Cause:** ${finding.rootCause.trim()}`);
+  }
+  if (finding.blastRadius && finding.blastRadius.trim().length > 0) {
+    metaBullets.push(
+      `- **Blast Radius:** ${finding.blastRadius.trim()} (Reversible: ${finding.reversible ? "Yes" : "No"})`,
+    );
+  }
+  if (finding.traceability && finding.traceability.trim().length > 0) {
+    metaBullets.push(`- **Traceability:** ${finding.traceability.trim()}`);
+  }
+  if (finding.verificationCommand && finding.verificationCommand.trim().length > 0) {
+    metaBullets.push(`- **Verification:** \`${finding.verificationCommand.trim()}\``);
+  }
+  if (metaBullets.length > 0) {
+    lines.push("", ...metaBullets);
+  }
 
   if (finding.suggestion !== null && finding.suggestionVerified) {
     const cleanSuggestion = finding.suggestion.replace(/\r\n/g, "\n").replace(/\n$/, "");
@@ -301,7 +421,7 @@ export function renderCombinedLocalReviewMarkdown(bundle: ReviewBundle): string 
     "",
     "---",
     "",
-    `## Actionable Inline Diff Comments (${bundle.findings.length})`,
+    `## 2. Actionable Inline Diff Findings (${bundle.findings.length})`,
   ];
 
   if (bundle.findings.length === 0) {
@@ -331,9 +451,14 @@ export async function writeLocalReviewArtifacts(
   const reviewMd = renderCombinedLocalReviewMarkdown(bundle);
   const findingsJson = JSON.stringify(
     {
+      baseline: bundle.baseline,
       inlineFindings: bundle.findings,
       outsideDiffFindings: bundle.outsideDiffFindings ?? [],
       nitpickFindings: bundle.nitpickFindings ?? [],
+      consideredAndRejected: bundle.consideredAndRejected ?? [],
+      deletionsProposed: bundle.deletionsProposed ?? [],
+      openQuestions: bundle.openQuestions ?? [],
+      notReviewed: bundle.notReviewed ?? [],
     },
     null,
     2,

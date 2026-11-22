@@ -5,6 +5,7 @@ import {
   type DiffFileMap,
   FindingSchema,
   isValidInlineRange,
+  LensFindingsOutputSchema,
   TriageScoreSchema,
 } from "../src/models.ts";
 
@@ -204,5 +205,63 @@ describe("Task 01: Domain models and profile/hunk rules", () => {
         rationale: "Invalid risk",
       }),
     ).toThrow(ZodError);
+  });
+
+  test("LensFindingsOutputSchema parses epistemicState, evidenceMechanism, rootCause, verificationCommand, consideredAndRejected, deletionsProposed, and openQuestions", () => {
+    const parsed = LensFindingsOutputSchema.parse({
+      findings: [
+        {
+          filePath: "src/oms/finalizer.rs",
+          startLine: 217,
+          endLine: 275,
+          severity: "Major",
+          type: "Bug",
+          epistemicState: "VERIFIED-DEFECT",
+          evidenceMechanism: "Correctness",
+          title: "Read cumulative filled_contracts on every finalization",
+          body: "stored_filled_contracts stays 0 when CID and size are known.",
+          rootCause: "Intent-store load gated on missing CID/size fallback",
+          blastRadius: "src/services/live/oms/finalizer.rs (all live venues)",
+          reversible: true,
+          dependsOn: null,
+          verificationCommand: "cargo test -p algo live::oms::finalizer",
+          traceability: "Violates finalizer doc comment invariant at line 18",
+          suggestion: null,
+          agentPrompt: "Unconditionally load stored_filled_contracts.",
+          confidence: 0.92,
+        },
+      ],
+      consideredAndRejected: [
+        {
+          location: "src/services/common/ledger.rs:459",
+          hypothesis: "Potential lock-across-I/O in enable_derivatives_mode",
+          reasonDismissed:
+            "enable_derivatives_mode only mutates in-memory settings without disk I/O.",
+        },
+      ],
+      deletionsProposed: [
+        {
+          pathOrSymbol: "fn legacy_v1_shim (src/oms/compat.rs:12)",
+          reachabilityEvidence: "git grep -n -w legacy_v1_shim -> 0 callers in workspace",
+          replacement: "none — remove obsolete compatibility shim",
+        },
+      ],
+      openQuestions: [
+        {
+          location: "src/exchange/dhan/rest/client.rs:88",
+          question: "[ASSUMPTION] Does Dhan REST v2 rate-limit per IP or per token?",
+          impact: "Determines whether RetryBudget should be shared across sub-accounts.",
+        },
+      ],
+    });
+
+    expect(parsed.findings[0]?.epistemicState).toBe("VERIFIED-DEFECT");
+    expect(parsed.findings[0]?.evidenceMechanism).toBe("Correctness");
+    expect(parsed.findings[0]?.rootCause).toBe(
+      "Intent-store load gated on missing CID/size fallback",
+    );
+    expect(parsed.consideredAndRejected.length).toBe(1);
+    expect(parsed.deletionsProposed.length).toBe(1);
+    expect(parsed.openQuestions.length).toBe(1);
   });
 });

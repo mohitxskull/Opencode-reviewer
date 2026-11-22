@@ -5,7 +5,38 @@ import {
   type CrateGraph,
   CrateGraphSchema,
   type CrateLayerInfo,
+  type ReviewBaselineHeader,
+  ReviewBaselineHeaderSchema,
 } from "./models.ts";
+
+export function collectRustToolchainBaseline(repoRoot: string): ReviewBaselineHeader {
+  const rustcProc = Bun.spawnSync(["rustc", "--version"], {
+    cwd: repoRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const cargoProc = Bun.spawnSync(["cargo", "--version"], {
+    cwd: repoRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const rustcVersion =
+    rustcProc.exitCode === 0 ? rustcProc.stdout.toString().trim() : "rustc (unknown)";
+  const cargoVersion =
+    cargoProc.exitCode === 0 ? cargoProc.stdout.toString().trim() : "cargo (unknown)";
+
+  return ReviewBaselineHeaderSchema.parse({
+    mode: "REVIEW",
+    rustcVersion,
+    cargoVersion,
+    verificationCommands: [
+      "cargo clippy --workspace --all-targets -- -D warnings",
+      "cargo fmt --all --check",
+      "cargo test --workspace",
+    ],
+  });
+}
 
 interface CargoMetadataPackage {
   id: string;
