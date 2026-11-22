@@ -1,5 +1,6 @@
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import { matchPathInstructionsForFiles, type RepoReviewConfig } from "./config.ts";
 import {
   extractSymbolsFromFileMap,
   formatSymbolGraphSummary,
@@ -102,6 +103,7 @@ export interface ReviewContext {
   readonly clippyDiagnostics: readonly ClippyDiagnostic[];
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
+  readonly repoConfig?: RepoReviewConfig | null;
 }
 
 // Why: Large PRs (e.g. 50-150 files, >1 MB raw diff) exceed an LLM's effective
@@ -207,6 +209,25 @@ export function buildReviewContextPrompt(
 
   if (context.learnings && context.learnings.length > 0) {
     sections.push(formatLearningsPromptSection(context.learnings));
+  }
+
+  if (context.repoConfig) {
+    const matchedRules = matchPathInstructionsForFiles(
+      context.repoConfig,
+      Object.keys(context.diffMap),
+    );
+    const configLines: string[] = [];
+    if (context.repoConfig.toneInstructions) {
+      configLines.push(`**Tone & Audit Standard:** ${context.repoConfig.toneInstructions}`);
+    }
+    for (const rule of matchedRules) {
+      configLines.push(`### Path Instructions for \`${rule.path}\`\n${rule.instructions}`);
+    }
+    if (configLines.length > 0) {
+      sections.push(
+        `## Repository Review Instructions (.coderabbit.yaml)\n${configLines.join("\n\n")}`,
+      );
+    }
   }
 
   const clippyFiles = new Set(context.clippyDiagnostics.map((d) => d.filePath));
@@ -362,6 +383,145 @@ Return ONLY a single JSON object matching this exact schema (no extra commentary
 Rules:
 1. Order "changes" by architectural layer ascending (0 = core/leaf crates first, verification/tests last).
 2. If the PR modifies cross-component control flow, async workflows, or state transitions, include a valid Mermaid "sequenceDiagram" string (quote any labels containing parentheses or special characters; never use HTML tags). Otherwise set "sequenceDiagram" to null.`;
+
+export interface FileCohort {
+  readonly id: string;
+  readonly label: string;
+  readonly filePaths: readonly string[];
+}
+
+function getSubsystemGroupKey(filePath: string): string {
+  const parts = filePath.replace(/\\/g, "/").split("/");
+  if (parts.length <= 2) {
+    return parts[0] ?? "root";
+  }
+  // Group e.g. src/services/live/dhan/foo.rs -> src/services/live/dhan
+  return parts.slice(0, Math.min(4, parts.length - 1)).join("/");
+}
+
+// Why: When a PR touches 10-60+ Rust files across multiple subsystems, a single
+// prompt cannot hold every file's diff hunks inline — causing single-call reviewers
+// to only inspect the first 1-2 files and miss bugs in the remaining subsystems.
+// Sharding modified files into subsystem cohorts (up to 4 files / 24k chars per
+// cohort) ensures EVERY production Rust file in a large PR receives a dedicated,
+// path-instruction-aware audit without exceeding context limits.
+export function groupDiffFilesIntoCohorts(
+  diffMap: Readonly<Record<string, DiffFileMap>>,
+  crateGraph: CrateGraph,
+  maxFilesPerCohort = 4,
+  maxCharsPerCohort = 24_000,
+): FileCohort[] {
+  const allPaths = Object.keys(diffMap);
+  if (allPaths.length === 0) {
+    return [];
+  }
+
+  const clippyEmpty = new Set<string>();
+  const scored = allPaths
+    .map((filePath) => {
+      const fileMap = diffMap[filePath];
+      const layerInfo = resolveFileArchitecturalLayer(crateGraph, filePath);
+      const priority = fileMap
+        ? scoreFileReviewPriority(fileMap, layerInfo.layer, crateGraph.testLayer, clippyEmpty)
+        : { score: 0, isTestOrBench: true, addedLinesCount: 0, riskSignals: [] };
+      const approxChars = fileMap
+        ? fileMap.hunks.reduce((acc, h) => acc + h.annotatedLines.join("\n").length, 0)
+        : 0;
+      return {
+        filePath,
+        groupKey: getSubsystemGroupKey(filePath),
+        layer: layerInfo.layer,
+        ...priority,
+        approxChars,
+      };
+    })
+    // Prioritize production Rust files over large test suites; sort by subsystem group and risk score
+    .sort((a, b) => {
+      if (a.isTestOrBench !== b.isTestOrBench) {
+        return a.isTestOrBench ? 1 : -1;
+      }
+      if (a.layer !== b.layer) {
+        return a.layer - b.layer;
+      }
+      if (a.groupKey !== b.groupKey) {
+        return a.groupKey.localeCompare(b.groupKey);
+      }
+      return b.score - a.score;
+    });
+
+  // Separate production files from pure test files (unless the PR only touches test files)
+  const prodFiles = scored.filter((f) => !f.isTestOrBench);
+  const targetFiles = prodFiles.length > 0 ? prodFiles : scored;
+
+  const cohorts: FileCohort[] = [];
+  let currentPaths: string[] = [];
+  let currentGroup = "";
+  let currentChars = 0;
+
+  const flushCohort = () => {
+    if (currentPaths.length === 0) {
+      return;
+    }
+    const idx = cohorts.length + 1;
+    cohorts.push({
+      id: `cohort-${idx}`,
+      label: currentGroup || `batch-${idx}`,
+      filePaths: currentPaths,
+    });
+    currentPaths = [];
+    currentChars = 0;
+  };
+
+  for (const item of targetFiles) {
+    const groupChanged = currentPaths.length > 0 && item.groupKey !== currentGroup;
+    const exceedsFiles = currentPaths.length >= maxFilesPerCohort;
+    const exceedsChars =
+      currentPaths.length > 0 && currentChars + item.approxChars > maxCharsPerCohort;
+
+    if (groupChanged || exceedsFiles || exceedsChars) {
+      flushCohort();
+    }
+    if (currentPaths.length === 0) {
+      currentGroup = item.groupKey;
+    }
+    currentPaths.push(item.filePath);
+    currentChars += Math.min(item.approxChars, maxCharsPerCohort);
+  }
+  flushCohort();
+
+  return cohorts;
+}
+
+export const COHORT_DEEP_AUDIT_PROMPT = `LENS: SUBSYSTEM_COHORT_AUDIT
+You are a strict Senior Rust Architecture, Soundness, Concurrency, and Domain-Logic Auditor reviewing a specific subsystem cohort of a Pull Request.
+TOKEN EFFICIENCY RULE: The full annotated diff hunks (\`L0042 (+):\`), cross-workspace symbol call-site graph, and repository path instructions for your assigned cohort files are provided below. Make AT MOST 1 targeted \`read\` tool call ONLY if an external struct/fn outside the diff is strictly required; otherwise use 0 tool calls and emit your JSON response immediately.
+
+Audit EVERY assigned Tier 1 file in this cohort thoroughly for:
+1. Repository Path Instructions (.coderabbit.yaml): Enforce every rule in the "Repository Review Instructions" section (financial Decimal vs float invariants, venue separation, error propagation vs swallowed errors, bounded queues/maps/retries, teardown iteration limits, reconciliation state transitions, monotonic timestamps, MIS session boundaries).
+2. Soundness, Concurrency & Crash Safety: Locks (\`Mutex\`/\`RwLock\`) held across \`.await\` or disk I/O, deadlock/barrier inversions, cancellation safety in \`tokio::select!\`, panics/\`unwrap()\`/\`expect()\`/unchecked indexing or arithmetic on production inputs, \`unsafe\` invariants.
+3. State-Machine, Data Integrity & Edge-Case Bugs: Partial state mutations before fallible \`?\` returns, stale snapshots overwriting newer state, uncalled cleanup/reset methods (check the Symbol Call-Site Graph!), inconsistent status transitions, off-by-one boundary bugs, silent error drops.
+4. Performance & PingCAP/TiKV Idioms: Hot-path clones/allocations, unbounded HashMap/Vec growth in long-running loops, proper \`Result\` propagation.
+
+Return ONLY a single JSON object matching this exact schema:
+{
+  "findings": [
+    {
+      "filePath": "relative/path.rs",
+      "startLine": 10,
+      "endLine": 12,
+      "severity": "Critical" | "Major" | "Minor" | "Trivial" | "Info",
+      "type": "Bug" | "Soundness" | "Concurrency" | "Security" | "Performance" | "Idioms" | "Refactor",
+      "title": "Imperative, specific defect title (e.g. 'Derive Dhan status from durable fill count')",
+      "body": "Concrete root-cause explanation: name the exact variable/line, trace the failure mechanism step-by-step, and state the required fix.",
+      "suggestion": "Exact drop-in replacement lines for startLine..endLine (or null if multi-hunk)",
+      "agentPrompt": "Actionable instructions for a coding agent at @filePath around lines startLine - endLine to fix and validate this issue.",
+      "confidence": 0.92
+    }
+  ]
+}
+Rules:
+- Thoroughly inspect ALL Tier 1 files in this cohort — do not stop after the first file. Report every genuine, falsifiable defect you find across the cohort files.
+- Use the explicit right-side line numbers (\`L0042\`) from the annotated diff hunks. If a defect is inside a diff hunk, \`startLine..endLine\` MUST fall inside that single right-side hunk. If you discover a critical defect in a file outside the diff hunk lines, you may still report its exact file lines (it will be classified as an Outside Diff Range comment).`;
 
 export const SOUNDNESS_CONCURRENCY_LENS_PROMPT = `LENS: SOUNDNESS_CONCURRENCY
 You are the Rust Soundness, \`unsafe\`, and Async/Concurrency Review Lens.
@@ -548,31 +708,105 @@ export class OpenCodeMultiLensOrchestrator {
     context: ReviewContext,
   ): Promise<{ walkthrough: WalkthroughReport; findings: Finding[] }> {
     const client = await this.clientFactory();
-    const contextPrompt = buildReviewContextPrompt(context);
+    const overallContextPrompt = buildReviewContextPrompt(context);
+    const cohorts = groupDiffFilesIntoCohorts(context.diffMap, context.crateGraph);
 
-    const [walkthrough, soundnessFindings, idiomsFindings] = await Promise.all([
-      this.runWalkthroughLens(client, context.repoRoot, contextPrompt),
-      this.runFindingsLens(
-        client,
-        context.repoRoot,
-        "peer-lens-soundness",
-        SOUNDNESS_CONCURRENCY_LENS_PROMPT,
-        contextPrompt,
-        "soundness",
-      ),
-      this.runFindingsLens(
-        client,
-        context.repoRoot,
-        "peer-lens-idioms",
-        IDIOMS_LOGIC_LENS_PROMPT,
-        contextPrompt,
-        "idioms",
-      ),
-    ]);
+    // For small PRs (<= 1 cohort), run the 3 standard lenses (Walkthrough + Soundness + Idioms)
+    if (cohorts.length <= 1) {
+      const [walkthrough, soundnessFindings, idiomsFindings] = await Promise.all([
+        this.runWalkthroughLens(client, context.repoRoot, overallContextPrompt),
+        this.runFindingsLens(
+          client,
+          context.repoRoot,
+          "peer-lens-soundness",
+          SOUNDNESS_CONCURRENCY_LENS_PROMPT,
+          overallContextPrompt,
+          "soundness",
+        ),
+        this.runFindingsLens(
+          client,
+          context.repoRoot,
+          "peer-lens-idioms",
+          IDIOMS_LOGIC_LENS_PROMPT,
+          overallContextPrompt,
+          "idioms",
+        ),
+      ]);
 
+      return {
+        walkthrough,
+        findings: [...soundnessFindings, ...idiomsFindings],
+      };
+    }
+
+    // For multi-subsystem PRs, run the Walkthrough lens alongside parallel Subsystem Cohort Audits
+    // so every production Rust file in every subsystem cohort receives a full Tier 1 inline diff audit.
+    const walkthroughPromise = this.runWalkthroughLens(
+      client,
+      context.repoRoot,
+      overallContextPrompt,
+    );
+
+    const cohortFindings: Finding[] = [];
+    const concurrencyLimit = 4;
+
+    for (let i = 0; i < cohorts.length; i += concurrencyLimit) {
+      const batch = cohorts.slice(i, i + concurrencyLimit);
+      const batchResults = await Promise.all(
+        batch.map(async (cohort) => {
+          const cohortDiffMap: Record<string, DiffFileMap> = {};
+          for (const fp of cohort.filePaths) {
+            const fm = context.diffMap[fp];
+            if (fm) {
+              cohortDiffMap[fp] = fm;
+            }
+          }
+          const cohortFileSet = new Set(cohort.filePaths);
+          const cohortClippy = context.clippyDiagnostics.filter((d) =>
+            cohortFileSet.has(d.filePath),
+          );
+          const cohortSymbolGraph = context.symbolGraph
+            ? {
+                nodes: context.symbolGraph.nodes.filter(
+                  (n) =>
+                    cohortFileSet.has(n.filePath) ||
+                    n.prodReferences.some((r) => cohortFileSet.has(r.filePath)),
+                ),
+              }
+            : undefined;
+
+          const cohortContext: ReviewContext = {
+            ...context,
+            diffMap: cohortDiffMap,
+            clippyDiagnostics: cohortClippy,
+            symbolGraph: cohortSymbolGraph,
+          };
+
+          const cohortPrompt = buildReviewContextPrompt(
+            cohortContext,
+            28_000,
+            cohort.filePaths.length,
+          );
+          return await this.runFindingsLens(
+            client,
+            context.repoRoot,
+            `peer-cohort-${cohort.id}`,
+            COHORT_DEEP_AUDIT_PROMPT,
+            cohortPrompt,
+            "soundness",
+          );
+        }),
+      );
+
+      for (const res of batchResults) {
+        cohortFindings.push(...res);
+      }
+    }
+
+    const walkthrough = await walkthroughPromise;
     return {
       walkthrough,
-      findings: [...soundnessFindings, ...idiomsFindings],
+      findings: cohortFindings,
     };
   }
 

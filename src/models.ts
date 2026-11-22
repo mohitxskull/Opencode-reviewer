@@ -183,6 +183,8 @@ export const ReviewBundleSchema = z.object({
   profile: ReviewProfileSchema,
   walkthrough: WalkthroughReportSchema,
   findings: z.array(FindingSchema),
+  outsideDiffFindings: z.array(FindingSchema).default([]),
+  nitpickFindings: z.array(FindingSchema).default([]),
   clippyDiagnostics: z.array(ClippyDiagnosticSchema),
   generatedAt: z.string(),
 });

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { clippyToFindings, deduplicateAndFilterFindings } from "../src/judge.ts";
+import {
+  clippyToFindings,
+  deduplicateAndFilterFindings,
+  partitionAndFilterFindings,
+} from "../src/judge.ts";
 import type { ClippyDiagnostic, DiffFileMap, Finding } from "../src/models.ts";
 
 const SAMPLE_DIFF_MAP: Record<string, DiffFileMap> = {
@@ -127,5 +131,63 @@ describe("Task 06: Judge deduplication and profile filtering", () => {
     const assertiveResult = deduplicateAndFilterFindings(findings, SAMPLE_DIFF_MAP, "assertive");
     expect(assertiveResult.length).toBe(2);
     expect(assertiveResult.map((f) => f.id)).toEqual(["f-snapped", "f-trivial"]);
+  });
+
+  test("partitionAndFilterFindings separates inline findings, outside-diff-range findings, and nitpick findings", () => {
+    const findings: Finding[] = [
+      // 1. Inside diff hunk (10..20), Critical -> inlineFindings
+      {
+        id: "f-inline",
+        filePath: "src/lib.rs",
+        startLine: 12,
+        endLine: 14,
+        severity: "Critical",
+        type: "Bug",
+        title: "Inline bug",
+        body: "Inside diff hunk",
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: "Fix inline",
+        confidence: 0.95,
+        source: "soundness",
+      },
+      // 2. Outside diff hunk (line 50..52 on src/lib.rs, or another workspace file), Major -> outsideDiffFindings
+      {
+        id: "f-outside",
+        filePath: "src/lib.rs",
+        startLine: 50,
+        endLine: 52,
+        severity: "Major",
+        type: "Soundness",
+        title: "Uncalled reset method outside diff hunk",
+        body: "clear_funding_sync at line 50 is never called",
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: "Call clear_funding_sync",
+        confidence: 0.92,
+        source: "soundness",
+      },
+      // 3. Inside diff hunk (line 18), Trivial -> under "chill" goes to nitpickFindings instead of polluting inline comments
+      {
+        id: "f-nitpick",
+        filePath: "src/lib.rs",
+        startLine: 18,
+        endLine: 18,
+        severity: "Trivial",
+        type: "Refactor",
+        title: "Minor naming nitpick",
+        body: "Use as_ prefix",
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: "Rename helper",
+        confidence: 0.9,
+        source: "idioms",
+      },
+    ];
+
+    const partitioned = partitionAndFilterFindings(findings, SAMPLE_DIFF_MAP, "chill");
+    expect(partitioned.inlineFindings.map((f) => f.id)).toEqual(["f-inline"]);
+    expect(partitioned.outsideDiffFindings.map((f) => f.id)).toEqual(["f-outside"]);
+    expect(partitioned.nitpickFindings.map((f) => f.id)).toEqual(["f-nitpick"]);
   });
 });

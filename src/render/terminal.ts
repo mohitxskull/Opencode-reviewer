@@ -32,10 +32,18 @@ export function formatTerminalReport(
     lines.push(`  [L${change.layer} | ${change.crateName}] ${change.filePath} — ${change.summary}`);
   }
 
-  lines.push(``, `--- Findings (${bundle.findings.length}) ---`);
+  const outside = bundle.outsideDiffFindings ?? [];
+  const nitpicks = bundle.nitpickFindings ?? [];
+  const totalActionable = bundle.findings.length + outside.length;
+
+  lines.push(
+    ``,
+    `--- Findings Summary (Total Actionable: ${totalActionable} | Inline: ${bundle.findings.length} | Outside Diff: ${outside.length} | Nitpicks: ${nitpicks.length}) ---`,
+  );
   if (bundle.findings.length === 0) {
-    lines.push(`  No actionable findings.`);
+    lines.push(`  No inline diff findings.`);
   } else {
+    lines.push(`  [Inline Diff Findings (${bundle.findings.length})]`);
     for (const f of bundle.findings) {
       const absFile = resolve(absRoot, f.filePath);
       const fileUri = `file://${absFile}#L${f.startLine}-L${f.endLine}`;
@@ -46,6 +54,30 @@ export function formatTerminalReport(
         `    Location: ${fileUri}`,
         `    ${f.body.split("\n")[0] ?? ""}`,
       );
+    }
+  }
+
+  if (outside.length > 0) {
+    lines.push(``, `  [Outside Diff Range Findings (${outside.length})]`);
+    for (const f of outside) {
+      const absFile = resolve(absRoot, f.filePath);
+      const fileUri = `file://${absFile}#L${f.startLine}-L${f.endLine}`;
+      const verifiedBadge =
+        f.suggestion !== null && f.suggestionVerified ? " [suggestion: cargo check OK]" : "";
+      lines.push(
+        `  * [${f.severity} | ${f.type}] ${f.title}${verifiedBadge}`,
+        `    Location: ${fileUri}`,
+        `    ${f.body.split("\n")[0] ?? ""}`,
+      );
+    }
+  }
+
+  if (nitpicks.length > 0) {
+    lines.push(``, `  [Nitpick Findings (${nitpicks.length})]`);
+    for (const f of nitpicks) {
+      const absFile = resolve(absRoot, f.filePath);
+      const fileUri = `file://${absFile}#L${f.startLine}-L${f.endLine}`;
+      lines.push(`  * [${f.severity} | ${f.type}] ${f.title} (${fileUri})`);
     }
   }
 

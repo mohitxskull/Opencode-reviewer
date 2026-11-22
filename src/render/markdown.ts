@@ -114,9 +114,28 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
     lines.push(`### Sequence Diagram`, "```mermaid", rawDiagram, "```", "");
   }
 
+  const outsideCount = bundle.outsideDiffFindings?.length ?? 0;
+  const nitpickCount = bundle.nitpickFindings?.length ?? 0;
+  const totalFindingsCount = bundle.findings.length + outsideCount + nitpickCount;
+
+  const bySeverity = (items: readonly Finding[]) => {
+    const counts: Record<string, number> = {};
+    for (const item of items) {
+      counts[item.severity] = (counts[item.severity] ?? 0) + 1;
+    }
+    return Object.entries(counts)
+      .map(([sev, cnt]) => `${SEVERITY_EMOJI[sev as Severity] ?? ""} ${sev}: ${cnt}`)
+      .join(" | ");
+  };
+
+  const breakdown = bySeverity([...bundle.findings, ...(bundle.outsideDiffFindings ?? [])]);
+
   lines.push(
     `### Findings Summary`,
-    `- **Actionable Inline Findings:** ${bundle.findings.length}`,
+    `- **Total Findings:** ${totalFindingsCount} (${breakdown || "0 actionable"})`,
+    `- **Actionable Inline Comments:** ${bundle.findings.length}`,
+    `- **Outside Diff Range Comments:** ${outsideCount}`,
+    `- **Nitpick Comments:** ${nitpickCount}`,
     `- **Cargo Clippy / Compiler Diagnostics Checked:** ${bundle.clippyDiagnostics.length}`,
   );
 
@@ -159,17 +178,134 @@ export function renderInlineFindingComment(finding: Finding): string {
   return lines.join("\n");
 }
 
+export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
+  const inlineCount = bundle.findings.length;
+  const outside = bundle.outsideDiffFindings ?? [];
+  const nitpicks = bundle.nitpickFindings ?? [];
+  const actionableTotal = inlineCount + outside.length;
+
+  const lines: string[] = [
+    `**Actionable comments posted: ${inlineCount}**` +
+      (outside.length > 0 ? ` *(+${outside.length} outside diff range)*` : "") +
+      (nitpicks.length > 0 ? ` | **Nitpicks: ${nitpicks.length}**` : ""),
+  ];
+
+  const allActionable = [...bundle.findings, ...outside];
+  if (allActionable.length > 0) {
+    const crit = allActionable.filter((f) => f.severity === "Critical").length;
+    const maj = allActionable.filter((f) => f.severity === "Major").length;
+    const min = allActionable.filter((f) => f.severity === "Minor").length;
+    const triv = allActionable.filter(
+      (f) => f.severity === "Trivial" || f.severity === "Info",
+    ).length;
+    lines.push(
+      `> **Severity Breakdown (${actionableTotal} actionable):** 🔴 Critical: \`${crit}\` | 🟠 Major: \`${maj}\` | 🟡 Minor: \`${min}\`${triv > 0 ? ` | 🔵 Trivial/Info: \`${triv}\`` : ""}`,
+    );
+  }
+
+  if (outside.length > 0) {
+    const byFile = new Map<string, Finding[]>();
+    for (const f of outside) {
+      const list = byFile.get(f.filePath) ?? [];
+      list.push(f);
+      byFile.set(f.filePath, list);
+    }
+
+    lines.push(
+      "",
+      "> [!CAUTION]",
+      "> Some comments are outside the diff and can't be posted inline due to GitHub limitations.",
+      "",
+      "<details>",
+      `<summary>⚠️ Outside diff range comments (${outside.length})</summary>`,
+      "<blockquote>",
+    );
+
+    for (const [filePath, fileFindings] of byFile.entries()) {
+      lines.push(
+        "",
+        "<details>",
+        `<summary><code>${filePath}</code> (${fileFindings.length})</summary>`,
+        "<blockquote>",
+      );
+      for (const f of fileFindings) {
+        const rangeLabel =
+          f.startLine === f.endLine ? `${f.startLine}` : `${f.startLine}-${f.endLine}`;
+        lines.push(
+          "",
+          `\`${filePath}\` (${rangeLabel}):`,
+          "",
+          renderInlineFindingComment(f),
+          "",
+          "---",
+        );
+      }
+      lines.push("</blockquote>", "</details>");
+    }
+
+    lines.push("</blockquote>", "</details>");
+  }
+
+  if (nitpicks.length > 0) {
+    const byFile = new Map<string, Finding[]>();
+    for (const f of nitpicks) {
+      const list = byFile.get(f.filePath) ?? [];
+      list.push(f);
+      byFile.set(f.filePath, list);
+    }
+
+    lines.push(
+      "",
+      "<details>",
+      `<summary>🧹 Nitpick comments (${nitpicks.length})</summary>`,
+      "<blockquote>",
+    );
+
+    for (const [filePath, fileFindings] of byFile.entries()) {
+      lines.push(
+        "",
+        "<details>",
+        `<summary><code>${filePath}</code> (${fileFindings.length})</summary>`,
+        "<blockquote>",
+      );
+      for (const f of fileFindings) {
+        const rangeLabel =
+          f.startLine === f.endLine ? `${f.startLine}` : `${f.startLine}-${f.endLine}`;
+        lines.push(
+          "",
+          `\`${filePath}\` (${rangeLabel}):`,
+          "",
+          renderInlineFindingComment(f),
+          "",
+          "---",
+        );
+      }
+      lines.push("</blockquote>", "</details>");
+    }
+
+    lines.push("</blockquote>", "</details>");
+  }
+
+  return lines.join("\n");
+}
+
 export function renderCombinedLocalReviewMarkdown(bundle: ReviewBundle): string {
   const sections: string[] = [
     renderWalkthroughComment(bundle),
     "",
     "---",
     "",
-    "## Inline Findings",
+    "## PR Review Summary & Collapsible Sections",
+    "",
+    renderPrReviewSummaryBody(bundle),
+    "",
+    "---",
+    "",
+    `## Actionable Inline Diff Comments (${bundle.findings.length})`,
   ];
 
   if (bundle.findings.length === 0) {
-    sections.push("", "No actionable findings for the active review profile.");
+    sections.push("", "No inline diff comments for the active review profile.");
   } else {
     for (const finding of bundle.findings) {
       sections.push(
@@ -193,7 +329,15 @@ export async function writeLocalReviewArtifacts(
 
   const walkthroughMd = renderWalkthroughComment(bundle);
   const reviewMd = renderCombinedLocalReviewMarkdown(bundle);
-  const findingsJson = JSON.stringify(bundle.findings, null, 2);
+  const findingsJson = JSON.stringify(
+    {
+      inlineFindings: bundle.findings,
+      outsideDiffFindings: bundle.outsideDiffFindings ?? [],
+      nitpickFindings: bundle.nitpickFindings ?? [],
+    },
+    null,
+    2,
+  );
 
   await Promise.all([
     Bun.write(join(artifactDir, "walkthrough.md"), walkthroughMd),

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { type Finding, type ReviewBundle, WALKTHROUGH_MARKER } from "../src/models.ts";
 import {
   renderInlineFindingComment,
+  renderPrReviewSummaryBody,
   renderWalkthroughComment,
   sanitizeAgentPrompt,
 } from "../src/render/markdown.ts";
@@ -50,6 +51,8 @@ const SAMPLE_BUNDLE: ReviewBundle = {
     },
   },
   findings: [],
+  outsideDiffFindings: [],
+  nitpickFindings: [],
   clippyDiagnostics: [],
   generatedAt: "2026-11-22T12:00:00Z",
 };
@@ -124,5 +127,73 @@ describe("Task 07: CodeRabbit-grade Markdown renderers and prompt sanitizer", ()
     // Legitimate diagnostic instructions and github.com reference are preserved
     expect(clean).toContain("Fix src/lib.rs line 10");
     expect(clean).toContain("https://github.com/tikv/tikv/pull/42");
+  });
+
+  test("renderPrReviewSummaryBody formats CodeRabbit-style counts, outside diff range comments, and nitpick comments", () => {
+    const bundleWithOutsideAndNitpicks: ReviewBundle = {
+      ...SAMPLE_BUNDLE,
+      findings: [
+        {
+          id: "soundness-1",
+          filePath: "components/raftstore/src/lib.rs",
+          startLine: 11,
+          endLine: 11,
+          severity: "Critical",
+          type: "Concurrency",
+          title: "Inline deadlock",
+          body: "Deadlock in diff.",
+          suggestion: null,
+          suggestionVerified: false,
+          agentPrompt: "Fix deadlock.",
+          confidence: 0.95,
+          source: "soundness",
+        },
+      ],
+      outsideDiffFindings: [
+        {
+          id: "soundness-2",
+          filePath: "src/services/common/funding.rs",
+          startLine: 180,
+          endLine: 195,
+          severity: "Major",
+          type: "Bug",
+          title: "clear_funding_sync is never called in production",
+          body: "mark_funding_sync_required sets needs_funding_sync = true, but clear_funding_sync outside the diff is never invoked.",
+          suggestion: null,
+          suggestionVerified: false,
+          agentPrompt: "Invoke clear_funding_sync after reconciliation succeeds.",
+          confidence: 0.93,
+          source: "soundness",
+        },
+      ],
+      nitpickFindings: [
+        {
+          id: "idioms-1",
+          filePath: "components/raftstore/src/lib.rs",
+          startLine: 12,
+          endLine: 12,
+          severity: "Trivial",
+          type: "Idioms",
+          title: "Prefer crate:: import prefix",
+          body: "Follow PingCAP style guide.",
+          suggestion: null,
+          suggestionVerified: false,
+          agentPrompt: "Use crate:: prefix.",
+          confidence: 0.85,
+          source: "idioms",
+        },
+      ],
+    };
+
+    const reviewSummary = renderPrReviewSummaryBody(bundleWithOutsideAndNitpicks);
+
+    expect(reviewSummary).toContain("**Actionable comments posted: 1**");
+    expect(reviewSummary).toContain(
+      "<details>\n<summary>⚠️ Outside diff range comments (1)</summary>",
+    );
+    expect(reviewSummary).toContain("`src/services/common/funding.rs` (180-195)");
+    expect(reviewSummary).toContain("clear_funding_sync is never called in production");
+    expect(reviewSummary).toContain("<details>\n<summary>🧹 Nitpick comments (1)</summary>");
+    expect(reviewSummary).toContain("Prefer crate:: import prefix");
   });
 });

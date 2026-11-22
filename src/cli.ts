@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { isAllowedByPathFilters, loadRepoReviewConfig } from "./config.ts";
 import { filterCodeOnlyDiffMap, parseUnifiedDiff } from "./diff.ts";
 import {
   CheckpointStore,
@@ -17,7 +18,7 @@ import {
   resolveGitHubToken,
 } from "./github.ts";
 import { buildRustSymbolGraph } from "./graph.ts";
-import { clippyToFindings, deduplicateAndFilterFindings } from "./judge.ts";
+import { clippyToFindings, partitionAndFilterFindings } from "./judge.ts";
 import { LearningStore } from "./learnings.ts";
 import { OpenCodeMultiLensOrchestrator, parseModelSpec, type ReviewContext } from "./lenses.ts";
 import {
@@ -29,6 +30,7 @@ import {
 } from "./models.ts";
 import {
   renderInlineFindingComment,
+  renderPrReviewSummaryBody,
   renderWalkthroughComment,
   writeLocalReviewArtifacts,
 } from "./render/markdown.ts";
@@ -79,7 +81,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       args: [...argv],
       options: {
         repo: { type: "string" },
-        profile: { type: "string", default: "chill" },
+        profile: { type: "string" },
         fresh: { type: "boolean", default: false },
         "local-only": { type: "boolean", default: false },
         post: { type: "boolean", default: false },
@@ -146,7 +148,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       writeErr("Unknown learn subcommand. Expected: peer learn add | list | remove");
       return 1;
     }
-    const profile: ReviewProfile = ReviewProfileSchema.parse(parsed.values.profile ?? "chill");
+    const explicitProfile = parsed.values.profile
+      ? ReviewProfileSchema.parse(parsed.values.profile)
+      : null;
     const fresh = parsed.values.fresh ?? false;
     const localOnly = parsed.values["local-only"] ?? false;
     const postToGitHub = parsed.values.post ?? false;
@@ -234,8 +238,19 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
         }
 
+        const repoConfig = await loadRepoReviewConfig(repoRoot);
+        const profile: ReviewProfile = explicitProfile ?? repoConfig?.profile ?? "chill";
+
         const rawDiffMap = parseUnifiedDiff(diffText);
-        const diffMap = filterCodeOnlyDiffMap(rawDiffMap);
+        const codeOnlyDiffMap = filterCodeOnlyDiffMap(rawDiffMap);
+        const diffMap =
+          repoConfig && repoConfig.pathFilters.length > 0
+            ? Object.fromEntries(
+                Object.entries(codeOnlyDiffMap).filter(([fp]) =>
+                  isAllowedByPathFilters(repoConfig.pathFilters, fp),
+                ),
+              )
+            : codeOnlyDiffMap;
         const modifiedFiles = new Set(Object.keys(diffMap));
 
         const [crateGraph, clippyDiagnostics, symbolGraph, learnings] = await Promise.all([
@@ -256,6 +271,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           clippyDiagnostics,
           symbolGraph,
           learnings,
+          repoConfig,
         };
 
         const lensRunner: LensRunnerFn =
@@ -272,9 +288,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         // Post-lens safety check: restore working tree if any external tool touched tracked files
         runGitSync(repoRoot, ["checkout", "--", "."]);
 
-        // Step 3: Judge Pass (merge Clippy + lens findings, snap to diff hunks, filter by profile)
+        // Step 3: Judge Pass (merge Clippy + lens findings, partition into inline / outside-diff / nitpicks)
         const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
-        const judgedFindings = deduplicateAndFilterFindings(
+        const partitioned = partitionAndFilterFindings(
           [...clippyFindings, ...rawLensFindings],
           diffMap,
           profile,
@@ -282,7 +298,14 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
         // Step 4: Transactional cargo check verification of single-hunk suggestions
         const verifier = new SuggestionCompilerVerifier();
-        const verifiedFindings = await verifier.verifySuggestions(repoRoot, judgedFindings);
+        const verifiedInline = await verifier.verifySuggestions(
+          repoRoot,
+          partitioned.inlineFindings,
+        );
+        const verifiedOutside = await verifier.verifySuggestions(
+          repoRoot,
+          partitioned.outsideDiffFindings,
+        );
 
         return ReviewBundleSchema.parse({
           pr,
@@ -291,7 +314,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           isIncremental,
           profile,
           walkthrough,
-          findings: verifiedFindings,
+          findings: verifiedInline,
+          outsideDiffFindings: verifiedOutside,
+          nitpickFindings: partitioned.nitpickFindings,
           clippyDiagnostics: [...clippyDiagnostics],
           generatedAt: new Date().toISOString(),
         });
@@ -305,7 +330,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       baseSha: pr.baseSha,
       lastReviewedHeadSha: pr.headSha,
       reviewedAt: bundle.generatedAt,
-      profile,
+      profile: bundle.profile,
     });
 
     writeOut(formatTerminalReport(bundle, repoRoot, artifactDir));
@@ -329,7 +354,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         commitId: pr.headSha,
         comments: inlineComments,
         submit: submitReview,
-        summaryBody: `Peer Rust Review (${bundle.findings.length} actionable findings, profile: \`${bundle.profile}\`).`,
+        summaryBody: renderPrReviewSummaryBody(bundle),
       });
     }
 
