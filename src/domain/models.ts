@@ -262,7 +262,7 @@ export const ReviewCheckpointSchema = z.object({
 });
 export type ReviewCheckpoint = z.infer<typeof ReviewCheckpointSchema>;
 
-export const PEER_VERSION = "0.2.0";
+export const PEER_VERSION = "0.3.0";
 
 export const PipelineStageSchema = z.enum(["analyze", "review", "verify", "publish"]);
 export type PipelineStage = z.infer<typeof PipelineStageSchema>;

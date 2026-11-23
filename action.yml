@@ -1,0 +1,72 @@
+name: "Peer Rust Deterministic Gate"
+description: "Run peer's local-first deterministic Rust PR gate (clippy, cargo-audit, AST unsafe/panic detectors, sensitive-file checks, SARIF) with zero LLM cost."
+branding:
+  icon: "shield"
+  color: "orange"
+
+inputs:
+  version:
+    description: "Release tag of peer to download (default: latest)"
+    required: false
+    default: "latest"
+  base:
+    description: "Base git ref to diff against (default: origin/<base_ref> or main)"
+    required: false
+    default: ""
+  tools:
+    description: "Optional Cargo analyzers to enable (e.g. deny,geiger,semver,coverage,miri or all)"
+    required: false
+    default: ""
+  profile:
+    description: "Strictness profile: quiet | chill | assertive"
+    required: false
+    default: ""
+  strict:
+    description: "Fail on Minor/Info findings too (not just Critical/Major)"
+    required: false
+    default: "false"
+  sarif-file:
+    description: "Path to write SARIF 2.1.0 output"
+    required: false
+    default: "peer-results.sarif"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install peer binary
+      shell: bash
+      env:
+        PEER_VERSION: ${{ inputs.version }}
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/mohitxskull/Opencode-reviewer/main/install.sh | sh
+        echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+    - name: Run peer check
+      shell: bash
+      env:
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_TOOLS: ${{ inputs.tools }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        INPUT_SARIF: ${{ inputs.sarif-file }}
+      run: |
+        ARGS=(check)
+        if [ -n "${INPUT_BASE}" ]; then
+          ARGS+=(--base "${INPUT_BASE}")
+        elif [ -n "${GITHUB_BASE_REF:-}" ]; then
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" || true
+          ARGS+=(--base "origin/${GITHUB_BASE_REF}")
+        fi
+        if [ -n "${INPUT_TOOLS}" ]; then
+          ARGS+=(--tools "${INPUT_TOOLS}")
+        fi
+        if [ -n "${INPUT_PROFILE}" ]; then
+          ARGS+=(--profile "${INPUT_PROFILE}")
+        fi
+        if [ "${INPUT_STRICT}" = "true" ]; then
+          ARGS+=(--strict)
+        fi
+        if [ -n "${INPUT_SARIF}" ]; then
+          ARGS+=(--sarif "${INPUT_SARIF}")
+        fi
+        peer "${ARGS[@]}"

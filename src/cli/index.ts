@@ -120,8 +120,10 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
   const writeErr = deps.stderr ?? ((text: string) => console.error(text));
 
   try {
+    // Support `cargo peer <cmd>` invocation where Cargo prepends "peer" as the first arg
+    const rawArgs = argv[0] === "peer" ? argv.slice(1) : [...argv];
     const parsed = parseArgs({
-      args: [...argv],
+      args: [...rawArgs],
       options: {
         repo: { type: "string" },
         profile: { type: "string" },
