@@ -13,7 +13,11 @@ import type {
   SecurityAdvisory,
 } from "../models.ts";
 import { resolveFileArchitecturalLayer } from "../rust.ts";
-import { formatSecurityAdvisoriesPromptSection } from "../security.ts";
+import {
+  type CargoLockDiff,
+  formatCargoLockDiffPromptSection,
+  formatSecurityAdvisoriesPromptSection,
+} from "../security.ts";
 import { type CoverageReport, formatCoveragePromptSection } from "../tools/coverage.ts";
 import { formatGeigerPromptSection, type GeigerReport } from "../tools/geiger.ts";
 import { formatMiriPromptSection, type MiriReport } from "../tools/miri.ts";
@@ -37,6 +41,7 @@ export interface ReviewContext {
   readonly diffMap: Readonly<Record<string, DiffFileMap>>;
   readonly clippyDiagnostics: readonly ClippyDiagnostic[];
   readonly securityAdvisories?: readonly SecurityAdvisory[];
+  readonly cargoLockDiff?: CargoLockDiff | null;
   readonly geigerReport?: GeigerReport | null;
   readonly semverViolations?: readonly SemverViolation[];
   readonly coverageReport?: CoverageReport | null;
@@ -171,6 +176,13 @@ export function buildReviewContextPrompt(
 
   if (context.securityAdvisories && context.securityAdvisories.length > 0) {
     sections.push(formatSecurityAdvisoriesPromptSection(context.securityAdvisories));
+  }
+
+  if (context.cargoLockDiff) {
+    const lockSection = formatCargoLockDiffPromptSection(context.cargoLockDiff);
+    if (lockSection) {
+      sections.push(lockSection);
+    }
   }
 
   if (context.geigerReport) {

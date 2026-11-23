@@ -55,7 +55,7 @@ import {
   collectRustToolchainBaseline,
   resolveFileArchitecturalLayer,
 } from "./rust.ts";
-import { collectSecurityAdvisories } from "./security.ts";
+import { type CargoLockDiff, collectCargoLockDiff, collectSecurityAdvisories } from "./security.ts";
 import {
   type CoverageReport,
   collectCargoLlvmCovReport,
@@ -517,6 +517,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       : null;
 
     let symbolGraph: RustSymbolGraph | undefined;
+    let cargoLockDiff: CargoLockDiff | null = null;
     let geigerReport: GeigerReport | null = null;
     let semverViolations: SemverViolation[] = [];
     let coverageReport: CoverageReport | null = null;
@@ -527,6 +528,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       symbolGraph =
         (await loadRawJsonIfExists<RustSymbolGraph>(join(toolsDir, "symbol-graph.json"))) ??
         undefined;
+      cargoLockDiff = await loadRawJsonIfExists<CargoLockDiff>(
+        join(toolsDir, "cargo-lock-diff.json"),
+      );
       geigerReport = await loadRawJsonIfExists<GeigerReport>(join(toolsDir, "geiger.json"));
       semverViolations =
         (await loadRawJsonIfExists<SemverViolation[]>(join(toolsDir, "semver.json"))) ?? [];
@@ -592,24 +596,32 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             `▶ Stage 1 (analyze): Running deterministic Rust analyzers on ${modifiedFiles.size} file(s)...`,
           );
 
-          const [crateGraph, clippyDiagnostics, securityAdvisories, denyDiagnostics, builtGraph] =
-            await Promise.all([
-              collectCrateGraph(repoRoot),
-              modifiedFiles.size > 0
-                ? collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap)
-                : Promise.resolve([]),
-              modifiedFiles.size > 0
-                ? collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha })
-                : Promise.resolve([]),
-              modifiedFiles.size > 0
-                ? collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") })
-                : Promise.resolve([]),
-              modifiedFiles.size > 0
-                ? buildRustSymbolGraph(repoRoot, diffMap)
-                : Promise.resolve({ nodes: [] }),
-            ]);
+          const [
+            crateGraph,
+            clippyDiagnostics,
+            securityAdvisories,
+            lockDiff,
+            denyDiagnostics,
+            builtGraph,
+          ] = await Promise.all([
+            collectCrateGraph(repoRoot),
+            modifiedFiles.size > 0
+              ? collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap)
+              : Promise.resolve([]),
+            modifiedFiles.size > 0
+              ? collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha })
+              : Promise.resolve([]),
+            collectCargoLockDiff(repoRoot, pr.baseSha),
+            modifiedFiles.size > 0
+              ? collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") })
+              : Promise.resolve([]),
+            modifiedFiles.size > 0
+              ? buildRustSymbolGraph(repoRoot, diffMap)
+              : Promise.resolve({ nodes: [] }),
+          ]);
 
           symbolGraph = builtGraph;
+          cargoLockDiff = lockDiff;
           const modifiedCrates = new Set(
             Array.from(modifiedFiles)
               .map((fp) => resolveFileArchitecturalLayer(crateGraph, fp).crateName)
@@ -737,6 +749,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           });
 
           const extraToolOutputs: Record<string, unknown> = {};
+          if (cargoLockDiff) extraToolOutputs["cargo-lock-diff"] = cargoLockDiff;
           if (denyDiagnostics.length > 0) extraToolOutputs.deny = denyDiagnostics;
           if (geigerReport) extraToolOutputs.geiger = geigerReport;
           if (semverViolations.length > 0) extraToolOutputs.semver = semverViolations;
@@ -802,6 +815,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
               diffMap: ctxData.diffMap,
               clippyDiagnostics: ctxData.clippyDiagnostics,
               securityAdvisories: ctxData.securityAdvisories,
+              cargoLockDiff,
               geigerReport,
               semverViolations,
               coverageReport,

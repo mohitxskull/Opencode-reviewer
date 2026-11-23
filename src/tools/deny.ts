@@ -36,17 +36,37 @@ export function parseCargoDenyJsonLines(rawOutput: string): CargoDenyDiagnostic[
   const results: CargoDenyDiagnostic[] = [];
   const seen = new Set<string>();
 
-  for (const rawLine of rawOutput.split("\n")) {
-    const trimmed = rawLine.trim();
-    if (!trimmed.startsWith("{")) {
-      continue;
+  const jsonlPayload = rawOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("{"))
+    .join("\n");
+  if (jsonlPayload.length === 0) {
+    return results;
+  }
+
+  const parsedEntries: CargoDenyJsonLine[] = [];
+  let offset = 0;
+  while (offset < jsonlPayload.length) {
+    const chunk = Bun.JSONL.parseChunk(jsonlPayload.slice(offset));
+    for (const val of chunk.values) {
+      if (val && typeof val === "object") {
+        parsedEntries.push(val as CargoDenyJsonLine);
+      }
     }
-    let parsed: CargoDenyJsonLine;
-    try {
-      parsed = JSON.parse(trimmed) as CargoDenyJsonLine;
-    } catch {
-      continue;
+    if (chunk.done) {
+      break;
     }
+    if (chunk.read > 0) {
+      offset += chunk.read;
+    } else {
+      const nextNl = jsonlPayload.indexOf("\n", offset);
+      if (nextNl === -1) break;
+      offset = nextNl + 1;
+    }
+  }
+
+  for (const parsed of parsedEntries) {
     if (parsed.type !== "diagnostic" || !parsed.fields) {
       continue;
     }
@@ -84,6 +104,9 @@ export type CargoDenyRunner = (
 async function defaultCargoDenyRunner(
   repoRoot: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (!Bun.which("cargo-deny")) {
+    throw new CargoDenyMissingError();
+  }
   const proc = Bun.spawn(["cargo", "deny", "check", "--format", "json"], {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),

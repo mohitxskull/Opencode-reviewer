@@ -1,4 +1,3 @@
-import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -354,7 +353,7 @@ export class OpenCodeMultiLensOrchestrator {
   }
 
   private computeCacheFilePath(cacheDir: string, title: string, fullPrompt: string): string {
-    const hash = createHash("sha256")
+    const hash = new Bun.CryptoHasher("sha256")
       .update(`${this.model.providerID}/${this.model.id}\n${title}\n${fullPrompt}`)
       .digest("hex")
       .slice(0, 16);
@@ -369,7 +368,7 @@ export class OpenCodeMultiLensOrchestrator {
     try {
       const dir = join(cachePath, "..");
       await mkdir(dir, { recursive: true });
-      const tmp = `${cachePath}.${randomUUID().slice(0, 8)}.tmp`;
+      const tmp = `${cachePath}.${Bun.randomUUIDv7().slice(-8)}.tmp`;
       await Bun.write(tmp, JSON.stringify(data, null, 2));
       await rename(tmp, cachePath);
 

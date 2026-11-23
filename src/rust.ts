@@ -325,23 +325,38 @@ export async function collectClippyDiagnostics(
     proc.exited,
   ]);
 
-  const lines = stdoutText.split("\n");
+  const jsonlPayload = stdoutText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("{"))
+    .join("\n");
+  const parsedLines: CargoJsonLine[] = [];
+  if (jsonlPayload.length > 0) {
+    let offset = 0;
+    while (offset < jsonlPayload.length) {
+      const chunk = Bun.JSONL.parseChunk(jsonlPayload.slice(offset));
+      for (const val of chunk.values) {
+        if (val && typeof val === "object") {
+          parsedLines.push(val as CargoJsonLine);
+        }
+      }
+      if (chunk.done) {
+        break;
+      }
+      if (chunk.read > 0) {
+        offset += chunk.read;
+      } else {
+        const nextNl = jsonlPayload.indexOf("\n", offset);
+        if (nextNl === -1) break;
+        offset = nextNl + 1;
+      }
+    }
+  }
   const diagnostics: ClippyDiagnostic[] = [];
   const seenKeys = new Set<string>();
-  let sawAnyJsonMessage = false;
+  const sawAnyJsonMessage = parsedLines.length > 0;
 
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim();
-    if (!trimmed.startsWith("{")) {
-      continue;
-    }
-    let parsed: CargoJsonLine;
-    try {
-      parsed = JSON.parse(trimmed) as CargoJsonLine;
-    } catch {
-      continue;
-    }
-    sawAnyJsonMessage = true;
+  for (const parsed of parsedLines) {
     if (parsed.reason !== "compiler-message" || !parsed.message) {
       continue;
     }

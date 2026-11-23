@@ -49,6 +49,15 @@ export function formatTerminalReport(
     ``,
     `--- Findings Summary (Total Actionable: ${totalActionable} | Inline: ${bundle.findings.length} | Outside Diff: ${outside.length} | Nitpicks: ${nitpicks.length}) ---`,
   );
+  if (totalActionable > 0) {
+    const tableRows = [...bundle.findings, ...outside].map((f) => ({
+      Severity: f.severity,
+      Type: f.type,
+      Location: `${f.filePath}:${f.startLine}`,
+      Title: f.title.length > 56 ? `${f.title.slice(0, 53)}...` : f.title,
+    }));
+    lines.push(Bun.inspect.table(tableRows, ["Severity", "Type", "Location", "Title"]));
+  }
   if (bundle.findings.length === 0) {
     lines.push(`  No inline diff findings.`);
   } else {
@@ -92,12 +101,11 @@ export function formatTerminalReport(
 
   lines.push(
     ``,
-    `--- Local Artifacts & Diagnostics (.peer/<pr>/<sha>/) ---`,
-    `  Agent Report: file://${resolve(artifactDir, "review.md")}`,
-    `  Run Manifest: file://${resolve(artifactDir, "run.json")}`,
-    `  Findings:     file://${resolve(artifactDir, "findings.json")}`,
-    `  Tools Output: file://${resolve(artifactDir, "tools")}`,
-    `  Audit JSONL:  file://${resolve(artifactDir, "audit.jsonl")}`,
+    `--- Stage Report & Diagnostics ---`,
+    `  Stage Report: file://${resolve(artifactDir, "report.md")}`,
+    `  Latest Link:  file://${resolve(artifactDir, "..", "review.md")}`,
+    `  Run Manifest: file://${resolve(artifactDir, "..", "run.json")}`,
+    `  Audit JSONL:  file://${resolve(artifactDir, "..", "audit.jsonl")}`,
     `================================================================================`,
   );
 

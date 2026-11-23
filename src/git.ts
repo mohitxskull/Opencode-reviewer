@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
@@ -351,7 +350,7 @@ export class CheckpointStore {
     const dir = this.getPrReviewDir(validated.prNumber);
     await mkdir(dir, { recursive: true });
     const targetPath = this.getCheckpointPath(validated.prNumber);
-    const tmpPath = `${targetPath}.${randomUUID().slice(0, 8)}.tmp`;
+    const tmpPath = `${targetPath}.${Bun.randomUUIDv7().slice(-8)}.tmp`;
     await Bun.write(tmpPath, JSON.stringify(validated, null, 2));
     await rename(tmpPath, targetPath);
   }

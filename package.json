@@ -10,7 +10,7 @@
   "scripts": {
     "lint": "biome check src tests",
     "format": "biome format --write src tests",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "bun test"
   },
   "dependencies": {

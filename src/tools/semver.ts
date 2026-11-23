@@ -125,6 +125,9 @@ async function defaultCargoSemverRunner(
   repoRoot: string,
   baseSha: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (!Bun.which("cargo-semver-checks")) {
+    throw new CargoSemverChecksMissingError();
+  }
   const proc = Bun.spawn(["cargo", "semver-checks", "check-release", "--baseline-rev", baseSha], {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),

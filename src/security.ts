@@ -110,6 +110,9 @@ async function defaultCargoAuditRunner(
   repoRoot: string,
   lockfilePath?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (!Bun.which("cargo-audit")) {
+    throw new CargoAuditMissingError();
+  }
   const args = lockfilePath
     ? ["audit", "--json", "--no-fetch", "--file", lockfilePath]
     : ["audit", "--json"];
@@ -211,4 +214,115 @@ export function formatSecurityAdvisoriesPromptSection(
     `## Deterministic CVE / RustSec Advisories (${advisories.length} new in PR — Confirm reachability in production code)\n` +
     lines.join("\n")
   );
+}
+
+export interface CargoLockDiff {
+  readonly added: Array<{ name: string; version: string }>;
+  readonly removed: Array<{ name: string; version: string }>;
+  readonly changed: Array<{ name: string; from: string[]; to: string[] }>;
+}
+
+interface RawCargoLock {
+  package?: Array<{ name?: string; version?: string }>;
+}
+
+function parseCargoLockPackages(rawToml: string): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  if (!rawToml.trim()) {
+    return map;
+  }
+  let parsed: RawCargoLock;
+  try {
+    parsed = Bun.TOML.parse(rawToml) as RawCargoLock;
+  } catch {
+    return map;
+  }
+  for (const pkg of parsed.package ?? []) {
+    if (!pkg.name || !pkg.version) {
+      continue;
+    }
+    const versions = map.get(pkg.name) ?? new Set<string>();
+    versions.add(pkg.version);
+    map.set(pkg.name, versions);
+  }
+  return map;
+}
+
+export function diffCargoLockToml(baseToml: string, headToml: string): CargoLockDiff {
+  const baseMap = parseCargoLockPackages(baseToml);
+  const headMap = parseCargoLockPackages(headToml);
+
+  const added: Array<{ name: string; version: string }> = [];
+  const removed: Array<{ name: string; version: string }> = [];
+  const changed: Array<{ name: string; from: string[]; to: string[] }> = [];
+
+  for (const [name, headVersions] of headMap.entries()) {
+    const baseVersions = baseMap.get(name);
+    if (!baseVersions) {
+      for (const version of Array.from(headVersions).sort()) {
+        added.push({ name, version });
+      }
+      continue;
+    }
+    const baseSorted = Array.from(baseVersions).sort();
+    const headSorted = Array.from(headVersions).sort();
+    if (baseSorted.join(",") !== headSorted.join(",")) {
+      changed.push({ name, from: baseSorted, to: headSorted });
+    }
+  }
+
+  for (const [name, baseVersions] of baseMap.entries()) {
+    if (!headMap.has(name)) {
+      for (const version of Array.from(baseVersions).sort()) {
+        removed.push({ name, version });
+      }
+    }
+  }
+
+  added.sort((a, b) => a.name.localeCompare(b.name));
+  removed.sort((a, b) => a.name.localeCompare(b.name));
+  changed.sort((a, b) => a.name.localeCompare(b.name));
+  return { added, removed, changed };
+}
+
+export async function collectCargoLockDiff(
+  repoRoot: string,
+  baseSha: string,
+): Promise<CargoLockDiff | null> {
+  const headLockFile = Bun.file(join(repoRoot, "Cargo.lock"));
+  if (!(await headLockFile.exists())) {
+    return null;
+  }
+  const baseLock = tryGitRawSync(repoRoot, ["show", `${baseSha}:Cargo.lock`]);
+  if (!baseLock.ok) {
+    return null;
+  }
+  const headText = await headLockFile.text();
+  if (headText === baseLock.stdout) {
+    return null;
+  }
+  const diff = diffCargoLockToml(baseLock.stdout, headText);
+  if (diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0) {
+    return null;
+  }
+  return diff;
+}
+
+export function formatCargoLockDiffPromptSection(diff: CargoLockDiff): string {
+  const lines: string[] = [];
+  for (const item of diff.added.slice(0, 20)) {
+    lines.push(`- [ADDED] \`${item.name}\` \`${item.version}\``);
+  }
+  for (const item of diff.changed.slice(0, 20)) {
+    lines.push(
+      `- [CHANGED] \`${item.name}\` \`${item.from.join(", ")}\` -> \`${item.to.join(", ")}\``,
+    );
+  }
+  for (const item of diff.removed.slice(0, 10)) {
+    lines.push(`- [REMOVED] \`${item.name}\` \`${item.version}\``);
+  }
+  if (lines.length === 0) {
+    return "";
+  }
+  return `## Cargo.lock Dependency Delta (Supply-Chain Diff)\n${lines.join("\n")}`;
 }

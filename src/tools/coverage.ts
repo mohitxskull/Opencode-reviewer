@@ -214,6 +214,9 @@ async function defaultCargoLlvmCovRunner(
   repoRoot: string,
   packages: readonly string[],
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (!Bun.which("cargo-llvm-cov")) {
+    throw new CargoLlvmCovMissingError();
+  }
   const args = ["cargo", "llvm-cov", "--json"];
   for (const pkg of packages) {
     args.push("-p", pkg);

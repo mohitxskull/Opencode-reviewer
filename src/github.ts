@@ -29,7 +29,33 @@ export class ExistingManualPendingReviewError extends Error {
   }
 }
 
+const PEER_SECRET_SERVICE = "peer-cli";
+const PEER_GITHUB_SECRET_NAME = "github-token";
+
+async function defaultKeychainTokenReader(): Promise<string | null> {
+  try {
+    return await Bun.secrets.get({
+      service: PEER_SECRET_SERVICE,
+      name: PEER_GITHUB_SECRET_NAME,
+    });
+  } catch {
+    // Headless Linux without libsecret daemon — fall through cleanly
+    return null;
+  }
+}
+
+export async function saveGitHubTokenToKeychain(token: string): Promise<void> {
+  await Bun.secrets.set({
+    service: PEER_SECRET_SERVICE,
+    name: PEER_GITHUB_SECRET_NAME,
+    value: token.trim(),
+  });
+}
+
 async function defaultGhAuthTokenRunner(): Promise<string> {
+  if (!Bun.which("gh")) {
+    throw new Error("gh CLI not found in PATH");
+  }
   const proc = Bun.spawnSync(["gh", "auth", "token"], {
     stdout: "pipe",
     stderr: "pipe",
@@ -43,6 +69,7 @@ async function defaultGhAuthTokenRunner(): Promise<string> {
 export async function resolveGitHubToken(
   env: Record<string, string | undefined> = process.env,
   ghTokenRunner: () => Promise<string> = defaultGhAuthTokenRunner,
+  keychainReader: () => Promise<string | null> = defaultKeychainTokenReader,
 ): Promise<string> {
   const peerToken = env.PEER_GITHUB_TOKEN?.trim();
   if (peerToken) {
@@ -55,6 +82,15 @@ export async function resolveGitHubToken(
   }
 
   try {
+    const keychainToken = (await keychainReader())?.trim();
+    if (keychainToken && keychainToken.length > 0) {
+      return keychainToken;
+    }
+  } catch {
+    // Fall through to gh CLI
+  }
+
+  try {
     const cliToken = (await ghTokenRunner()).trim();
     if (cliToken.length > 0) {
       return cliToken;
@@ -64,7 +100,7 @@ export async function resolveGitHubToken(
   }
 
   throw new GitHubAuthError(
-    "Unable to resolve GitHub authentication token. Set PEER_GITHUB_TOKEN, GITHUB_TOKEN, or log in via `gh auth login`.",
+    "Unable to resolve GitHub authentication token. Set PEER_GITHUB_TOKEN, GITHUB_TOKEN, store it in OS keychain (Bun.secrets), or log in via `gh auth login`.",
   );
 }
 

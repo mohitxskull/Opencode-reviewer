@@ -7,6 +7,8 @@ import { advisoriesToFindings } from "../src/judge.ts";
 import {
   CargoAuditMissingError,
   collectSecurityAdvisories,
+  diffCargoLockToml,
+  formatCargoLockDiffPromptSection,
   formatSecurityAdvisoriesPromptSection,
   parseCargoAuditJson,
 } from "../src/security.ts";
@@ -182,5 +184,39 @@ describe("Deterministic CVE & RustSec advisory collector", () => {
     expect(scrubbed.SSH_AUTH_SOCK).toBeUndefined();
     expect(scrubbed.AWS_SECRET_ACCESS_KEY).toBeUndefined();
     expect(scrubbed.OPENAI_API_KEY).toBeUndefined();
+  });
+
+  test("diffCargoLockToml parses Cargo.lock via Bun.TOML.parse and detects added, changed, and removed crates", () => {
+    const baseLock = `
+version = 3
+
+[[package]]
+name = "serde"
+version = "1.0.200"
+
+[[package]]
+name = "old_dep"
+version = "0.1.0"
+`;
+    const headLock = `
+version = 3
+
+[[package]]
+name = "serde"
+version = "1.0.210"
+
+[[package]]
+name = "new_dep"
+version = "0.2.3"
+`;
+    const diff = diffCargoLockToml(baseLock, headLock);
+    expect(diff.added).toEqual([{ name: "new_dep", version: "0.2.3" }]);
+    expect(diff.removed).toEqual([{ name: "old_dep", version: "0.1.0" }]);
+    expect(diff.changed).toEqual([{ name: "serde", from: ["1.0.200"], to: ["1.0.210"] }]);
+
+    const section = formatCargoLockDiffPromptSection(diff);
+    expect(section).toContain("[ADDED] `new_dep` `0.2.3`");
+    expect(section).toContain("[CHANGED] `serde` `1.0.200` -> `1.0.210`");
+    expect(section).toContain("[REMOVED] `old_dep` `0.1.0`");
   });
 });

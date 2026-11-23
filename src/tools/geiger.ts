@@ -152,6 +152,9 @@ export type CargoGeigerRunner = (
 async function defaultCargoGeigerRunner(
   repoRoot: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  if (!Bun.which("cargo-geiger")) {
+    throw new CargoGeigerMissingError();
+  }
   const proc = Bun.spawn(["cargo", "geiger", "--output-format", "Json"], {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),

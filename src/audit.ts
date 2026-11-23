@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir, resolvePeerReviewsDir } from "./git.ts";
@@ -48,7 +47,7 @@ export class AuditLogger {
     this.headSha = options.headSha;
     this.runId =
       options.runId ??
-      `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 6)}`;
+      `${new Date().toISOString().replace(/[:.]/g, "-")}-${Bun.randomUUIDv7().slice(-6)}`;
     this.startTimeMs = Date.now();
     this.onProgress = options.onProgress;
   }

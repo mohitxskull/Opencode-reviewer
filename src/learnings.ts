@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -122,7 +121,7 @@ export class LearningStore {
   public async add(input: { rule: string; scope?: string | null }): Promise<RepoLearning> {
     const existingLocal = await this.listLocal();
     const entry = RepoLearningSchema.parse({
-      id: randomUUID().slice(0, 8),
+      id: Bun.randomUUIDv7().slice(-8),
       rule: input.rule.trim(),
       scope: input.scope?.trim() || null,
       createdAt: new Date().toISOString(),
@@ -161,7 +160,7 @@ export class LearningStore {
     const dir = resolvePeerStateDir(this.repoRoot);
     await mkdir(dir, { recursive: true });
     const targetPath = this.getLearningsPath();
-    const tmpPath = `${targetPath}.${randomUUID().slice(0, 8)}.tmp`;
+    const tmpPath = `${targetPath}.${Bun.randomUUIDv7().slice(-8)}.tmp`;
     await Bun.write(tmpPath, JSON.stringify({ learnings }, null, 2));
     await rename(tmpPath, targetPath);
   }
