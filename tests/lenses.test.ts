@@ -9,6 +9,7 @@ import {
   parseModelSpec,
 } from "../src/opencode/client.ts";
 import {
+  buildReadOnlySessionPermissions,
   evaluatePermissionRule,
   READONLY_SESSION_PERMISSIONS,
 } from "../src/opencode/permissions.ts";
@@ -148,6 +149,14 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
     expect(evaluatePermissionRule(READONLY_SESSION_PERMISSIONS, "grep", ".env.example")).toBe(
       "allow",
     );
+
+    // Scoped permissions deny host paths outside repoRoot (e.g. ~/.config/gh/hosts.yml, /proc/self/environ)
+    const scoped = buildReadOnlySessionPermissions("/tmp/fake-rust-repo");
+    expect(evaluatePermissionRule(scoped, "read", "/tmp/fake-rust-repo/src/lib.rs")).toBe("allow");
+    expect(evaluatePermissionRule(scoped, "read", "src/lib.rs")).toBe("allow");
+    expect(evaluatePermissionRule(scoped, "read", "/home/skull/.config/gh/hosts.yml")).toBe("deny");
+    expect(evaluatePermissionRule(scoped, "read", "/proc/self/environ")).toBe("deny");
+    expect(evaluatePermissionRule(scoped, "read", "/tmp/fake-rust-repo/.git/config")).toBe("deny");
   });
 
   test("extractJsonObject parses both raw JSON and markdown-fenced JSON responses", () => {
@@ -306,8 +315,9 @@ describe("Task 05: OpenCode multi-lens orchestrator", () => {
     const result = await orchestrator.runAllLenses({ ...SAMPLE_CONTEXT, repoRoot });
 
     expect(createdSessions.length).toBe(3);
+    const expectedScopedPerms = buildReadOnlySessionPermissions(repoRoot);
     for (const s of createdSessions) {
-      expect(s.permissions).toEqual(READONLY_SESSION_PERMISSIONS);
+      expect(s.permissions).toEqual(expectedScopedPerms);
     }
     expect(waitedSessions.length).toBe(3);
     expect(removedSessions.sort()).toEqual(["sess-1", "sess-2", "sess-3"]);

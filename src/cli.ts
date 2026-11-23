@@ -380,7 +380,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             collectClippyDiagnostics(repoRoot, modifiedFiles),
             collectSecurityAdvisories(repoRoot),
             buildRustSymbolGraph(repoRoot, diffMap),
-            learningStore.getMatchingLearnings(modifiedFiles),
+            learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha),
           ]);
 
         await auditLogger.logEvent(

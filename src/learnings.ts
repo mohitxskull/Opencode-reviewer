@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { resolvePeerStateDir } from "./git.ts";
+import { resolvePeerStateDir, tryGitRawSync } from "./git.ts";
 
 export class CorruptLearningStoreError extends Error {
   public readonly filePath: string;
@@ -79,13 +79,33 @@ export class LearningStore {
     }
   }
 
+  private async readSharedLearningsFromGitRef(gitRef: string): Promise<RepoLearning[]> {
+    const res = tryGitRawSync(this.repoRoot, ["show", `${gitRef}:.peer/learnings.json`]);
+    if (!res.ok || res.stdout.trim().length === 0) {
+      return [];
+    }
+    try {
+      const raw: unknown = JSON.parse(res.stdout);
+      const parsed = LearningFilePayloadSchema.parse(raw);
+      return parsed.learnings;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new CorruptLearningStoreError(`${gitRef}:.peer/learnings.json`, msg);
+    }
+  }
+
   public async listLocal(): Promise<RepoLearning[]> {
     return await this.readLearningsFile(this.getLearningsPath());
   }
 
-  public async list(): Promise<RepoLearning[]> {
+  public async list(sharedGitRef?: string): Promise<RepoLearning[]> {
+    // Why: During PR reviews, the working tree is checked out to the untrusted
+    // `pr.headSha`. Reading `.peer/learnings.json` from `pr.baseSha` via `git show`
+    // prevents an untrusted PR author from injecting review-suppression rules.
     const [shared, local] = await Promise.all([
-      this.readLearningsFile(this.getSharedLearningsPath()),
+      sharedGitRef
+        ? this.readSharedLearningsFromGitRef(sharedGitRef)
+        : this.readLearningsFile(this.getSharedLearningsPath()),
       this.listLocal(),
     ]);
     const seenIds = new Set<string>();
@@ -122,8 +142,11 @@ export class LearningStore {
     return true;
   }
 
-  public async getMatchingLearnings(modifiedFiles: Iterable<string>): Promise<RepoLearning[]> {
-    const all = await this.list();
+  public async getMatchingLearnings(
+    modifiedFiles: Iterable<string>,
+    sharedGitRef?: string,
+  ): Promise<RepoLearning[]> {
+    const all = await this.list(sharedGitRef);
     const files = Array.from(modifiedFiles);
     return all.filter((learning) => {
       if (!learning.scope) {

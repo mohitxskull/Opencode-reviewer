@@ -34,11 +34,29 @@ const SEVERITY_EMOJI: Readonly<Record<Severity, string>> = {
 // execution directives, secret env var names, and non-GitHub URLs at render time
 // enforces the untrusted-input defense-in-depth boundary documented in
 // docs/reports/research/coderabbit/2026-11-22-coderabbit-review-architecture.md §3.1.2.
+function computeSafeFence(content: string): string {
+  let maxRun = 2;
+  for (const match of content.matchAll(/`+/g)) {
+    if (match[0].length > maxRun) {
+      maxRun = match[0].length;
+    }
+  }
+  return "`".repeat(maxRun + 1);
+}
+
 const SHELL_COMMAND_IN_BACKTICKS_REGEX =
   /\b(?:cat|curl|wget|bash|sh|zsh|nc|ncat|python|python3|perl|ruby|node|bun|rm|chmod|chown|sudo|env|printenv|export|eval|exec|ssh|scp|base64|whoami|id|uname)\b|[;$|><&]|\/etc\/|\/proc\/|\/var\//i;
 
 export function sanitizeAgentPrompt(prompt: string): string {
   let sanitized = prompt;
+
+  // Redact fenced code blocks containing shell commands
+  sanitized = sanitized.replace(/```[^\n]*\n([\s\S]*?)```/g, (fullMatch, inner: string) => {
+    if (SHELL_COMMAND_IN_BACKTICKS_REGEX.test(inner)) {
+      return "[redacted-command-block]";
+    }
+    return fullMatch;
+  });
 
   // Redact backtick code spans ONLY when they contain shell execution commands or path/pipe metacharacters,
   // preserving legitimate inline Rust code spans like `src/lib.rs` or `x.saturating_add(1)`.
@@ -84,7 +102,7 @@ export function sanitizeAgentPrompt(prompt: string): string {
     return "[redacted-url]";
   });
 
-  // Neutralize closing HTML/Markdown container tags
+  // Neutralize closing HTML/Markdown container tags and Markdown images
   sanitized = sanitizeMarkdownText(sanitized);
 
   return sanitized.trim();
@@ -92,6 +110,7 @@ export function sanitizeAgentPrompt(prompt: string): string {
 
 export function sanitizeMarkdownText(text: string): string {
   return text
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "[redacted-image]")
     .replace(/<\/?(?:details|summary|blockquote|script|iframe|object|embed)\b[^>]*>/gi, "")
     .replace(/<img\b[^>]*>/gi, "");
 }
@@ -127,7 +146,7 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
     `## 🦀 Peer Rust PR Walkthrough & Architecture Audit`,
     "",
     `**Review Effort:** \`${walkthrough.triage.reviewEffort}/5\` | **Merge Risk:** \`${walkthrough.triage.mergeRisk}\` | **Profile:** \`${bundle.profile}\` | **Range:** \`${baseShort}..${headShort}\` (${modeLabel})`,
-    `> **Triage Rationale:** ${walkthrough.triage.rationale}`,
+    `> **Triage Rationale:** ${sanitizeMarkdownText(walkthrough.triage.rationale).trim()}`,
     "",
   ];
 
@@ -211,7 +230,8 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
       .replace(/^```(?:mermaid)?\s*/i, "")
       .replace(/```$/i, "")
       .trim();
-    lines.push(`### Sequence Diagram`, "```mermaid", rawDiagram, "```", "");
+    const fence = computeSafeFence(rawDiagram);
+    lines.push(`### Sequence Diagram`, `${fence}mermaid`, rawDiagram, fence, "");
   }
 
   const deletions = bundle.deletionsProposed ?? [];
@@ -324,13 +344,20 @@ export function renderInlineFindingComment(
 
   if (finding.suggestion !== null && finding.suggestion.trim().length > 0) {
     const cleanSuggestion = finding.suggestion.replace(/\r\n/g, "\n").replace(/\n$/, "");
+    const fence = computeSafeFence(cleanSuggestion);
     if (allowCommitSuggestion && finding.suggestionVerified) {
-      lines.push("", `> ✓ Verified with \`cargo check\``, "```suggestion", cleanSuggestion, "```");
+      lines.push(
+        "",
+        `> ✓ Verified with \`cargo check\``,
+        `${fence}suggestion`,
+        cleanSuggestion,
+        fence,
+      );
     } else if (!allowCommitSuggestion) {
       const note = finding.suggestionVerified
         ? `> ✓ Verified with \`cargo check\``
         : `> ℹ️ Candidate patch (not compiler-verified):`;
-      lines.push("", note, "```rust", cleanSuggestion, "```");
+      lines.push("", note, `${fence}rust`, cleanSuggestion, fence);
     }
   }
 

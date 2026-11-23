@@ -26,7 +26,7 @@ import {
   parseModelSpec,
 } from "./opencode/client.ts";
 import {
-  READONLY_SESSION_PERMISSIONS,
+  buildReadOnlySessionPermissions,
   type SessionPermissionRule,
 } from "./opencode/permissions.ts";
 import { groupDiffFilesIntoCohorts } from "./prompts/cohorts.ts";
@@ -362,7 +362,7 @@ export class OpenCodeMultiLensOrchestrator {
     promptText: string,
     files: readonly string[],
     audit?: AuditLogger,
-    permissions: readonly SessionPermissionRule[] = READONLY_SESSION_PERMISSIONS,
+    permissions: readonly SessionPermissionRule[] = buildReadOnlySessionPermissions(repoRoot),
   ): Promise<{ replyText: string; sessionID: string; durationMs: number; assistantTurns: number }> {
     const t0 = Date.now();
     const session = await client.session.create({
@@ -593,7 +593,7 @@ export class OpenCodeMultiLensOrchestrator {
         fullPrompt,
         files,
         audit,
-        READONLY_SESSION_PERMISSIONS,
+        buildReadOnlySessionPermissions(repoRoot),
       );
 
       try {
