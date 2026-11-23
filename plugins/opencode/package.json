@@ -1,0 +1,11 @@
+{
+  "name": "peer-opencode-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode plugin exposing peer's deterministic Rust PR analyzer, cargo check suggestion verifier, and GitHub publisher as custom tools.",
+  "main": "./index.ts",
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=0.1.0"
+  }
+}

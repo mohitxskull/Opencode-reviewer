@@ -1,0 +1,7 @@
+{
+  "name": "peer-rust-reviewer",
+  "displayName": "Peer Rust PR Reviewer",
+  "version": "0.1.0",
+  "description": "Local-first Rust PR review workflow combining deterministic Cargo ground truth (clippy, audit, deny, geiger, semver, llvm-cov, miri, tree-sitter) with compile-verified suggestions.",
+  "repository": "https://github.com/mohitxskull/Opencode-reviewer"
+}

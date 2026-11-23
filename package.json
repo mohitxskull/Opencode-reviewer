@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@octokit/rest": "22.0.1",
-    "@opencode/client": "2.3.2",
     "parse-diff": "0.14.0",
     "tree-sitter-rust": "0.24.0",
     "web-tree-sitter": "0.27.2",

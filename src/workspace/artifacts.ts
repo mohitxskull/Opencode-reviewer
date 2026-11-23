@@ -20,6 +20,7 @@ export interface WriteArtifactsMeta {
   readonly latestStage?: PipelineStage;
   readonly enabledTools?: readonly string[];
   readonly symbolGraph?: RustSymbolGraph;
+  readonly promptContextMd?: string;
   readonly extraToolOutputs?: Readonly<Record<string, unknown>>;
 }
 
@@ -81,6 +82,9 @@ export async function writeAnalyzeStageArtifacts(
     ),
   ];
 
+  if (meta.promptContextMd) {
+    writes.push(Bun.write(join(stageDir, "prompt-context.md"), meta.promptContextMd));
+  }
   if (meta.symbolGraph) {
     writes.push(
       Bun.write(join(toolsDir, "symbol-graph.json"), JSON.stringify(meta.symbolGraph, null, 2)),

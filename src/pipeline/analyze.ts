@@ -44,6 +44,7 @@ import {
   clippyToFindings,
   partitionAndFilterFindings,
 } from "../judge/partition.ts";
+import { buildReviewContextPrompt } from "../llm/context.ts";
 import {
   loadJsonIfExists,
   loadRawJsonIfExists,
@@ -51,6 +52,7 @@ import {
 } from "../workspace/artifacts.ts";
 import type { AuditLogger } from "../workspace/audit-log.ts";
 import { type CheckpointStore, tryGitRawSync, withInPlaceCheckout } from "../workspace/git.ts";
+import { LearningStore } from "../workspace/learnings.ts";
 
 export type OptionalTool = "deny" | "geiger" | "semver" | "coverage" | "miri";
 
@@ -350,6 +352,31 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       generatedAt: analyzeContext.generatedAt,
     });
 
+    const learnings = await new LearningStore(repoRoot).getMatchingLearnings(
+      modifiedFiles,
+      pr.baseSha,
+    );
+    const promptContextMd = buildReviewContextPrompt({
+      repoRoot,
+      pr,
+      diffBaseSha,
+      headSha: pr.headSha,
+      isIncremental,
+      fresh,
+      crateGraph,
+      diffMap,
+      clippyDiagnostics,
+      securityAdvisories,
+      cargoLockDiff,
+      geigerReport,
+      semverViolations,
+      coverageReport,
+      miriReport,
+      symbolGraph,
+      learnings,
+      auditLogger,
+    });
+
     const extraToolOutputs: Record<string, unknown> = {};
     if (cargoLockDiff) extraToolOutputs["cargo-lock-diff"] = cargoLockDiff;
     if (denyDiagnostics.length > 0) extraToolOutputs.deny = denyDiagnostics;
@@ -363,6 +390,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       durationMs: Date.now() - runStartMs,
       enabledTools: enabledToolsList,
       symbolGraph,
+      promptContextMd,
       extraToolOutputs,
     });
   });
