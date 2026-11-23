@@ -7,7 +7,6 @@ const ALL_OPTIONAL_TOOLS = ["deny", "geiger", "semver", "coverage", "miri"] as c
 export interface TerminalReportOptions {
   readonly verbose?: boolean;
   readonly enabledTools?: readonly string[];
-  readonly skippedTools?: readonly string[];
   readonly verdictSummary?: string;
   readonly nextStepHint?: string;
 }
@@ -36,10 +35,6 @@ export function formatTerminalReport(
     `Rationale: ${walkthrough.triage.rationale}`,
     `Analyzers: core (clippy, cargo-audit, tree-sitter AST)${activeOptional.length > 0 ? ` + optional [${activeOptional.join(", ")}]` : ""}${unrunOptional.length > 0 ? ` | not enabled: [${unrunOptional.join(", ")}] (pass --tools all or run 'peer doctor')` : ""}`,
   ];
-
-  if (options.skippedTools && options.skippedTools.length > 0) {
-    lines.push(`Skipped Tools: ${options.skippedTools.join("; ")}`);
-  }
 
   if (options.verdictSummary) {
     lines.push(``, `--- Skeptic Verdict Ledger ---`, options.verdictSummary);

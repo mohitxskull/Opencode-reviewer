@@ -393,7 +393,6 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
               baseSha: pr.baseSha,
               profile: effectiveProfile,
               enabledTools: effectiveToolsList,
-              skippedTools: existingManifest.skippedTools,
               toolOutcomes: existingManifest.toolOutcomes,
               counts: {
                 inline: existingManifest.inlineFindingsCount,
@@ -489,7 +488,6 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
               isIncremental: analyzeOut.analyzeBundle.isIncremental,
               profile: effectiveProfile,
               enabledTools: effectiveToolsList,
-              skippedTools: analyzeOut.skippedTools,
               toolOutcomes: analyzeOut.toolOutcomes,
               counts: {
                 totalActionable: allActionable.length,
@@ -520,7 +518,6 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         formatTerminalReport(analyzeOut.analyzeBundle, repoRoot, join(commitDir, "01-analyze"), {
           verbose: parsed.values.verbose ?? false,
           enabledTools: effectiveToolsList,
-          skippedTools: analyzeOut.skippedTools,
           nextStepHint: `Run \`peer next ${pr.number}\` or fan out cohort reviews from ${join(commitDir, "01-analyze", "cohorts", "index.json")}`,
         }),
       );

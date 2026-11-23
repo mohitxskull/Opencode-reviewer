@@ -92,7 +92,6 @@ export interface AnalyzeStageInput {
 export interface AnalyzeStageOutput {
   readonly analyzeContext: AnalyzeStageContext;
   readonly analyzeBundle: ReviewBundle;
-  readonly skippedTools: readonly string[];
   readonly toolOutcomes: Readonly<Record<string, ToolOutcomeDetail>>;
   readonly symbolGraph?: RustSymbolGraph;
   readonly cargoLockDiff: CargoLockDiff | null;
@@ -159,7 +158,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
   let semverViolations: SemverViolation[] = [];
   let coverageReport: CoverageReport | null = null;
   let miriReport: MiriReport | null = null;
-  const skippedTools: string[] = [];
   const toolOutcomes: Record<string, ToolOutcomeDetail> = {};
 
   if (analyzeContext && analyzeBundle) {
@@ -182,7 +180,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     return {
       analyzeContext,
       analyzeBundle,
-      skippedTools,
       toolOutcomes,
       symbolGraph,
       cargoLockDiff,
@@ -253,7 +250,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
 
       for (const optTool of ["deny", "geiger", "semver", "coverage", "miri"] as const) {
         if (!enabledTools.has(optTool)) {
-          skippedTools.push(`${optTool} (not enabled; pass --tools ${optTool} or --tools all)`);
           toolOutcomes[optTool] = {
             status: "skipped",
             findingsCount: 0,
@@ -276,9 +272,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
           return await collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha });
         } catch (err) {
           if (err instanceof CargoAuditMissingError && !explicitTools.has("audit")) {
-            skippedTools.push(
-              "cargo-audit (not installed — install with: cargo install cargo-audit)",
-            );
             toolOutcomes.audit = {
               status: "skipped",
               findingsCount: 0,
@@ -298,9 +291,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         const hasConfig = await hasCargoDenyConfig(repoRoot);
         if (!hasConfig) {
           if (enabledTools.has("deny")) {
-            skippedTools.push(
-              "deny (skipped: no deny.toml or .cargo/deny.toml in repository; run 'cargo deny init' to configure)",
-            );
             toolOutcomes.deny = {
               status: "skipped",
               findingsCount: 0,
@@ -314,9 +304,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
           return await collectCargoDenyDiagnostics(repoRoot, { force: true });
         } catch (err) {
           if (err instanceof CargoDenyMissingError && !explicitTools.has("deny")) {
-            skippedTools.push(
-              "cargo-deny (not installed — install with: cargo install cargo-deny)",
-            );
             toolOutcomes.deny = {
               status: "skipped",
               findingsCount: 0,
@@ -382,9 +369,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         enabled: enabledTools.has("miri"),
         crateGraph,
       });
-      if (miriReport?.skippedReason) {
-        skippedTools.push(`miri (skipped: ${miriReport.skippedReason})`);
-      }
 
       const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
       const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
@@ -517,7 +501,9 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
           })),
         openQuestions: [],
         notReviewed: [
-          ...skippedTools.map((t) => `Tool skipped: ${t}`),
+          ...Object.entries(toolOutcomes)
+            .filter(([, o]) => o.status === "skipped")
+            .map(([name, o]) => `Tool skipped: ${name} (${o.reason ?? "skipped"})`),
           ...excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
         ],
         failedCohorts: [],
@@ -577,7 +563,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         model: "deterministic",
         durationMs: Date.now() - runStartMs,
         enabledTools: enabledToolsList,
-        skippedTools,
         toolOutcomes,
         configHash,
         symbolGraph,
@@ -595,7 +580,6 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
   return {
     analyzeContext,
     analyzeBundle,
-    skippedTools,
     toolOutcomes,
     symbolGraph,
     cargoLockDiff,

@@ -119,7 +119,6 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
   const rawDiffMap = parseUnifiedDiff(diffText);
   const diffMap = filterCodeOnlyDiffMap(rawDiffMap, peerConfig.diff.ignore);
   const modifiedFiles = new Set(Object.keys(diffMap));
-  const skippedTools: string[] = [];
   const toolOutcomes: Record<string, ToolOutcomeDetail> = {};
 
   for (const optTool of ["deny", "geiger", "semver", "coverage", "miri"] as const) {
@@ -146,7 +145,6 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
       return await collectSecurityAdvisories(repoRoot, { baseSha });
     } catch (err) {
       if (err instanceof CargoAuditMissingError) {
-        skippedTools.push("cargo-audit (not installed — cargo install cargo-audit)");
         toolOutcomes.audit = {
           status: "skipped",
           findingsCount: 0,
@@ -166,9 +164,6 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     const hasConfig = await hasCargoDenyConfig(repoRoot);
     if (!hasConfig) {
       if (enabledTools.has("deny")) {
-        skippedTools.push(
-          "deny (skipped: no deny.toml or .cargo/deny.toml in repository; run 'cargo deny init' to configure)",
-        );
         toolOutcomes.deny = {
           status: "skipped",
           findingsCount: 0,
@@ -182,7 +177,6 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
       return await collectCargoDenyDiagnostics(repoRoot, { force: true });
     } catch (err) {
       if (err instanceof CargoDenyMissingError && !enabledTools.has("deny")) {
-        skippedTools.push("cargo-deny (not installed — cargo install cargo-deny)");
         toolOutcomes.deny = {
           status: "skipped",
           findingsCount: 0,
@@ -231,9 +225,6 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     enabled: enabledTools.has("miri"),
     crateGraph,
   });
-  if (miriReport?.skippedReason) {
-    skippedTools.push(`miri (skipped: ${miriReport.skippedReason})`);
-  }
 
   const sensitiveFileFindings = findSensitiveFiles(Object.keys(rawDiffMap)).map((filePath) =>
     FindingSchema.parse({
@@ -337,12 +328,15 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
   await ensurePeerWorkspaceExcluded(repoRoot);
   const localDir = join(repoRoot, ".peer", "local", headSha.slice(0, 7));
   await mkdir(localDir, { recursive: true });
+  const skippedSummary = Object.entries(toolOutcomes)
+    .filter(([, o]) => o.status === "skipped")
+    .map(([name, o]) => `${name} (${o.reason ?? "skipped"})`);
   const reportMd = [
     `# peer check — Local Deterministic Gate (${baseSha.slice(0, 7)}..${headSha.slice(0, 7)})`,
     "",
     `- **Profile:** \`${profile}\` | **Modified Rust Files:** ${modifiedFiles.size}`,
     `- **New Findings:** ${newFindings.length} | **Baselined (Ignored):** ${baselinedCount}`,
-    ...(skippedTools.length > 0 ? [`- **Tools Skipped:** ${skippedTools.join("; ")}`] : []),
+    ...(skippedSummary.length > 0 ? [`- **Tools Skipped:** ${skippedSummary.join("; ")}`] : []),
     "",
     ...newFindings.map(
       (f) => `- **[${f.severity} | ${f.type}]** \`${f.filePath}:${f.startLine}\` — ${f.title}`,
@@ -385,7 +379,6 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
           baselinedCount,
           countsBySeverity,
           enabledTools: Array.from(enabledTools).sort(),
-          skippedTools,
           toolOutcomes,
           reportMd: resolve(localDir, "report.md"),
           sarifPath: sarifPath ? resolve(sarifPath) : null,
@@ -424,8 +417,8 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
       ),
     );
   }
-  if (skippedTools.length > 0) {
-    writeOut(`Tools skipped: ${skippedTools.join("; ")}`);
+  if (skippedSummary.length > 0) {
+    writeOut(`Tools skipped: ${skippedSummary.join("; ")}`);
   }
   writeOut(`Report: file://${resolve(localDir, "report.md")}`);
 

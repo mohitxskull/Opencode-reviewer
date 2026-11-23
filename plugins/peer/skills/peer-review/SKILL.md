@@ -39,7 +39,7 @@ Run Stage 1 on the target PR:
 ```bash
 peer analyze <PR_NUMBER_OR_URL> --json [--tools deny,geiger,semver,coverage,miri|all]
 ```
-This returns structured JSON (`counts`, `countsBySeverity`, `enabledTools`, `skippedTools`, `artifacts`, `nextCommand`) and writes `.peer/<pr>/<short-sha>/01-analyze/`:
+This returns structured JSON (`counts`, `countsBySeverity`, `enabledTools`, `toolOutcomes`, `artifacts`, `nextCommand`) and writes `.peer/<pr>/<short-sha>/01-analyze/`:
 - `prompt-context.md` — Compact orchestrator index (PR overview, repo review instructions from `AGENTS.md`/`CLAUDE.md`/`peer.toml`/`.peer/learnings.json`, crate layers, symbol graph, deterministic diagnostics, and the **Review Cohorts** index — without duplicating raw diff hunks).
 - `cohorts/index.json` + `cohorts/<cohort-id>.md` — Self-contained, **untruncated** diff packets covering 100% of modified production Rust files, grouped by subsystem with matching repo instructions.
 - `report.md` — Standalone deterministic report (stop here if the user only asked for Stage 1).

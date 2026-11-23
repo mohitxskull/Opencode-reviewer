@@ -22,7 +22,6 @@ export interface WriteArtifactsMeta {
   readonly completedStages?: readonly PipelineStage[];
   readonly latestStage?: PipelineStage;
   readonly enabledTools?: readonly string[];
-  readonly skippedTools?: readonly string[];
   readonly toolOutcomes?: Readonly<Record<string, ToolOutcomeDetail>>;
   readonly configHash?: string;
   readonly symbolGraph?: RustSymbolGraph;
@@ -52,7 +51,6 @@ function buildRunManifest(bundle: ReviewBundle, meta: WriteArtifactsMeta): RunMa
     completedStages: meta.completedStages ?? ["analyze", "review"],
     latestStage: meta.latestStage ?? "review",
     enabledTools: meta.enabledTools ?? [],
-    skippedTools: meta.skippedTools ?? [],
     toolOutcomes: meta.toolOutcomes ?? {},
     failedCohorts,
     inlineFindingsCount: bundle.findings.length,

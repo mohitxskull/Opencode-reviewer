@@ -131,7 +131,6 @@ export async function runNextCommand(
           latestStage: manifest.latestStage,
           completedStages: manifest.completedStages,
           enabledTools: manifest.enabledTools,
-          skippedTools: manifest.skippedTools,
           toolOutcomes: manifest.toolOutcomes,
           failedCohorts: manifest.failedCohorts,
           counts: {
