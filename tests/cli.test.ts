@@ -236,14 +236,18 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     expect(await Bun.file(join(commitDir, "02-review", "bundle.json")).exists()).toBe(true);
 
     // ─── STAGE 3: peer finalize --verdicts (deterministic skeptic filtering) ───
+    const stage2Bundle = (await Bun.file(join(commitDir, "02-review", "bundle.json")).json()) as {
+      findings: Array<{ id: string }>;
+    };
+    const fpIds = stage2Bundle.findings.map((f) => f.id);
+    expect(fpIds.every((id) => id.startsWith("fp-"))).toBe(true);
+
     const verdictsPath = join(commitDir, "skeptic-verdicts.md");
     await writeFile(
       verdictsPath,
-      [
-        "## VERDICTS",
-        "- agent-1 | KEEP | Verified overflow on i32::MAX",
-        "- agent-2 | KEEP | Kept for compiler-verification assertion below",
-      ].join("\n"),
+      ["## VERDICTS", ...fpIds.map((id) => `- ${id} | KEEP | Verified during skeptic check`)].join(
+        "\n",
+      ),
     );
     const verifyCode = await runCli(
       ["finalize", "42", "--verdicts", verdictsPath, "--repo", repoDir],

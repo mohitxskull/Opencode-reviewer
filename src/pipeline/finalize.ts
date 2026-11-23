@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   type AnalyzeStageContext,
   AnalyzeStageContextSchema,
+  computeFindingFingerprint,
   type ConsideredAndRejectedItem,
   type DeletionProposedItem,
   type Finding,
@@ -35,6 +36,7 @@ export interface FinalizeStageInput {
   readonly verdictsPath?: string;
   readonly stage: "review" | "verify";
   readonly strict?: boolean;
+  readonly noCheckout?: boolean;
   readonly profile: ReviewProfile;
   readonly configHash?: string;
   readonly runStartMs: number;
@@ -84,14 +86,16 @@ function parseAgentReviewInput(
   }
 
   const parsedFindings = parseLensFindingsOutput(rawText);
-  const findings: Finding[] = parsedFindings.findings.map((f, idx) =>
-    FindingSchema.parse({
+  const findings: Finding[] = parsedFindings.findings.map((f) => {
+    const fp = computeFindingFingerprint(f);
+    const inferredSource = f.type === "Idioms" || f.type === "Refactor" ? "idioms" : "soundness";
+    return FindingSchema.parse({
       ...f,
-      id: `agent-${idx + 1}`,
+      id: `fp-${fp}`,
       suggestionVerified: false,
-      source: "soundness",
-    }),
-  );
+      source: inferredSource,
+    });
+  });
   const warnings = collectMarkdownParseWarnings(rawText, findings.length);
   return {
     walkthrough,
@@ -111,6 +115,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     verdictsPath,
     stage,
     strict = false,
+    noCheckout = false,
     profile,
     configHash = "default",
     runStartMs,
@@ -226,6 +231,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
       repoRoot,
       targetSha: analyzeContext.headSha,
       prNumber: analyzeContext.pr.number,
+      noCheckout,
     },
     async () => {
       await auditLogger.logEvent(
@@ -239,13 +245,19 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
         profile,
       );
 
-      const hasBaselineCompileErrors = analyzeContext.clippyDiagnostics.some(
+      const baselineErrorCount = analyzeContext.clippyDiagnostics.filter(
         (d) => d.level === "error",
-      );
+      ).length;
       const verifier = new SuggestionCompilerVerifier();
-      const verifiedInline = hasBaselineCompileErrors
-        ? partitioned.inlineFindings
-        : await verifier.verifySuggestions(repoRoot, partitioned.inlineFindings, auditLogger);
+      const verifiedInline = await verifier.verifySuggestions(
+        repoRoot,
+        partitioned.inlineFindings,
+        auditLogger,
+        {
+          crateGraph: analyzeContext.crateGraph,
+          baselineErrorCount,
+        },
+      );
 
       const existingDeletionRefs = new Set(
         agentReview.deletionsProposed.map((d) => d.pathOrSymbol),

@@ -2,29 +2,38 @@ import { writeFileSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+import { resolveFileArchitecturalLayer } from "../analyzers/rust.ts";
 import { isReviewableRustCodeFile } from "../domain/diff.ts";
-import { type Finding, FindingSchema } from "../domain/models.ts";
+import { type CrateGraph, type Finding, FindingSchema } from "../domain/models.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { parseJsonlObjects } from "../infra/jsonl.ts";
 import { registerSignalCleanup } from "../infra/lifecycle.ts";
 import type { AuditLogger } from "../workspace/audit-log.ts";
 
 export interface CargoCheckResult {
   readonly ok: boolean;
   readonly errorSummary: string;
+  readonly errorMessages?: readonly string[];
 }
 
-export type CargoCheckRunner = (repoRoot: string) => Promise<CargoCheckResult>;
+export type CargoCheckRunner = (
+  repoRoot: string,
+  packageName?: string,
+) => Promise<CargoCheckResult>;
 
-async function defaultCargoCheckRunner(repoRoot: string): Promise<CargoCheckResult> {
-  const proc = Bun.spawn(
-    ["cargo", "check", "--workspace", "--all-targets", "--message-format=json"],
-    {
-      cwd: repoRoot,
-      env: buildScrubbedCargoEnv(),
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+async function defaultCargoCheckRunner(
+  repoRoot: string,
+  packageName?: string,
+): Promise<CargoCheckResult> {
+  const args = packageName
+    ? ["cargo", "check", "-p", packageName, "--all-targets", "--message-format=json"]
+    : ["cargo", "check", "--workspace", "--all-targets", "--message-format=json"];
+  const proc = Bun.spawn(args, {
+    cwd: repoRoot,
+    env: buildScrubbedCargoEnv(),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 
   const unregisterKill = registerSignalCleanup(() => {
     try {
@@ -48,22 +57,13 @@ async function defaultCargoCheckRunner(repoRoot: string): Promise<CargoCheckResu
   }
 
   const errorMessages: string[] = [];
-  for (const line of stdoutText.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("{")) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(trimmed) as {
-        reason?: string;
-        message?: { level?: string; message?: string; code?: { code?: string } | null };
-      };
-      if (parsed.reason === "compiler-message" && parsed.message?.level === "error") {
-        const codePrefix = parsed.message.code?.code ? `[${parsed.message.code.code}] ` : "";
-        errorMessages.push(`${codePrefix}${parsed.message.message ?? "compiler error"}`);
-      }
-    } catch {
-      // Ignore non-JSON lines
+  for (const parsed of parseJsonlObjects<{
+    reason?: string;
+    message?: { level?: string; message?: string; code?: { code?: string } | null };
+  }>(stdoutText)) {
+    if (parsed.reason === "compiler-message" && parsed.message?.level === "error") {
+      const codePrefix = parsed.message.code?.code ? `[${parsed.message.code.code}] ` : "";
+      errorMessages.push(`${codePrefix}${parsed.message.message ?? "compiler error"}`);
     }
   }
 
@@ -73,7 +73,7 @@ async function defaultCargoCheckRunner(repoRoot: string): Promise<CargoCheckResu
       ? errorMessages.slice(0, 3).join("; ")
       : stderrText.trim().slice(0, 300);
 
-  return { ok, errorSummary };
+  return { ok, errorSummary, errorMessages };
 }
 
 function applyLineReplacement(
@@ -163,6 +163,10 @@ export class SuggestionCompilerVerifier {
     repoRoot: string,
     findings: readonly Finding[],
     auditLogger?: AuditLogger,
+    options: {
+      readonly crateGraph?: CrateGraph;
+      readonly baselineErrorCount?: number;
+    } = {},
   ): Promise<Finding[]> {
     const results: Finding[] = [];
     const realRepoRoot = await realpath(repoRoot);
@@ -170,6 +174,20 @@ export class SuggestionCompilerVerifier {
       (f) => f.suggestion !== null && f.suggestion.trim().length > 0,
     ).length;
     let suggestionIndex = 0;
+
+    // If the baseline already has compile errors, snapshot the baseline error set per crate
+    // so we still verify suggestions and only reject those introducing NEW errors.
+    const baselineErrorCache = new Map<string, Set<string>>();
+    const getBaselineErrors = async (pkgKey: string, pkgName?: string): Promise<Set<string>> => {
+      const cached = baselineErrorCache.get(pkgKey);
+      if (cached) {
+        return cached;
+      }
+      const baseRes = await this.checkRunner(realRepoRoot, pkgName);
+      const set = new Set(baseRes.errorMessages ?? (baseRes.ok ? [] : [baseRes.errorSummary]));
+      baselineErrorCache.set(pkgKey, set);
+      return set;
+    };
 
     for (const finding of findings) {
       if (finding.suggestion === null || finding.suggestion.trim().length === 0) {
@@ -218,6 +236,20 @@ export class SuggestionCompilerVerifier {
         continue;
       }
 
+      // Scope `cargo check` to the owning crate via `-p <crate>` when CrateGraph resolves it
+      let packageName: string | undefined;
+      if (options.crateGraph) {
+        const layerInfo = resolveFileArchitecturalLayer(options.crateGraph, finding.filePath);
+        if (options.crateGraph.crates[layerInfo.crateName]) {
+          packageName = layerInfo.crateName;
+        }
+      }
+
+      const baselineErrors =
+        (options.baselineErrorCount ?? 0) > 0
+          ? await getBaselineErrors(packageName ?? "__workspace__", packageName)
+          : null;
+
       let restored = false;
       const restoreOriginalBytesSync = () => {
         if (restored) {
@@ -232,29 +264,38 @@ export class SuggestionCompilerVerifier {
       let checkResult: CargoCheckResult;
       try {
         await Bun.write(targetPath, patchedText);
-        checkResult = await this.checkRunner(realRepoRoot);
+        checkResult = await this.checkRunner(realRepoRoot, packageName);
       } finally {
         restoreOriginalBytesSync();
         unregisterSignalCleanup();
       }
 
+      let passed = checkResult.ok;
+      if (!passed && baselineErrors && baselineErrors.size > 0 && checkResult.errorMessages) {
+        const newErrors = checkResult.errorMessages.filter((msg) => !baselineErrors.has(msg));
+        if (newErrors.length === 0) {
+          passed = true;
+        }
+      }
+
       const checkDurationMs = Date.now() - checkStartMs;
       await auditLogger?.logEvent(
         "verifier.suggestion.checked",
-        `  ├─ [cargo check ${suggestionIndex}/${totalWithSuggestions}] ${finding.filePath}:${finding.startLine}-${finding.endLine} -> ${checkResult.ok ? "✓ PASS" : `✗ FAIL (${checkResult.errorSummary.slice(0, 80)})`} (${checkDurationMs}ms)`,
+        `  ├─ [cargo check ${suggestionIndex}/${totalWithSuggestions}${packageName ? ` -p ${packageName}` : ""}] ${finding.filePath}:${finding.startLine}-${finding.endLine} -> ${passed ? "✓ PASS" : `✗ FAIL (${checkResult.errorSummary.slice(0, 80)})`} (${checkDurationMs}ms)`,
         {
           findingId: finding.id,
           filePath: finding.filePath,
           startLine: finding.startLine,
           endLine: finding.endLine,
-          passed: checkResult.ok,
+          packageName: packageName ?? null,
+          passed,
           durationMs: checkDurationMs,
           errorSummary: checkResult.errorSummary,
           suggestion: finding.suggestion,
         },
       );
 
-      if (checkResult.ok) {
+      if (passed) {
         results.push(
           FindingSchema.parse({
             ...finding,

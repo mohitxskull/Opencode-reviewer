@@ -33,6 +33,29 @@ export function isReviewableRustCodeFile(filePath: string): boolean {
   return normalized.endsWith(".rs") || baseName === "Cargo.toml" || normalized === "peer.toml";
 }
 
+export function isSensitiveRepoFile(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  return (
+    normalized === ".cargo/config.toml" ||
+    normalized === ".cargo/config" ||
+    normalized === "rust-toolchain.toml" ||
+    normalized === "rust-toolchain" ||
+    normalized === "deny.toml" ||
+    normalized.startsWith(".github/workflows/") ||
+    normalized.endsWith(".proto")
+  );
+}
+
+export function findSensitiveFiles(filePaths: Iterable<string>): string[] {
+  const sensitive: string[] = [];
+  for (const fp of filePaths) {
+    if (isSensitiveRepoFile(fp)) {
+      sensitive.push(fp);
+    }
+  }
+  return sensitive.sort();
+}
+
 function matchesAnyIgnoreGlob(filePath: string, ignoreGlobs: readonly string[]): boolean {
   if (ignoreGlobs.length === 0) {
     return false;

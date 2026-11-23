@@ -187,6 +187,38 @@ function mergeTwoFindings(a: Finding, b: Finding): Finding {
   });
 }
 
+function normalizedCauseKey(finding: Finding): string {
+  return (finding.rootCause || finding.title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function shouldMergeOverlapping(existing: Finding, candidate: Finding): boolean {
+  if (existing.source === "audit" || candidate.source === "audit") {
+    return false;
+  }
+  if (existing.filePath !== candidate.filePath) {
+    return false;
+  }
+  if (
+    !rangesOverlap(existing.startLine, existing.endLine, candidate.startLine, candidate.endLine)
+  ) {
+    return false;
+  }
+  // Always merge overlapping clippy + lens pairs (same compiler/LLM issue)
+  const oneIsClippy =
+    (existing.source === "clippy" && candidate.source !== "clippy") ||
+    (existing.source !== "clippy" && candidate.source === "clippy");
+  if (oneIsClippy) {
+    return true;
+  }
+  // For two LLM findings on overlapping lines, only merge if they describe the same root cause
+  const aKey = normalizedCauseKey(existing);
+  const bKey = normalizedCauseKey(candidate);
+  return aKey.length > 0 && aKey === bKey;
+}
+
 function clusterOverlappingFindings(candidates: readonly Finding[]): Finding[] {
   const merged: Finding[] = [];
   const seenAuditIds = new Set<string>();
@@ -202,12 +234,7 @@ function clusterOverlappingFindings(candidates: readonly Finding[]): Finding[] {
       continue;
     }
 
-    const overlapIdx = merged.findIndex(
-      (existing) =>
-        existing.source !== "audit" &&
-        existing.filePath === candidate.filePath &&
-        rangesOverlap(existing.startLine, existing.endLine, candidate.startLine, candidate.endLine),
-    );
+    const overlapIdx = merged.findIndex((existing) => shouldMergeOverlapping(existing, candidate));
     if (overlapIdx === -1) {
       merged.push(candidate);
     } else {

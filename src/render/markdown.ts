@@ -385,7 +385,7 @@ export function renderInlineFindingComment(
       ? `line ${finding.startLine}`
       : `lines ${finding.startLine}-${finding.endLine}`;
 
-  return fillTemplate(inlineFindingTemplate, {
+  const rendered = fillTemplate(inlineFindingTemplate, {
     TYPE_ICON: TYPE_EMOJI[finding.type],
     FINDING_TYPE: finding.type,
     SEV_ICON: SEVERITY_EMOJI[finding.severity],
@@ -400,6 +400,7 @@ export function renderInlineFindingComment(
     LINE_RANGE_LABEL: lineRangeLabel,
     SAFE_PROMPT: sanitizeAgentPrompt(finding.agentPrompt),
   });
+  return `<!-- peer:fp=${finding.id} -->\n${rendered}`;
 }
 
 export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {

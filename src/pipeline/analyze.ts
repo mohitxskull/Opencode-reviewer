@@ -34,10 +34,11 @@ import {
   semverViolationsToFindings,
 } from "../analyzers/semver.ts";
 import { buildRustSymbolGraph, type RustSymbolGraph } from "../analyzers/symbol-graph.ts";
-import { filterCodeOnlyDiffMap, parseUnifiedDiff } from "../domain/diff.ts";
+import { filterCodeOnlyDiffMap, findSensitiveFiles, parseUnifiedDiff } from "../domain/diff.ts";
 import {
   type AnalyzeStageContext,
   AnalyzeStageContextSchema,
+  FindingSchema,
   type PullRequestMetadata,
   type ReviewBundle,
   ReviewBundleSchema,
@@ -70,6 +71,7 @@ export interface AnalyzeStageInput {
   readonly pr: PullRequestMetadata;
   readonly profile: ReviewProfile;
   readonly fresh: boolean;
+  readonly noCheckout?: boolean;
   readonly enabledTools: ReadonlySet<OptionalTool>;
   readonly enabledToolsList: readonly string[];
   readonly explicitTools?: ReadonlySet<string>;
@@ -101,6 +103,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     pr,
     profile,
     fresh,
+    noCheckout = false,
     enabledTools,
     enabledToolsList,
     explicitTools = enabledTools,
@@ -166,285 +169,316 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     };
   }
 
-  await withInPlaceCheckout({ repoRoot, targetSha: pr.headSha, prNumber: pr.number }, async () => {
-    let { diffBaseSha, isIncremental } = await checkpointStore.resolveDiffBase({
-      prNumber: pr.number,
-      prBaseSha: pr.baseSha,
-      currentHeadSha: pr.headSha,
-      fresh,
-      profile,
-    });
+  await withInPlaceCheckout(
+    { repoRoot, targetSha: pr.headSha, prNumber: pr.number, noCheckout },
+    async () => {
+      let { diffBaseSha, isIncremental } = await checkpointStore.resolveDiffBase({
+        prNumber: pr.number,
+        prBaseSha: pr.baseSha,
+        currentHeadSha: pr.headSha,
+        fresh,
+        profile,
+      });
 
-    let diffText: string;
-    const diffRangeSpec = isIncremental
-      ? `${diffBaseSha}..${pr.headSha}`
-      : `${diffBaseSha}...${pr.headSha}`;
-    const localDiffAttempt = tryGitRawSync(repoRoot, [
-      "diff",
-      "--no-color",
-      "--unified=3",
-      diffRangeSpec,
-    ]);
-    if (localDiffAttempt.ok && (isIncremental || localDiffAttempt.stdout.length > 0)) {
-      diffText = localDiffAttempt.stdout;
-    } else {
-      if (isIncremental) {
-        isIncremental = false;
-        diffBaseSha = pr.baseSha;
-      }
-      diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
-    }
-
-    const rawDiffMap = parseUnifiedDiff(diffText);
-    const diffMap = filterCodeOnlyDiffMap(rawDiffMap, peerConfig.diff.ignore);
-    let activeDiffMap = diffMap;
-    if (isIncremental) {
-      const fullPrDiffAttempt = tryGitRawSync(repoRoot, [
+      let diffText: string;
+      const diffRangeSpec = isIncremental
+        ? `${diffBaseSha}..${pr.headSha}`
+        : `${diffBaseSha}...${pr.headSha}`;
+      const localDiffAttempt = tryGitRawSync(repoRoot, [
         "diff",
         "--no-color",
         "--unified=3",
-        `${pr.baseSha}...${pr.headSha}`,
+        diffRangeSpec,
       ]);
-      if (fullPrDiffAttempt.ok && fullPrDiffAttempt.stdout.length > 0) {
-        activeDiffMap = filterCodeOnlyDiffMap(
-          parseUnifiedDiff(fullPrDiffAttempt.stdout),
-          peerConfig.diff.ignore,
-        );
+      if (localDiffAttempt.ok && (isIncremental || localDiffAttempt.stdout.length > 0)) {
+        diffText = localDiffAttempt.stdout;
+      } else {
+        if (isIncremental) {
+          isIncremental = false;
+          diffBaseSha = pr.baseSha;
+        }
+        diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
       }
-    }
 
-    const modifiedFiles = new Set(Object.keys(diffMap));
-    const excludedFiles = Object.keys(rawDiffMap).filter((fp) => !modifiedFiles.has(fp));
-    const baseline = collectRustToolchainBaseline(repoRoot);
-
-    await auditLogger.logEvent(
-      "stage.analyze.started",
-      `▶ Stage 1 (analyze): Running deterministic Rust analyzers on ${modifiedFiles.size} file(s)...`,
-    );
-
-    const skippedTools: string[] = [];
-
-    const runAuditWithPolicy = async () => {
-      if (modifiedFiles.size === 0 || !peerConfig.tools.audit) {
-        return [];
-      }
-      try {
-        return await collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha });
-      } catch (err) {
-        if (err instanceof CargoAuditMissingError && !explicitTools.has("audit")) {
-          skippedTools.push(
-            "cargo-audit (not installed — install with: cargo install cargo-audit)",
+      const rawDiffMap = parseUnifiedDiff(diffText);
+      const diffMap = filterCodeOnlyDiffMap(rawDiffMap, peerConfig.diff.ignore);
+      let activeDiffMap = diffMap;
+      if (isIncremental) {
+        const fullPrDiffAttempt = tryGitRawSync(repoRoot, [
+          "diff",
+          "--no-color",
+          "--unified=3",
+          `${pr.baseSha}...${pr.headSha}`,
+        ]);
+        if (fullPrDiffAttempt.ok && fullPrDiffAttempt.stdout.length > 0) {
+          activeDiffMap = filterCodeOnlyDiffMap(
+            parseUnifiedDiff(fullPrDiffAttempt.stdout),
+            peerConfig.diff.ignore,
           );
+        }
+      }
+
+      const modifiedFiles = new Set(Object.keys(diffMap));
+      const excludedFiles = Object.keys(rawDiffMap).filter((fp) => !modifiedFiles.has(fp));
+      const baseline = collectRustToolchainBaseline(repoRoot);
+
+      await auditLogger.logEvent(
+        "stage.analyze.started",
+        `▶ Stage 1 (analyze): Running deterministic Rust analyzers on ${modifiedFiles.size} file(s)...`,
+      );
+
+      const skippedTools: string[] = [];
+
+      const runAuditWithPolicy = async () => {
+        if (modifiedFiles.size === 0 || !peerConfig.tools.audit) {
           return [];
         }
-        throw err;
-      }
-    };
+        try {
+          return await collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha });
+        } catch (err) {
+          if (err instanceof CargoAuditMissingError && !explicitTools.has("audit")) {
+            skippedTools.push(
+              "cargo-audit (not installed — install with: cargo install cargo-audit)",
+            );
+            return [];
+          }
+          throw err;
+        }
+      };
 
-    const runDenyWithPolicy = async () => {
-      if (modifiedFiles.size === 0) {
-        return [];
-      }
-      try {
-        return await collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") });
-      } catch (err) {
-        if (err instanceof CargoDenyMissingError && !explicitTools.has("deny")) {
-          skippedTools.push("cargo-deny (not installed — install with: cargo install cargo-deny)");
+      const runDenyWithPolicy = async () => {
+        if (modifiedFiles.size === 0) {
           return [];
         }
-        throw err;
-      }
-    };
+        try {
+          return await collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") });
+        } catch (err) {
+          if (err instanceof CargoDenyMissingError && !explicitTools.has("deny")) {
+            skippedTools.push(
+              "cargo-deny (not installed — install with: cargo install cargo-deny)",
+            );
+            return [];
+          }
+          throw err;
+        }
+      };
 
-    const [
-      crateGraph,
-      clippyDiagnostics,
-      securityAdvisories,
-      lockDiff,
-      denyDiagnostics,
-      builtGraph,
-    ] = await Promise.all([
-      collectCrateGraph(repoRoot),
-      modifiedFiles.size > 0 && peerConfig.tools.clippy
-        ? collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap)
-        : Promise.resolve([]),
-      runAuditWithPolicy(),
-      collectCargoLockDiff(repoRoot, pr.baseSha),
-      runDenyWithPolicy(),
-      modifiedFiles.size > 0
-        ? buildRustSymbolGraph(repoRoot, diffMap)
-        : Promise.resolve({ nodes: [] }),
-    ]);
-
-    symbolGraph = builtGraph;
-    cargoLockDiff = lockDiff;
-
-    const modifiedCrates = new Set(
-      Array.from(modifiedFiles)
-        .map((fp) => resolveFileArchitecturalLayer(crateGraph, fp).crateName)
-        .filter((name) => Boolean(crateGraph.crates[name])),
-    );
-
-    const [geigerRes, semverRes, coverageRes, miriRes] = await Promise.all([
-      collectCargoGeigerReport(repoRoot, {
-        enabled: enabledTools.has("geiger"),
+      const [
         crateGraph,
-      }),
-      collectCargoSemverViolations(repoRoot, {
-        enabled: enabledTools.has("semver"),
-        baseSha: pr.baseSha,
-      }),
-      collectCargoLlvmCovReport(repoRoot, diffMap, {
-        enabled: enabledTools.has("coverage"),
-        packages: Array.from(modifiedCrates),
-      }),
-      collectMiriReport(repoRoot, diffMap, {
-        enabled: enabledTools.has("miri"),
-        crateGraph,
-      }),
-    ]);
+        clippyDiagnostics,
+        securityAdvisories,
+        lockDiff,
+        denyDiagnostics,
+        builtGraph,
+      ] = await Promise.all([
+        collectCrateGraph(repoRoot),
+        modifiedFiles.size > 0 && peerConfig.tools.clippy
+          ? collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap)
+          : Promise.resolve([]),
+        runAuditWithPolicy(),
+        collectCargoLockDiff(repoRoot, pr.baseSha),
+        runDenyWithPolicy(),
+        modifiedFiles.size > 0
+          ? buildRustSymbolGraph(repoRoot, diffMap)
+          : Promise.resolve({ nodes: [] }),
+      ]);
 
-    geigerReport = geigerRes;
-    semverViolations = semverRes;
-    coverageReport = coverageRes;
-    miriReport = miriRes;
+      symbolGraph = builtGraph;
+      cargoLockDiff = lockDiff;
 
-    const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
-    const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
-    const denyFindings = denyDiagnosticsToFindings(denyDiagnostics);
-    const geigerFindings = geigerReport
-      ? geigerReportToFindings(geigerReport, modifiedCrates, crateGraph)
-      : [];
-    const semverFindings = semverViolationsToFindings(semverViolations);
-    const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
-    const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
+      const modifiedCrates = new Set(
+        Array.from(modifiedFiles)
+          .map((fp) => resolveFileArchitecturalLayer(crateGraph, fp).crateName)
+          .filter((name) => Boolean(crateGraph.crates[name])),
+      );
 
-    const deterministicFindings = [
-      ...clippyFindings,
-      ...auditFindings,
-      ...denyFindings,
-      ...geigerFindings,
-      ...semverFindings,
-      ...coverageFindings,
-      ...miriFindings,
-    ];
-
-    const partitionedDet = partitionAndFilterFindings(deterministicFindings, diffMap, profile);
-
-    analyzeContext = AnalyzeStageContextSchema.parse({
-      pr,
-      diffBaseSha,
-      headSha: pr.headSha,
-      isIncremental,
-      profile,
-      baseline,
-      crateGraph,
-      diffMap,
-      activeDiffMap,
-      excludedFiles,
-      clippyDiagnostics,
-      securityAdvisories,
-      enabledTools: enabledToolsList,
-      deterministicFindings,
-      generatedAt: new Date().toISOString(),
-    });
-
-    analyzeBundle = ReviewBundleSchema.parse({
-      pr,
-      diffBaseSha,
-      headSha: pr.headSha,
-      isIncremental,
-      profile,
-      baseline,
-      walkthrough: {
-        summary: `Deterministic static/dynamic analysis across ${modifiedFiles.size} Rust file(s) (${clippyDiagnostics.length} Clippy, ${securityAdvisories.length} CVE/RustSec, ${deterministicFindings.length} total deterministic finding(s)).`,
-        changes: Array.from(modifiedFiles).map((filePath) => {
-          const layerInfo = resolveFileArchitecturalLayer(crateGraph, filePath);
-          return {
-            layer: layerInfo.layer,
-            crateName: layerInfo.crateName,
-            filePath,
-            summary: "Analyzed by deterministic Rust toolchain",
-          };
+      const [geigerRes, semverRes, coverageRes, miriRes] = await Promise.all([
+        collectCargoGeigerReport(repoRoot, {
+          enabled: enabledTools.has("geiger"),
+          crateGraph,
         }),
-        sequenceDiagram: null,
-        triage: {
-          reviewEffort: Math.min(5, Math.max(1, Math.ceil(modifiedFiles.size / 3))),
-          mergeRisk: deterministicFindings.some((f) => f.severity === "Critical")
-            ? "Critical"
-            : deterministicFindings.some((f) => f.severity === "Major")
-              ? "High"
-              : "Low",
-          rationale: "Deterministic Stage 1 analysis (0 LLM calls).",
+        collectCargoSemverViolations(repoRoot, {
+          enabled: enabledTools.has("semver"),
+          baseSha: pr.baseSha,
+        }),
+        collectCargoLlvmCovReport(repoRoot, diffMap, {
+          enabled: enabledTools.has("coverage"),
+          packages: Array.from(modifiedCrates),
+        }),
+        collectMiriReport(repoRoot, diffMap, {
+          enabled: enabledTools.has("miri"),
+          crateGraph,
+        }),
+      ]);
+
+      geigerReport = geigerRes;
+      semverViolations = semverRes;
+      coverageReport = coverageRes;
+      miriReport = miriRes;
+
+      const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
+      const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
+      const denyFindings = denyDiagnosticsToFindings(denyDiagnostics);
+      const geigerFindings = geigerReport
+        ? geigerReportToFindings(geigerReport, modifiedCrates, crateGraph)
+        : [];
+      const semverFindings = semverViolationsToFindings(semverViolations);
+      const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
+      const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
+      const sensitiveFileFindings = findSensitiveFiles(Object.keys(rawDiffMap)).map((filePath) =>
+        FindingSchema.parse({
+          id: `audit-sensitive-file-${filePath.replace(/[^a-z0-9]+/gi, "-")}`,
+          filePath,
+          startLine: 1,
+          endLine: 1,
+          severity: "Major",
+          type: "Security",
+          epistemicState: "NEEDS-RUNTIME-VERIFICATION",
+          evidenceMechanism: "Security",
+          title: `Sensitive build/toolchain/CI file modified: \`${filePath}\``,
+          body: `PR modifies security-sensitive configuration file \`${filePath}\`. Review carefully for build-script injection, toolchain overrides, CI permission escalation, or policy weakening.`,
+          rootCause: `Modification to sensitive configuration file ${filePath}`,
+          blastRadius: "Build pipeline / toolchain / CI security boundary",
+          reversible: true,
+          dependsOn: null,
+          verificationCommand: `git diff ${diffBaseSha.slice(0, 7)}..${pr.headSha.slice(0, 7)} -- ${filePath}`,
+          traceability: `deterministic sensitive-file detector (${filePath})`,
+          suggestion: null,
+          suggestionVerified: false,
+          agentPrompt: `Manually audit changes to sensitive file \`${filePath}\` for supply-chain, CI, or toolchain security risks.`,
+          confidence: 1.0,
+          source: "audit",
+        }),
+      );
+
+      const deterministicFindings = [
+        ...clippyFindings,
+        ...auditFindings,
+        ...denyFindings,
+        ...geigerFindings,
+        ...semverFindings,
+        ...coverageFindings,
+        ...miriFindings,
+        ...sensitiveFileFindings,
+      ];
+
+      const partitionedDet = partitionAndFilterFindings(deterministicFindings, diffMap, profile);
+
+      analyzeContext = AnalyzeStageContextSchema.parse({
+        pr,
+        diffBaseSha,
+        headSha: pr.headSha,
+        isIncremental,
+        profile,
+        baseline,
+        crateGraph,
+        diffMap,
+        activeDiffMap,
+        excludedFiles,
+        clippyDiagnostics,
+        securityAdvisories,
+        enabledTools: enabledToolsList,
+        deterministicFindings,
+        generatedAt: new Date().toISOString(),
+      });
+
+      analyzeBundle = ReviewBundleSchema.parse({
+        pr,
+        diffBaseSha,
+        headSha: pr.headSha,
+        isIncremental,
+        profile,
+        baseline,
+        walkthrough: {
+          summary: `Deterministic static/dynamic analysis across ${modifiedFiles.size} Rust file(s) (${clippyDiagnostics.length} Clippy, ${securityAdvisories.length} CVE/RustSec, ${deterministicFindings.length} total deterministic finding(s)).`,
+          changes: Array.from(modifiedFiles).map((filePath) => {
+            const layerInfo = resolveFileArchitecturalLayer(crateGraph, filePath);
+            return {
+              layer: layerInfo.layer,
+              crateName: layerInfo.crateName,
+              filePath,
+              summary: "Analyzed by deterministic Rust toolchain",
+            };
+          }),
+          sequenceDiagram: null,
+          triage: {
+            reviewEffort: Math.min(5, Math.max(1, Math.ceil(modifiedFiles.size / 3))),
+            mergeRisk: deterministicFindings.some((f) => f.severity === "Critical")
+              ? "Critical"
+              : deterministicFindings.some((f) => f.severity === "Major")
+                ? "High"
+                : "Low",
+            rationale: "Deterministic Stage 1 analysis (0 LLM calls).",
+          },
         },
-      },
-      findings: partitionedDet.inlineFindings,
-      outsideDiffFindings: partitionedDet.outsideDiffFindings,
-      nitpickFindings: partitionedDet.nitpickFindings,
-      consideredAndRejected: [],
-      deletionsProposed: clippyDiagnostics
-        .filter((d) => d.code === "dead_code")
-        .map((d) => ({
-          pathOrSymbol: `${d.filePath}:${d.startLine}`,
-          reachabilityEvidence: `rustc dead_code diagnostic: ${d.message}`,
-          replacement: "Remove dead symbol or wire into production caller",
-        })),
-      openQuestions: [],
-      notReviewed: [
-        ...skippedTools.map((t) => `Tool skipped: ${t}`),
-        ...excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
-      ],
-      failedCohorts: [],
-      clippyDiagnostics,
-      securityAdvisories,
-      generatedAt: analyzeContext.generatedAt,
-    });
+        findings: partitionedDet.inlineFindings,
+        outsideDiffFindings: partitionedDet.outsideDiffFindings,
+        nitpickFindings: partitionedDet.nitpickFindings,
+        consideredAndRejected: [],
+        deletionsProposed: clippyDiagnostics
+          .filter((d) => d.code === "dead_code")
+          .map((d) => ({
+            pathOrSymbol: `${d.filePath}:${d.startLine}`,
+            reachabilityEvidence: `rustc dead_code diagnostic: ${d.message}`,
+            replacement: "Remove dead symbol or wire into production caller",
+          })),
+        openQuestions: [],
+        notReviewed: [
+          ...skippedTools.map((t) => `Tool skipped: ${t}`),
+          ...excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
+        ],
+        failedCohorts: [],
+        clippyDiagnostics,
+        securityAdvisories,
+        generatedAt: analyzeContext.generatedAt,
+      });
 
-    const learnings = await new LearningStore(repoRoot).getMatchingLearnings(
-      modifiedFiles,
-      pr.baseSha,
-      peerConfig.rules,
-    );
-    const promptContextMd = buildReviewContextPrompt({
-      repoRoot,
-      pr,
-      diffBaseSha,
-      headSha: pr.headSha,
-      isIncremental,
-      fresh,
-      crateGraph,
-      diffMap,
-      clippyDiagnostics,
-      securityAdvisories,
-      cargoLockDiff,
-      geigerReport,
-      semverViolations,
-      coverageReport,
-      miriReport,
-      symbolGraph,
-      learnings,
-      auditLogger,
-    });
+      const learnings = await new LearningStore(repoRoot).getMatchingLearnings(
+        modifiedFiles,
+        pr.baseSha,
+        peerConfig.rules,
+      );
+      const promptContextMd = buildReviewContextPrompt({
+        repoRoot,
+        pr,
+        diffBaseSha,
+        headSha: pr.headSha,
+        isIncremental,
+        fresh,
+        crateGraph,
+        diffMap,
+        clippyDiagnostics,
+        securityAdvisories,
+        cargoLockDiff,
+        geigerReport,
+        semverViolations,
+        coverageReport,
+        miriReport,
+        symbolGraph,
+        learnings,
+        auditLogger,
+      });
 
-    const extraToolOutputs: Record<string, unknown> = {};
-    if (cargoLockDiff) extraToolOutputs["cargo-lock-diff"] = cargoLockDiff;
-    if (denyDiagnostics.length > 0) extraToolOutputs.deny = denyDiagnostics;
-    if (geigerReport) extraToolOutputs.geiger = geigerReport;
-    if (semverViolations.length > 0) extraToolOutputs.semver = semverViolations;
-    if (coverageReport) extraToolOutputs.coverage = coverageReport;
-    if (miriReport) extraToolOutputs.miri = miriReport;
+      const extraToolOutputs: Record<string, unknown> = {};
+      if (cargoLockDiff) extraToolOutputs["cargo-lock-diff"] = cargoLockDiff;
+      if (denyDiagnostics.length > 0) extraToolOutputs.deny = denyDiagnostics;
+      if (geigerReport) extraToolOutputs.geiger = geigerReport;
+      if (semverViolations.length > 0) extraToolOutputs.semver = semverViolations;
+      if (coverageReport) extraToolOutputs.coverage = coverageReport;
+      if (miriReport) extraToolOutputs.miri = miriReport;
 
-    await writeAnalyzeStageArtifacts(repoRoot, analyzeContext, analyzeBundle, {
-      model: "deterministic",
-      durationMs: Date.now() - runStartMs,
-      enabledTools: enabledToolsList,
-      skippedTools,
-      configHash,
-      symbolGraph,
-      promptContextMd,
-      extraToolOutputs,
-    });
-  });
+      await writeAnalyzeStageArtifacts(repoRoot, analyzeContext, analyzeBundle, {
+        model: "deterministic",
+        durationMs: Date.now() - runStartMs,
+        enabledTools: enabledToolsList,
+        skippedTools,
+        configHash,
+        symbolGraph,
+        promptContextMd,
+        extraToolOutputs,
+      });
+    },
+  );
 
   if (!analyzeContext || !analyzeBundle) {
     throw new Error("Internal error: Stage 1 (analyze) produced no context.");

@@ -199,6 +199,42 @@ export interface CheckoutOptions {
   readonly targetSha: string;
   readonly prNumber?: number;
   readonly remoteName?: string;
+  readonly noCheckout?: boolean;
+}
+
+interface PersistedCheckoutSession {
+  readonly originalRef: string;
+  readonly targetSha: string;
+  readonly hadCargoLockOnEntry: boolean;
+  readonly startedAt: string;
+}
+
+function resolveSessionFilePath(repoRoot: string): string {
+  return join(resolvePeerStateDir(repoRoot), "session.json");
+}
+
+export async function restoreInterruptedSession(
+  repoRoot: string,
+): Promise<{ restored: boolean; originalRef?: string }> {
+  const sessionPath = resolveSessionFilePath(repoRoot);
+  const file = Bun.file(sessionPath);
+  if (!(await file.exists())) {
+    return { restored: false };
+  }
+  const parsed = (await file.json()) as PersistedCheckoutSession;
+  if (!parsed?.originalRef) {
+    rmSync(sessionPath, { force: true });
+    return { restored: false };
+  }
+  runGitSync(repoRoot, ["checkout", "-f", parsed.originalRef]);
+  if (!parsed.hadCargoLockOnEntry) {
+    const trackedCheck = tryGitSync(repoRoot, ["ls-files", "--error-unmatch", "Cargo.lock"]);
+    if (!trackedCheck.ok) {
+      rmSync(join(repoRoot, "Cargo.lock"), { force: true });
+    }
+  }
+  rmSync(sessionPath, { force: true });
+  return { restored: true, originalRef: parsed.originalRef };
 }
 
 // Why: We check out the PR commit in-place (after verifying `git status --porcelain`
@@ -233,6 +269,24 @@ export class InPlaceCheckoutSession {
     this.unregisterCleanup = registerSignalCleanup(() => {
       this.restoreOriginalRefSync();
     });
+
+    // Persist original ref before detaching HEAD so `peer restore` can recover after SIGKILL
+    try {
+      const stateDir = resolvePeerStateDir(this.options.repoRoot);
+      await mkdir(stateDir, { recursive: true });
+      const payload: PersistedCheckoutSession = {
+        originalRef: this.originalRef,
+        targetSha: this.options.targetSha,
+        hadCargoLockOnEntry: this.hadCargoLockOnEntry,
+        startedAt: new Date().toISOString(),
+      };
+      await Bun.write(
+        resolveSessionFilePath(this.options.repoRoot),
+        JSON.stringify(payload, null, 2),
+      );
+    } catch {
+      // Best-effort crash recovery record
+    }
 
     try {
       const hasCommit = tryGitSync(this.options.repoRoot, [
@@ -291,6 +345,11 @@ export class InPlaceCheckoutSession {
         }
       }
     }
+    try {
+      rmSync(resolveSessionFilePath(this.options.repoRoot), { force: true });
+    } catch {
+      // Ignore removal error
+    }
   }
 
   private removeSignalListeners(): void {
@@ -305,6 +364,9 @@ export async function withInPlaceCheckout<T>(
   options: CheckoutOptions,
   fn: () => Promise<T>,
 ): Promise<T> {
+  if (options.noCheckout) {
+    return await fn();
+  }
   const session = new InPlaceCheckoutSession(options);
   await session.enter();
   try {

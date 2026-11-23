@@ -23,6 +23,7 @@ import {
   ensureCleanWorkingTree,
   resolveGitTopLevel,
   resolvePeerCommitDir,
+  restoreInterruptedSession,
 } from "../workspace/git.ts";
 import { LearningStore } from "../workspace/learnings.ts";
 import { runDoctorCommand } from "./doctor.ts";
@@ -52,6 +53,7 @@ Commands:
   peer finalize [PR] --verdicts <f> Stage 3: Apply skeptic verdicts deterministically -> 03-verify/
   peer publish  [PR]               Stage 4: Upload latest saved stage (01, 02, or 03) to GitHub PR
   peer doctor                      Check local Rust toolchain & analyzer readiness
+  peer restore                     Restore original branch after an interrupted checkout (e.g. SIGKILL)
   peer init [--fresh]              Scaffold a peer.toml repository configuration file
   peer learn add "<rule>" [--scope "<glob>"] [--repo <path>]
   peer learn list [--repo <path>]
@@ -65,6 +67,7 @@ Options:
   --verdicts <file>          For 'finalize': skeptic verdicts file to filter Stage 2 findings
   --stage <review|verify>    For 'finalize': target stage folder (default: review)
   --strict                   For 'finalize': fail if any finding blocks are malformed or coerced
+  --no-checkout              Run in-place without switching git branches (for CI already on PR head)
   --fresh                    Ignore saved stage artifacts & checkpoint; re-run from scratch
   --submit                   For 'publish': submit as COMMENT instead of PENDING draft
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
@@ -122,6 +125,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         verdicts: { type: "string" },
         stage: { type: "string" },
         strict: { type: "boolean", default: false },
+        "no-checkout": { type: "boolean", default: false },
         fresh: { type: "boolean", default: false },
         submit: { type: "boolean", default: false },
         scope: { type: "string" },
@@ -141,6 +145,16 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     const repoRoot = resolveGitTopLevel(resolve(parsed.values.repo ?? process.cwd()));
     const learningStore = new LearningStore(repoRoot);
+
+    if (parsed.positionals[0] === "restore") {
+      const res = await restoreInterruptedSession(repoRoot);
+      if (res.restored) {
+        writeOut(`Restored repository HEAD to \`${res.originalRef}\`.`);
+      } else {
+        writeOut("No interrupted peer checkout session found.");
+      }
+      return 0;
+    }
 
     if (parsed.positionals[0] === "init") {
       return await runInitCommand(
@@ -170,6 +184,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const profile: ReviewProfile = ReviewProfileSchema.parse(parsed.values.profile ?? "assertive");
     const fresh = parsed.values.fresh ?? false;
     const strict = parsed.values.strict ?? false;
+    const noCheckout = parsed.values["no-checkout"] ?? false;
     const submitReview = parsed.values.submit ?? false;
     const enabledTools = parseToolsOption(parsed.values.tools);
 
@@ -192,7 +207,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       }
     }
 
-    if (command !== "publish") {
+    if (command !== "publish" && !noCheckout) {
       await ensureCleanWorkingTree(repoRoot);
     }
 
@@ -335,6 +350,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         pr,
         profile: effectiveProfile,
         fresh,
+        noCheckout,
         enabledTools: effectiveTools,
         enabledToolsList: effectiveToolsList,
         explicitTools: effectiveTools,
@@ -365,6 +381,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       verdictsPath,
       stage: verdictsPath ? "verify" : finalizeStage,
       strict,
+      noCheckout,
       profile: effectiveProfile,
       configHash,
       runStartMs,

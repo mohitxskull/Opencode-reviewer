@@ -354,6 +354,14 @@ export function allowsFindingForProfile(
   }
 }
 
+export function computeFindingFingerprint(
+  finding: Pick<Finding, "filePath" | "type" | "title" | "rootCause">,
+): string {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  const payload = `${finding.filePath}\n${finding.type}\n${norm(finding.rootCause || finding.title)}`;
+  return new Bun.CryptoHasher("sha256").update(payload).digest("hex").slice(0, 12);
+}
+
 export function isValidInlineRange(
   fileMap: DiffFileMap,
   startLine: number,
