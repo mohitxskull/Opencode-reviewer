@@ -10,6 +10,7 @@ import {
   type ReviewBaselineHeader,
   ReviewBaselineHeaderSchema,
 } from "../domain/models.ts";
+import { isRustTestOrBenchPath } from "../domain/paths.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
 import { parseJsonlObjects } from "../infra/jsonl.ts";
 
@@ -145,9 +146,7 @@ export function resolveFileArchitecturalLayer(
   filePath: string,
 ): { crateName: string; layer: number } {
   const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
-  const segments = normalized.split("/");
-  const isVerificationFile =
-    segments.includes("tests") || segments.includes("benches") || normalized.endsWith("_test.rs");
+  const isVerificationFile = isRustTestOrBenchPath(normalized);
 
   let matchedCrate: CrateLayerInfo | null = null;
   for (const info of Object.values(graph.crates)) {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCli } from "../src/cli/index.ts";
+import { isRustTestOrBenchPath } from "../src/domain/paths.ts";
 
 const tempDirs: string[] = [];
 
@@ -61,7 +62,10 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
         "}",
         "",
         "#[cfg(test)]",
-        "mod tests {",
+        "mod tests;",
+        "",
+        "#[cfg(test)]",
+        "mod inline_tests {",
         "    #[test]",
         "    fn test_unwrap_is_allowed() {",
         "        let v: Option<i32> = std::hint::black_box(Some(1));",
@@ -71,7 +75,18 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
         "",
       ].join("\n"),
     );
-    runGit(dir, ["add", "src/lib.rs"]);
+    await writeFile(
+      join(dir, "src", "tests.rs"),
+      [
+        "#[test]",
+        "fn sibling_test_module_expect_is_allowed() {",
+        "    let v: Option<i32> = std::hint::black_box(Some(2));",
+        '    let _ = v.expect("test assertion");',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    runGit(dir, ["add", "src/lib.rs", "src/tests.rs"]);
     runGit(dir, ["commit", "-m", "feat: add risky fn"]);
 
     const sarifPath = join(dir, "peer-results.sarif");
@@ -101,7 +116,8 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
     );
     expect(flaggedLines).toContain(4);
     expect(flaggedLines).toContain(5);
-    expect(flaggedLines).not.toContain(13);
+    expect(flaggedLines).not.toContain(16);
+    expect(out1Text).not.toContain("src/tests.rs");
 
     // Update baseline -> exits 0 and writes .peer/baseline.json
     const out2: string[] = [];
@@ -119,4 +135,17 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
     expect(code3).toBe(0);
     expect(out3.join("\n")).toContain("0 new finding(s)");
   }, 30_000);
+
+  test("isRustTestOrBenchPath recognizes tests.rs, test.rs, *_test.rs, and tests/benches/examples dirs", () => {
+    expect(isRustTestOrBenchPath("src/services/live/oms/tests.rs")).toBe(true);
+    expect(isRustTestOrBenchPath("src/services/live/oms/test.rs")).toBe(true);
+    expect(isRustTestOrBenchPath("tests.rs")).toBe(true);
+    expect(isRustTestOrBenchPath("src/foo_test.rs")).toBe(true);
+    expect(isRustTestOrBenchPath("src/foo_tests.rs")).toBe(true);
+    expect(isRustTestOrBenchPath("tests/integration.rs")).toBe(true);
+    expect(isRustTestOrBenchPath("crates/core/benches/perf.rs")).toBe(true);
+    expect(isRustTestOrBenchPath("examples/demo.rs")).toBe(true);
+    expect(isRustTestOrBenchPath("src/services/common/ledger.rs")).toBe(false);
+    expect(isRustTestOrBenchPath("src/services/contest.rs")).toBe(false);
+  });
 });

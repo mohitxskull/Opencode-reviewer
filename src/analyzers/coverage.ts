@@ -3,6 +3,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { z } from "zod";
 
 import { type DiffFileMap, type Finding, FindingSchema } from "../domain/models.ts";
+import { isRustTestOrBenchPath } from "../domain/paths.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
 import { analyzeRustSourceAst, isLineInRegions } from "./ast.ts";
 
@@ -48,14 +49,6 @@ interface RawLlvmCovOutput {
       segments?: LlvmCovSegment[];
     }>;
   }>;
-}
-
-function isTestOrBenchPath(relPath: string): boolean {
-  return (
-    /(^|\/)(tests|benches|examples)\//.test(relPath) ||
-    relPath.endsWith("_test.rs") ||
-    relPath.endsWith("_tests.rs")
-  );
 }
 
 function normalizeCoveragePath(filename: string, repoRoot: string): string {
@@ -126,7 +119,7 @@ export async function parseLlvmCovJson(
       }
       const relPath = normalizeCoveragePath(fileEntry.filename, repoRoot);
       const diffFile = diffMap[relPath];
-      if (!diffFile || isTestOrBenchPath(relPath)) {
+      if (!diffFile || isRustTestOrBenchPath(relPath)) {
         continue;
       }
 

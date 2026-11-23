@@ -6,16 +6,8 @@ import {
   type Finding,
   FindingSchema,
 } from "../domain/models.ts";
+import { isRustTestOrBenchPath } from "../domain/paths.ts";
 import { analyzeRustSourceAst, isLineInRegions } from "./ast.ts";
-
-function isTestOrBenchFile(filePath: string): boolean {
-  const norm = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
-  return (
-    /(^|\/)(tests|benches|examples)\//.test(norm) ||
-    norm.endsWith("_test.rs") ||
-    norm.endsWith("_tests.rs")
-  );
-}
 
 function extractAddedLineNumbers(fileMap: DiffFileMap): Set<number> {
   const added = new Set<number>();
@@ -51,7 +43,7 @@ export async function collectAstDeterministicFindings(
   const findings: Finding[] = [];
 
   for (const [relPath, fileMap] of Object.entries(diffMap)) {
-    if (!relPath.endsWith(".rs") || isTestOrBenchFile(relPath)) {
+    if (!relPath.endsWith(".rs") || isRustTestOrBenchPath(relPath)) {
       continue;
     }
     const addedLines = extractAddedLineNumbers(fileMap);

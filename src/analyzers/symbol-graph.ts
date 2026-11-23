@@ -1,6 +1,7 @@
 import { join } from "node:path";
 
 import type { DiffFileMap } from "../domain/models.ts";
+import { isRustTestOrBenchPath } from "../domain/paths.ts";
 import { analyzeRustSourceAst, isLineInRegions, type RustAstAnalysis } from "./ast.ts";
 
 export type RustSymbolKind = "fn" | "struct" | "enum" | "trait";
@@ -141,17 +142,6 @@ export function extractModifiedRustSymbols(
   }
 
   return all;
-}
-
-function isTestPath(filePath: string): boolean {
-  const normalized = filePath.replace(/\\/g, "/");
-  const segments = normalized.split("/");
-  return (
-    segments.includes("tests") ||
-    segments.includes("benches") ||
-    normalized.endsWith("_test.rs") ||
-    normalized.endsWith("/tests.rs")
-  );
 }
 
 export async function extractModifiedRustSymbolsWithAst(
@@ -310,7 +300,7 @@ export async function buildRustSymbolGraph(
           line: lineNo,
           snippet: snippet.slice(0, 100),
         };
-        if (isTestPath(filePath) || isInlineTestRef) {
+        if (isRustTestOrBenchPath(filePath) || isInlineTestRef) {
           testByKey.get(key)?.push(ref);
         } else {
           prodByKey.get(key)?.push(ref);

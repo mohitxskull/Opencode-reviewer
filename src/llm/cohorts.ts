@@ -1,5 +1,6 @@
 import { resolveFileArchitecturalLayer } from "../analyzers/rust.ts";
 import type { CrateGraph, DiffFileMap } from "../domain/models.ts";
+import { isRustTestOrBenchPath } from "../domain/paths.ts";
 
 // Why: Large PRs (e.g. 50-150 files, >1 MB raw diff) exceed an LLM's effective
 // reasoning window and inflate token usage by 10x if every file is dumped inline.
@@ -24,16 +25,7 @@ export function scoreFileReviewPriority(
   testLayer: number,
   clippyFiles: ReadonlySet<string>,
 ): { score: number; isTestOrBench: boolean; addedLinesCount: number; riskSignals: string[] } {
-  const isTestOrBench =
-    layer >= testLayer ||
-    fileMap.filePath.includes("/tests/") ||
-    fileMap.filePath.startsWith("tests/") ||
-    fileMap.filePath.startsWith("benches/") ||
-    fileMap.filePath.includes("/benches/") ||
-    fileMap.filePath.endsWith("_test.rs") ||
-    fileMap.filePath.endsWith("_tests.rs") ||
-    fileMap.filePath.endsWith("/tests.rs") ||
-    fileMap.filePath === "tests.rs";
+  const isTestOrBench = layer >= testLayer || isRustTestOrBenchPath(fileMap.filePath);
 
   let score = isTestOrBench ? 0 : 100 - Math.min(layer * 5, 30);
   if (fileMap.filePath.endsWith("Cargo.toml")) {
