@@ -248,4 +248,25 @@ None.
       reason: "Guarded by non-empty check on line 18",
     });
   });
+
+  test("preserves trailing inline code backticks in titles and fields while stripping wrapping backticks on paths", () => {
+    const md = `## FINDINGS
+
+### FINDING
+- file: \`src/daemon.rs\`
+- lines: 184-184
+- severity: Minor
+- type: Idioms
+- title: Replace unused \`_px_dec\` binding with \`let _ = latest_price;\`
+
+#### Explanation
+Trailing inline code span must keep its closing backtick.
+`;
+    const parsed = parseLensFindingsOutput(md);
+    expect(parsed.findings.length).toBe(1);
+    expect(parsed.findings[0]?.filePath).toBe("src/daemon.rs");
+    expect(parsed.findings[0]?.title).toBe(
+      "Replace unused `_px_dec` binding with `let _ = latest_price;`",
+    );
+  });
 });

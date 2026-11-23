@@ -125,7 +125,7 @@ export function extractModifiedRustSymbols(
   const seenGlobal = new Set<string>();
 
   for (const fileMap of Object.values(diffMap)) {
-    if (!fileMap.filePath.endsWith(".rs")) {
+    if (!fileMap.filePath.endsWith(".rs") || isRustTestOrBenchPath(fileMap.filePath)) {
       continue;
     }
     for (const sym of extractSymbolsFromFileMap(fileMap)) {
@@ -157,7 +157,7 @@ export async function extractModifiedRustSymbolsWithAst(
   const astByFile = new Map<string, RustAstAnalysis>();
 
   for (const fileMap of Object.values(diffMap)) {
-    if (!fileMap.filePath.endsWith(".rs")) {
+    if (!fileMap.filePath.endsWith(".rs") || isRustTestOrBenchPath(fileMap.filePath)) {
       continue;
     }
 

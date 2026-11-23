@@ -80,11 +80,15 @@ function tryExtractJsonObject(rawText: string): unknown | null {
 }
 
 function stripBackticksAndQuotes(val: string): string {
-  return val
-    .trim()
-    .replace(/^`+|`+$/g, "")
-    .replace(/^"+|"+$/g, "")
-    .trim();
+  let s = val.trim();
+  // Only strip matching outer wrappers so inline code spans like "Avoid panic in `foo()`" keep their closing backtick.
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"') && !s.slice(1, -1).includes('"')) {
+    s = s.slice(1, -1).trim();
+  }
+  if (s.length >= 2 && s.startsWith("`") && s.endsWith("`") && !s.slice(1, -1).includes("`")) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
 }
 
 function normalizeSeverity(raw: string | undefined): Severity {

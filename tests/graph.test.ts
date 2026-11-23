@@ -155,4 +155,24 @@ describe("Rust symbol and call-site code graph", () => {
       "src/b.rs::validate_order",
     ]);
   });
+
+  test("buildRustSymbolGraph skips benchmark and test files when extracting modified production symbols", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "peer-graph-bench-"));
+    tempDirs.push(repo);
+    Bun.spawnSync(["git", "init"], { cwd: repo });
+    await mkdir(join(repo, "benches"), { recursive: true });
+    await writeFile(join(repo, "benches", "hot_paths.rs"), "pub fn bench_hot_loop() {}\n");
+    Bun.spawnSync(["git", "add", "."], { cwd: repo });
+
+    const diff = [
+      "diff --git a/benches/hot_paths.rs b/benches/hot_paths.rs",
+      "--- a/benches/hot_paths.rs",
+      "+++ b/benches/hot_paths.rs",
+      "@@ -0,0 +1,1 @@",
+      "+pub fn bench_hot_loop() {}",
+      "",
+    ].join("\n");
+    const graph = await buildRustSymbolGraph(repo, parseUnifiedDiff(diff));
+    expect(graph.nodes).toEqual([]);
+  });
 });
