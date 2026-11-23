@@ -92,11 +92,12 @@ export function formatTerminalReport(
 
   lines.push(
     ``,
-    `--- Local Artifacts & Audit Log ---`,
-    `  Walkthrough: file://${resolve(artifactDir, "walkthrough.md")}`,
-    `  Full Review: file://${resolve(artifactDir, "review.md")}`,
-    `  Findings:    file://${resolve(artifactDir, "findings.json")}`,
-    `  Audit JSONL: file://${resolve(artifactDir, "audit.jsonl")}`,
+    `--- Local Artifacts & Diagnostics (.peer/<pr>/<sha>/) ---`,
+    `  Agent Report: file://${resolve(artifactDir, "review.md")}`,
+    `  Run Manifest: file://${resolve(artifactDir, "run.json")}`,
+    `  Findings:     file://${resolve(artifactDir, "findings.json")}`,
+    `  Tools Output: file://${resolve(artifactDir, "tools")}`,
+    `  Audit JSONL:  file://${resolve(artifactDir, "audit.jsonl")}`,
     `================================================================================`,
   );
 

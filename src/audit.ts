@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { resolvePeerReviewsDir } from "./git.ts";
+import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir, resolvePeerReviewsDir } from "./git.ts";
 
 export interface AuditEventRecord {
   readonly timestamp: string;
@@ -16,6 +16,7 @@ export interface AuditEventRecord {
 export interface AuditLoggerOptions {
   readonly repoRoot: string;
   readonly prNumber: number;
+  readonly headSha?: string;
   readonly runId?: string;
   readonly onProgress?: (formattedLine: string) => void;
 }
@@ -35,6 +36,7 @@ function formatElapsed(ms: number): string {
 export class AuditLogger {
   public readonly repoRoot: string;
   public readonly prNumber: number;
+  public readonly headSha?: string;
   public readonly runId: string;
   private readonly startTimeMs: number;
   private readonly onProgress?: (formattedLine: string) => void;
@@ -43,6 +45,7 @@ export class AuditLogger {
   constructor(options: AuditLoggerOptions) {
     this.repoRoot = options.repoRoot;
     this.prNumber = options.prNumber;
+    this.headSha = options.headSha;
     this.runId =
       options.runId ??
       `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 6)}`;
@@ -51,7 +54,9 @@ export class AuditLogger {
   }
 
   public getReviewDir(): string {
-    return resolvePeerReviewsDir(this.repoRoot, this.prNumber);
+    return this.headSha
+      ? resolvePeerCommitDir(this.repoRoot, this.prNumber, this.headSha)
+      : resolvePeerReviewsDir(this.repoRoot, this.prNumber);
   }
 
   public getLatestAuditJsonlPath(): string {
@@ -65,6 +70,9 @@ export class AuditLogger {
   private ensureInitialized(): Promise<void> {
     if (!this.initPromise) {
       this.initPromise = (async () => {
+        if (this.headSha) {
+          await ensurePeerWorkspaceExcluded(this.repoRoot);
+        }
         await mkdir(join(this.getReviewDir(), "runs"), { recursive: true });
         await writeFile(this.getLatestAuditJsonlPath(), "");
         await writeFile(this.getRunAuditJsonlPath(), "");

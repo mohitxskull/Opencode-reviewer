@@ -37,12 +37,15 @@ export function resolvePeerWorkspaceDir(repoRoot: string): string {
   return join(repoRoot, ".peer");
 }
 
-// Why: Writing the agent-ready Markdown report to `<repoRoot>/.peer/review.md`
-// and `<repoRoot>/.peer/reviews/pr-<num>/` lets coding agents read it directly
-// from the repo root. Appending `.peer/review.md` and `.peer/reviews/` to
-// `<gitCommonDir>/info/exclude` keeps `git status --porcelain` clean without
-// mutating the repository's tracked `.gitignore` (and still allows teams to
-// commit `.peer/learnings.json` if desired).
+export function resolvePeerCommitDir(repoRoot: string, prNumber: number, headSha: string): string {
+  return join(resolvePeerWorkspaceDir(repoRoot), String(prNumber), headSha.slice(0, 7));
+}
+
+// Why: Writing per-commit diagnostics and the single agent-ready `review.md` to
+// `<repoRoot>/.peer/<pr-number>/<short-sha>/` lets coding agents read reports and
+// tool outputs directly from the repo root. Adding `.peer/*` (with an exception
+// for optional tracked `.peer/learnings.json`) to `<gitCommonDir>/info/exclude`
+// keeps `git status --porcelain` clean without mutating `.gitignore`.
 export async function ensurePeerWorkspaceExcluded(repoRoot: string): Promise<void> {
   const gitCommonDir = resolveGitCommonDir(repoRoot);
   const infoDir = join(gitCommonDir, "info");
@@ -58,7 +61,7 @@ export async function ensurePeerWorkspaceExcluded(repoRoot: string): Promise<voi
       .map((l) => l.trim()),
   );
 
-  const requiredEntries = [".peer/review.md", ".peer/reviews/"];
+  const requiredEntries = [".peer/*", "!.peer/learnings.json"];
   const missing = requiredEntries.filter((e) => !lines.has(e));
   if (missing.length > 0) {
     const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";

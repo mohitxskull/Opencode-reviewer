@@ -3,7 +3,7 @@ import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { AuditLogger } from "./audit.ts";
-import { resolvePeerReviewsDir } from "./git.ts";
+import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir } from "./git.ts";
 import {
   type ConsideredAndRejectedItem,
   ConsideredAndRejectedItemSchema,
@@ -118,7 +118,11 @@ export class OpenCodeMultiLensOrchestrator {
     const walkthroughContextPrompt = buildWalkthroughContextPrompt(context);
     const cohorts = groupDiffFilesIntoCohorts(context.diffMap, context.crateGraph);
     const audit = context.auditLogger;
-    const cacheDir = join(resolvePeerReviewsDir(context.repoRoot, context.pr.number), "cache");
+    await ensurePeerWorkspaceExcluded(context.repoRoot).catch(() => {});
+    const cacheDir = join(
+      resolvePeerCommitDir(context.repoRoot, context.pr.number, context.headSha),
+      "cache",
+    );
 
     // For small PRs (<= 1 cohort), run the 3 standard lenses honoring `this.concurrencyLimit`
     if (cohorts.length <= 1) {

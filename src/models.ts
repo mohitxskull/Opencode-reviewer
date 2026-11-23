@@ -262,6 +262,26 @@ export const ReviewCheckpointSchema = z.object({
 });
 export type ReviewCheckpoint = z.infer<typeof ReviewCheckpointSchema>;
 
+export const RunManifestSchema = z.object({
+  prNumber: z.number().int().min(1),
+  headSha: z.string().min(7),
+  baseSha: z.string().min(7),
+  diffBaseSha: z.string().min(7),
+  isIncremental: z.boolean(),
+  profile: ReviewProfileSchema,
+  model: z.string().min(1),
+  status: z.enum(["completed", "partial", "failed"]),
+  failedCohorts: z.array(z.string()).default([]),
+  inlineFindingsCount: z.number().int().min(0),
+  outsideDiffFindingsCount: z.number().int().min(0),
+  nitpickFindingsCount: z.number().int().min(0),
+  clippyCount: z.number().int().min(0),
+  securityAdvisoriesCount: z.number().int().min(0),
+  durationMs: z.number().int().min(0),
+  generatedAt: z.string(),
+});
+export type RunManifest = z.infer<typeof RunManifestSchema>;
+
 export const ReviewBundleSchema = z.object({
   pr: PullRequestMetadataSchema,
   diffBaseSha: z.string().min(7),

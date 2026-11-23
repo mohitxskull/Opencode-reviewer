@@ -1,11 +1,14 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { ensurePeerWorkspaceExcluded, resolvePeerWorkspaceDir } from "../git.ts";
+import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir } from "../git.ts";
+import type { RustSymbolGraph } from "../graph.ts";
 import {
   type Finding,
   type FindingType,
   PEER_REVIEW_MARKER,
   type ReviewBundle,
+  type RunManifest,
+  RunManifestSchema,
   type Severity,
   WALKTHROUGH_MARKER,
 } from "../models.ts";
@@ -476,14 +479,22 @@ export function renderCombinedLocalReviewMarkdown(bundle: ReviewBundle): string 
   });
 }
 
+export interface WriteArtifactsMeta {
+  readonly model?: string;
+  readonly durationMs?: number;
+  readonly symbolGraph?: RustSymbolGraph;
+  readonly extraToolOutputs?: Readonly<Record<string, unknown>>;
+}
+
 export async function writeLocalReviewArtifacts(
   repoRoot: string,
   bundle: ReviewBundle,
+  meta: WriteArtifactsMeta = {},
 ): Promise<string> {
   await ensurePeerWorkspaceExcluded(repoRoot);
-  const workspacePeerDir = resolvePeerWorkspaceDir(repoRoot);
-  const artifactDir = join(workspacePeerDir, "reviews", `pr-${bundle.pr.number}`);
-  await mkdir(artifactDir, { recursive: true });
+  const artifactDir = resolvePeerCommitDir(repoRoot, bundle.pr.number, bundle.headSha);
+  const toolsDir = join(artifactDir, "tools");
+  await mkdir(toolsDir, { recursive: true });
 
   const walkthroughMd = renderWalkthroughComment(bundle);
   const reviewMd = renderCombinedLocalReviewMarkdown(bundle);
@@ -502,12 +513,49 @@ export async function writeLocalReviewArtifacts(
     2,
   );
 
-  await Promise.all([
-    Bun.write(join(workspacePeerDir, "review.md"), reviewMd),
-    Bun.write(join(artifactDir, "walkthrough.md"), walkthroughMd),
-    Bun.write(join(artifactDir, "review.md"), reviewMd),
-    Bun.write(join(artifactDir, "findings.json"), findingsJson),
-  ]);
+  const failedCohorts = bundle.failedCohorts ?? [];
+  const runManifest: RunManifest = RunManifestSchema.parse({
+    prNumber: bundle.pr.number,
+    headSha: bundle.headSha,
+    baseSha: bundle.pr.baseSha,
+    diffBaseSha: bundle.diffBaseSha,
+    isIncremental: bundle.isIncremental,
+    profile: bundle.profile,
+    model: meta.model ?? "unknown",
+    status: failedCohorts.length > 0 ? "partial" : "completed",
+    failedCohorts,
+    inlineFindingsCount: bundle.findings.length,
+    outsideDiffFindingsCount: bundle.outsideDiffFindings?.length ?? 0,
+    nitpickFindingsCount: bundle.nitpickFindings?.length ?? 0,
+    clippyCount: bundle.clippyDiagnostics.length,
+    securityAdvisoriesCount: bundle.securityAdvisories?.length ?? 0,
+    durationMs: Math.max(0, Math.round(meta.durationMs ?? 0)),
+    generatedAt: bundle.generatedAt,
+  });
 
+  const writes: Promise<unknown>[] = [
+    Bun.write(join(artifactDir, "review.md"), reviewMd),
+    Bun.write(join(artifactDir, "walkthrough.md"), walkthroughMd),
+    Bun.write(join(artifactDir, "findings.json"), findingsJson),
+    Bun.write(join(artifactDir, "run.json"), JSON.stringify(runManifest, null, 2)),
+    Bun.write(join(toolsDir, "clippy.json"), JSON.stringify(bundle.clippyDiagnostics, null, 2)),
+    Bun.write(
+      join(toolsDir, "audit.json"),
+      JSON.stringify(bundle.securityAdvisories ?? [], null, 2),
+    ),
+  ];
+
+  if (meta.symbolGraph) {
+    writes.push(
+      Bun.write(join(toolsDir, "symbol-graph.json"), JSON.stringify(meta.symbolGraph, null, 2)),
+    );
+  }
+  if (meta.extraToolOutputs) {
+    for (const [toolName, payload] of Object.entries(meta.extraToolOutputs)) {
+      writes.push(Bun.write(join(toolsDir, `${toolName}.json`), JSON.stringify(payload, null, 2)));
+    }
+  }
+
+  await Promise.all(writes);
   return artifactDir;
 }

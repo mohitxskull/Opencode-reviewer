@@ -229,15 +229,33 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     expect(runGit(repoDir, ["rev-parse", "HEAD"])).toBe(baseSha);
     expect(runGit(repoDir, ["status", "--porcelain"])).toBe("");
 
-    // 2. Local artifacts exist inside .peer/reviews/pr-42/ and .peer/review.md (git-ignored!)
-    const peerReviewDir = join(repoDir, ".peer", "reviews", "pr-42");
-    expect(await Bun.file(join(repoDir, ".peer", "review.md")).exists()).toBe(true);
-    expect(await Bun.file(join(peerReviewDir, "walkthrough.md")).exists()).toBe(true);
-    expect(await Bun.file(join(peerReviewDir, "findings.json")).exists()).toBe(true);
-    expect(await Bun.file(join(peerReviewDir, "review.md")).exists()).toBe(true);
+    // 2. Per-commit artifacts & tool diagnostics exist inside .peer/42/<short-sha>/ (git-ignored!)
+    const commitDir = join(repoDir, ".peer", "42", prHeadSha.slice(0, 7));
+    expect(await Bun.file(join(commitDir, "review.md")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "run.json")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "findings.json")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "audit.jsonl")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "tools", "clippy.json")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "tools", "audit.json")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "tools", "symbol-graph.json")).exists()).toBe(true);
     expect(
       await Bun.file(join(repoDir, ".git", "peer", "reviews", "pr-42", "checkpoint.json")).exists(),
     ).toBe(true);
+
+    // 2b. Re-running on the same commit without --fresh short-circuits immediately (0 lens calls!)
+    let secondRunLensCalled = false;
+    const secondOut: string[] = [];
+    const secondExitCode = await runCli(["review", "42", "--local-only", "--repo", repoDir], {
+      githubClient,
+      stdout: (t) => secondOut.push(t),
+      lensRunner: async () => {
+        secondRunLensCalled = true;
+        throw new Error("Should not invoke lensRunner when commit is already reviewed");
+      },
+    });
+    expect(secondExitCode).toBe(0);
+    expect(secondRunLensCalled).toBe(false);
+    expect(secondOut.join("\n")).toContain("Already reviewed PR #42");
 
     // 3. GitHub walkthrough comment and PENDING review were posted
     expect(postedComments.length).toBe(1);

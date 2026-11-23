@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { AuditLogger } from "./audit.ts";
 import { filterCodeOnlyDiffMap, parseUnifiedDiff } from "./diff.ts";
@@ -8,6 +8,7 @@ import {
   detectRepoOwnerAndName,
   ensureCleanWorkingTree,
   resolveGitTopLevel,
+  resolvePeerCommitDir,
   runGitSync,
   tryGitRawSync,
   withInPlaceCheckout,
@@ -18,7 +19,7 @@ import {
   parsePrTarget,
   resolveGitHubToken,
 } from "./github.ts";
-import { buildRustSymbolGraph } from "./graph.ts";
+import { buildRustSymbolGraph, type RustSymbolGraph } from "./graph.ts";
 import { advisoriesToFindings, clippyToFindings, partitionAndFilterFindings } from "./judge.ts";
 import { LearningStore } from "./learnings.ts";
 import { type MultiLensRunResult, OpenCodeMultiLensOrchestrator } from "./lenses.ts";
@@ -27,6 +28,7 @@ import {
   ReviewBundleSchema,
   type ReviewProfile,
   ReviewProfileSchema,
+  RunManifestSchema,
 } from "./models.ts";
 import { parseModelSpec } from "./opencode/client.ts";
 import type { ReviewContext } from "./prompts/context.ts";
@@ -250,10 +252,36 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const pr = await githubClient.getPullRequest(owner, repo, prNumber);
     const checkpointStore = new CheckpointStore(repoRoot);
     const modelSpec = parseModelSpec(parsed.values.model);
+    const runStartMs = Date.now();
+
+    // Short-circuit immediately when this exact PR commit was already reviewed cleanly
+    // (0 checkouts, 0 cargo builds, 0 LLM calls) unless --fresh or --post is requested.
+    const commitDir = resolvePeerCommitDir(repoRoot, pr.number, pr.headSha);
+    if (!fresh && !postToGitHub) {
+      const existingRunFile = Bun.file(join(commitDir, "run.json"));
+      if (await existingRunFile.exists()) {
+        try {
+          const existingRun = RunManifestSchema.parse(await existingRunFile.json());
+          if (
+            existingRun.status === "completed" &&
+            existingRun.headSha === pr.headSha &&
+            existingRun.profile === profile
+          ) {
+            writeOut(
+              `Already reviewed PR #${pr.number} at commit ${pr.headSha.slice(0, 7)} (profile=${profile}, ${existingRun.inlineFindingsCount} inline / ${existingRun.outsideDiffFindingsCount} outside-diff findings).\nReport: file://${resolve(commitDir, "review.md")}\nPass --fresh to force a re-review.`,
+            );
+            return 0;
+          }
+        } catch {
+          // Ignore malformed run.json and proceed with fresh review
+        }
+      }
+    }
 
     const auditLogger = new AuditLogger({
       repoRoot,
       prNumber: pr.number,
+      headSha: pr.headSha,
       onProgress: (line) => writeOut(line),
     });
 
@@ -276,6 +304,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     let failedCohortsCount = 0;
     let activeDiffMap: Record<string, import("./models.ts").DiffFileMap> = {};
+    let capturedSymbolGraph: RustSymbolGraph | undefined;
     const bundle = await withInPlaceCheckout(
       {
         repoRoot,
@@ -402,6 +431,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             buildRustSymbolGraph(repoRoot, diffMap),
             learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha),
           ]);
+        capturedSymbolGraph = symbolGraph;
 
         await auditLogger.logEvent(
           "stage.rust_ground_truth.completed",
@@ -546,8 +576,12 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       },
     );
 
-    // Step 5: Persist local artifacts inside .git/peer/reviews/pr-<num>/
-    const artifactDir = await writeLocalReviewArtifacts(repoRoot, bundle);
+    // Step 5: Persist per-commit artifacts & tool diagnostics inside .peer/<pr>/<short-sha>/
+    const artifactDir = await writeLocalReviewArtifacts(repoRoot, bundle, {
+      model: `${modelSpec.providerID}/${modelSpec.id}`,
+      durationMs: Date.now() - runStartMs,
+      symbolGraph: capturedSymbolGraph,
+    });
 
     await auditLogger.logEvent(
       "run.completed",
