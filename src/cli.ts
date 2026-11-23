@@ -18,7 +18,7 @@ import {
   resolveGitHubToken,
 } from "./github.ts";
 import { buildRustSymbolGraph } from "./graph.ts";
-import { clippyToFindings, partitionAndFilterFindings } from "./judge.ts";
+import { advisoriesToFindings, clippyToFindings, partitionAndFilterFindings } from "./judge.ts";
 import { LearningStore } from "./learnings.ts";
 import {
   type MultiLensRunResult,
@@ -44,6 +44,7 @@ import {
   collectCrateGraph,
   collectRustToolchainBaseline,
 } from "./rust.ts";
+import { collectSecurityAdvisories } from "./security.ts";
 import { SuggestionCompilerVerifier } from "./verifier.ts";
 
 export type LensRunnerFn = (context: ReviewContext) => Promise<MultiLensRunResult>;
@@ -372,25 +373,29 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
         await auditLogger.logEvent(
           "stage.rust_ground_truth.started",
-          `▶ Stage 3/6: Collecting local Rust ground truth (cargo metadata + cargo clippy + symbol call-site graph)...`,
+          `▶ Stage 3/6: Collecting local Rust ground truth (cargo metadata + cargo clippy + cargo audit/CVE + symbol call-site graph)...`,
         );
         const gtStartMs = Date.now();
 
-        const [crateGraph, clippyDiagnostics, symbolGraph, learnings] = await Promise.all([
-          collectCrateGraph(repoRoot),
-          collectClippyDiagnostics(repoRoot, modifiedFiles),
-          buildRustSymbolGraph(repoRoot, diffMap),
-          learningStore.getMatchingLearnings(modifiedFiles),
-        ]);
+        const [crateGraph, clippyDiagnostics, securityAdvisories, symbolGraph, learnings] =
+          await Promise.all([
+            collectCrateGraph(repoRoot),
+            collectClippyDiagnostics(repoRoot, modifiedFiles),
+            collectSecurityAdvisories(repoRoot),
+            buildRustSymbolGraph(repoRoot, diffMap),
+            learningStore.getMatchingLearnings(modifiedFiles),
+          ]);
 
         await auditLogger.logEvent(
           "stage.rust_ground_truth.completed",
-          `  ├─ ✓ Rust ground truth ready in ${Date.now() - gtStartMs}ms (${Object.keys(crateGraph.crates).length} crate(s), ${clippyDiagnostics.length} Clippy diagnostic(s), ${symbolGraph.nodes.length} modified symbol(s) graphed, ${learnings.length} repo learning(s))`,
+          `  ├─ ✓ Rust ground truth ready in ${Date.now() - gtStartMs}ms (${Object.keys(crateGraph.crates).length} crate(s), ${clippyDiagnostics.length} Clippy diagnostic(s), ${securityAdvisories.length} CVE/RustSec advisory(s), ${symbolGraph.nodes.length} modified symbol(s) graphed, ${learnings.length} repo learning(s))`,
           {
             durationMs: Date.now() - gtStartMs,
             crateCount: Object.keys(crateGraph.crates).length,
             clippyCount: clippyDiagnostics.length,
             clippyDiagnostics,
+            securityAdvisoriesCount: securityAdvisories.length,
+            securityAdvisories,
             symbolGraphNodes: symbolGraph.nodes.map((n) => ({
               name: n.name,
               kind: n.kind,
@@ -412,6 +417,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           crateGraph,
           diffMap,
           clippyDiagnostics,
+          securityAdvisories,
           symbolGraph,
           learnings,
           auditLogger,
@@ -442,10 +448,11 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         // Post-lens safety check: restore working tree if any external tool touched tracked files
         runGitSync(repoRoot, ["checkout", "--", "."]);
 
-        // Step 3: Judge Pass (merge Clippy + lens findings, partition into inline / outside-diff / nitpicks)
+        // Step 3: Judge Pass (merge Clippy + CVE/audit + lens findings, partition into inline / outside-diff / nitpicks)
         const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
+        const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot);
         const partitioned = partitionAndFilterFindings(
-          [...clippyFindings, ...rawLensFindings],
+          [...clippyFindings, ...auditFindings, ...rawLensFindings],
           diffMap,
           profile,
         );
@@ -513,6 +520,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           notReviewed: excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
           failedCohorts: lensResult.failedCohorts ?? [],
           clippyDiagnostics: [...clippyDiagnostics],
+          securityAdvisories: [...securityAdvisories],
           generatedAt: new Date().toISOString(),
         });
       },

@@ -35,7 +35,7 @@ export type FindingType = z.infer<typeof FindingTypeSchema>;
 export const ReviewProfileSchema = z.enum(["quiet", "chill", "assertive"]);
 export type ReviewProfile = z.infer<typeof ReviewProfileSchema>;
 
-export const FindingSourceSchema = z.enum(["clippy", "soundness", "idioms"]);
+export const FindingSourceSchema = z.enum(["clippy", "audit", "soundness", "idioms"]);
 export type FindingSource = z.infer<typeof FindingSourceSchema>;
 
 export const EpistemicStateSchema = z.enum([
@@ -217,6 +217,22 @@ export const ClippyDiagnosticSchema = z.object({
 });
 export type ClippyDiagnostic = z.infer<typeof ClippyDiagnosticSchema>;
 
+export const SecurityAdvisorySchema = z.object({
+  id: z.string().min(1),
+  aliases: z.array(z.string()).default([]),
+  packageName: z.string().min(1),
+  packageVersion: z.string().min(1),
+  kind: z.enum(["vulnerability", "unsound", "yanked"]),
+  title: z.string().min(1),
+  description: z.string().default(""),
+  url: z.string().nullable().default(null),
+  cvss: z.string().nullable().default(null),
+  patchedVersions: z.array(z.string()).default([]),
+  affectedFunctions: z.array(z.string()).default([]),
+  source: z.enum(["cargo-audit", "osv"]).default("cargo-audit"),
+});
+export type SecurityAdvisory = z.infer<typeof SecurityAdvisorySchema>;
+
 export const PullRequestSummarySchema = z.object({
   number: z.number().int().min(1),
   title: z.string(),
@@ -263,6 +279,7 @@ export const ReviewBundleSchema = z.object({
   notReviewed: z.array(z.string()).default([]).optional(),
   failedCohorts: z.array(z.string()).default([]).optional(),
   clippyDiagnostics: z.array(ClippyDiagnosticSchema),
+  securityAdvisories: z.array(SecurityAdvisorySchema).default([]).optional(),
   generatedAt: z.string(),
 });
 export type ReviewBundle = z.infer<typeof ReviewBundleSchema>;

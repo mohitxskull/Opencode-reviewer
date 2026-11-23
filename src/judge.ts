@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { snapRangeToHunk } from "./diff.ts";
 import {
   allowsFindingForProfile,
@@ -7,7 +8,82 @@ import {
   FindingSchema,
   type ReviewProfile,
   SEVERITY_RANK,
+  type SecurityAdvisory,
 } from "./models.ts";
+
+export async function advisoriesToFindings(
+  advisories: readonly SecurityAdvisory[],
+  repoRoot: string,
+): Promise<Finding[]> {
+  if (advisories.length === 0) {
+    return [];
+  }
+
+  let cargoTomlLines: string[] = [];
+  const cargoTomlFile = Bun.file(join(repoRoot, "Cargo.toml"));
+  if (await cargoTomlFile.exists()) {
+    cargoTomlLines = (await cargoTomlFile.text()).replace(/\r\n/g, "\n").split("\n");
+  }
+
+  const findCrateLineInCargoToml = (crateName: string): number => {
+    const escaped = crateName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`^\\s*${escaped}\\s*=`);
+    for (let i = 0; i < cargoTomlLines.length; i++) {
+      if (regex.test(cargoTomlLines[i] ?? "")) {
+        return i + 1;
+      }
+    }
+    return 1;
+  };
+
+  const results: Finding[] = [];
+  for (let i = 0; i < advisories.length; i++) {
+    const adv = advisories[i];
+    if (!adv) {
+      continue;
+    }
+
+    const line = findCrateLineInCargoToml(adv.packageName);
+    const aliasText = adv.aliases.length > 0 ? ` (${adv.aliases.join(", ")})` : "";
+    const patchedText =
+      adv.patchedVersions.length > 0
+        ? `Upgrade \`${adv.packageName}\` to a patched version (${adv.patchedVersions.join(" or ")}).`
+        : `No patched release is currently published for \`${adv.packageName}\`; evaluate mitigation or crate replacement.`;
+    const affectedFnText =
+      adv.affectedFunctions.length > 0
+        ? `\n\nAffected functions: ${adv.affectedFunctions.map((f) => `\`${f}\``).join(", ")}`
+        : "";
+    const urlText = adv.url ? `\n\nAdvisory reference: ${adv.url}` : "";
+
+    results.push(
+      FindingSchema.parse({
+        id: `audit-${adv.id}-${i + 1}`,
+        filePath: "Cargo.toml",
+        startLine: line,
+        endLine: line,
+        severity: adv.kind === "vulnerability" ? "Critical" : "Major",
+        type: "Security",
+        epistemicState: "NEEDS-RUNTIME-VERIFICATION",
+        evidenceMechanism: "Security",
+        title: `${adv.id}${aliasText}: ${adv.packageName} ${adv.packageVersion} — ${adv.title}`,
+        body: `${adv.description || adv.title}\n\n${patchedText}${affectedFnText}${urlText}`,
+        rootCause: `Vulnerable dependency ${adv.packageName} ${adv.packageVersion} (${adv.id})`,
+        blastRadius: `All targets depending on ${adv.packageName}`,
+        reversible: true,
+        dependsOn: null,
+        verificationCommand: "cargo audit",
+        traceability: `${adv.source} advisory ${adv.id}${aliasText}`,
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: `Resolve ${adv.id}${aliasText} in dependency \`${adv.packageName}\` (currently \`${adv.packageVersion}\`). ${patchedText} Run \`cargo audit\` and \`cargo test --workspace\` to verify.`,
+        confidence: 1.0,
+        source: "audit",
+      }),
+    );
+  }
+
+  return results;
+}
 
 export function clippyToFindings(
   diagnostics: readonly ClippyDiagnostic[],

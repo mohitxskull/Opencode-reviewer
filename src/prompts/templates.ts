@@ -107,6 +107,7 @@ Before outputting your review, re-attack your candidate findings:
 - Any hypothesis that you examined and confirmed is safe (or lacks falsifiable evidence) MUST be moved OUT of \`## FINDINGS\` and recorded in \`## CONSIDERED_AND_REJECTED\` with the concrete reason it was dismissed.
 - Any unverified assumption or missing requirement where every fix would be a guess MUST be placed in \`## OPEN_QUESTIONS\`.
 - Any dead symbol/shim with 0 callers in the Symbol Call-Site Graph belongs in \`## DELETIONS_PROPOSED\`.
+- If \`## Deterministic CVE / RustSec Advisories\` are listed below, check whether the vulnerable crate or affected functions are actually reachable in production code (confirm reachable ones as \`VERIFIED-DEFECT\` \`Security\` findings; dismiss unreachable/dev-only advisories in \`## CONSIDERED_AND_REJECTED\` with evidence).
 - Never emit duplicate findings — one \`### FINDING\` block per root cause. If there are no actionable findings, write \`None.\` under \`## FINDINGS\`.
 
 ${STRUCTURED_MARKDOWN_FINDINGS_FORMAT}

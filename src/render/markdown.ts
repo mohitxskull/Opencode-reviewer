@@ -158,6 +158,7 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
     `- **Outside Diff Range Comments:** ${outside.length}`,
     `- **Nitpick Comments:** ${nitpicks.length}`,
     `- **Cargo Clippy / Compiler Diagnostics Checked:** ${bundle.clippyDiagnostics.length}`,
+    `- **CVE / RustSec Advisories Found:** ${bundle.securityAdvisories?.length ?? 0}`,
     "",
   );
 

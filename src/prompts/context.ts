@@ -5,8 +5,15 @@ import {
   type RustSymbolGraph,
 } from "../graph.ts";
 import { formatLearningsPromptSection, type RepoLearning } from "../learnings.ts";
-import type { ClippyDiagnostic, CrateGraph, DiffFileMap, PullRequestMetadata } from "../models.ts";
+import type {
+  ClippyDiagnostic,
+  CrateGraph,
+  DiffFileMap,
+  PullRequestMetadata,
+  SecurityAdvisory,
+} from "../models.ts";
 import { resolveFileArchitecturalLayer } from "../rust.ts";
+import { formatSecurityAdvisoriesPromptSection } from "../security.ts";
 import {
   compactAnnotatedLines,
   DEFAULT_MAX_INLINE_DIFF_CHARS,
@@ -24,6 +31,7 @@ export interface ReviewContext {
   readonly crateGraph: CrateGraph;
   readonly diffMap: Readonly<Record<string, DiffFileMap>>;
   readonly clippyDiagnostics: readonly ClippyDiagnostic[];
+  readonly securityAdvisories?: readonly SecurityAdvisory[];
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
   readonly auditLogger?: AuditLogger;
@@ -150,6 +158,10 @@ export function buildReviewContextPrompt(
     sections.push(
       `## Rust Symbol & Cross-Workspace Call-Site Graph\n${formatSymbolGraphSummary(context.symbolGraph)}`,
     );
+  }
+
+  if (context.securityAdvisories && context.securityAdvisories.length > 0) {
+    sections.push(formatSecurityAdvisoriesPromptSection(context.securityAdvisories));
   }
 
   if (context.clippyDiagnostics.length > 0) {
