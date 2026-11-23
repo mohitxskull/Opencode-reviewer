@@ -109,6 +109,17 @@ export async function collectAstDeterministicFindings(
     }
 
     // 2. Detect newly added production panic paths (.unwrap/.expect/panic!/todo!/unimplemented!)
+    // Why: Grouping multiple panic calls inside the same enclosing function prevents
+    // spamming N nearly identical inline comments on one function (e.g. a writer helper).
+    interface PanicHit {
+      readonly lineNo: number;
+      readonly matchedOp: string;
+      readonly isStubMacro: boolean;
+    }
+
+    const panicGroups = new Map<string, { fnName: string | null; hits: PanicHit[] }>();
+    const fnSymbols = ast.symbols.filter((s) => s.kind === "fn" && !s.isTest);
+
     for (const lineNo of Array.from(addedLines).sort((a, b) => a - b)) {
       if (isLineInRegions(lineNo, ast.testRegions)) {
         continue;
@@ -124,8 +135,49 @@ export async function collectAstDeterministicFindings(
       }
       const matchedOp = match[1] ? `.${match[1]}()` : `${match[2]}!()`;
       const isStubMacro = match[2] === "todo" || match[2] === "unimplemented";
-      const title = `Production panic call \`${matchedOp}\` introduced`;
-      const rootCause = `Unchecked panic operation ${matchedOp} in production path ${relPath}`;
+
+      let enclosingFn: (typeof fnSymbols)[number] | null = null;
+      for (const sym of fnSymbols) {
+        if (lineNo >= sym.startLine && lineNo <= sym.endLine) {
+          if (
+            !enclosingFn ||
+            sym.endLine - sym.startLine < enclosingFn.endLine - enclosingFn.startLine
+          ) {
+            enclosingFn = sym;
+          }
+        }
+      }
+
+      const groupKey = enclosingFn
+        ? `${enclosingFn.name}:${enclosingFn.startLine}`
+        : `line:${lineNo}`;
+      const existing = panicGroups.get(groupKey);
+      if (existing) {
+        existing.hits.push({ lineNo, matchedOp, isStubMacro });
+      } else {
+        panicGroups.set(groupKey, {
+          fnName: enclosingFn?.name ?? null,
+          hits: [{ lineNo, matchedOp, isStubMacro }],
+        });
+      }
+    }
+
+    for (const group of panicGroups.values()) {
+      const first = group.hits[0];
+      if (!first) {
+        continue;
+      }
+      const hasStubMacro = group.hits.some((h) => h.isStubMacro);
+      const uniqueOps = Array.from(new Set(group.hits.map((h) => `\`${h.matchedOp}\``)));
+      const lineList = group.hits.map((h) => `L${h.lineNo}`).join(", ");
+      const isMulti = group.hits.length > 1;
+
+      const title = isMulti
+        ? `${group.hits.length} production panic calls (${uniqueOps.join(", ")}) introduced${group.fnName ? ` in \`${group.fnName}\`` : ""}`
+        : `Production panic call \`${first.matchedOp}\` introduced`;
+      const rootCause = isMulti
+        ? `Unchecked panic operations (${group.hits.map((h) => h.matchedOp).join(", ")}) in production path ${relPath}${group.fnName ? `::${group.fnName}` : ""}`
+        : `Unchecked panic operation ${first.matchedOp} in production path ${relPath}`;
       const fp = computeFindingFingerprint({
         filePath: relPath,
         type: "Bug",
@@ -135,25 +187,29 @@ export async function collectAstDeterministicFindings(
 
       findings.push(
         FindingSchema.parse({
-          id: `audit-ast-panic-${fp}-${lineNo}`,
+          id: `audit-ast-panic-${fp}-${first.lineNo}`,
           filePath: relPath,
-          startLine: lineNo,
-          endLine: lineNo,
-          severity: isStubMacro ? "Major" : "Minor",
+          startLine: first.lineNo,
+          endLine: first.lineNo,
+          severity: hasStubMacro ? "Major" : "Minor",
           type: "Bug",
           epistemicState: "VERIFIED-DEFECT",
           evidenceMechanism: "Correctness",
           title,
-          body: `Added \`${matchedOp}\` on production line \`${relPath}:${lineNo}\`. Propagate errors with \`?\` / \`Result\` or handle the \`None\`/\`Err\` case explicitly.`,
+          body: isMulti
+            ? `Added ${group.hits.length} panic calls (${uniqueOps.join(", ")}) in \`${relPath}\`${group.fnName ? ` (\`${group.fnName}\`)` : ""} at ${lineList}. Propagate errors with \`?\` / \`Result\` or handle the \`None\`/\`Err\` cases explicitly.`
+            : `Added \`${first.matchedOp}\` on production line \`${relPath}:${first.lineNo}\`. Propagate errors with \`?\` / \`Result\` or handle the \`None\`/\`Err\` case explicitly.`,
           rootCause,
           blastRadius: "Runtime crash / thread panic in production code",
           reversible: true,
           dependsOn: null,
           verificationCommand: "cargo test --workspace",
-          traceability: `tree-sitter AST panic detector (${relPath}:${lineNo})`,
+          traceability: `tree-sitter AST panic detector (${relPath}:${lineList})`,
           suggestion: null,
           suggestionVerified: false,
-          agentPrompt: `Replace \`${matchedOp}\` at \`${relPath}:${lineNo}\` with proper error propagation (\`?\` / \`Result\`) or explicit handling.`,
+          agentPrompt: isMulti
+            ? `Replace the ${group.hits.length} panic calls (${uniqueOps.join(", ")}) in \`${relPath}\` at ${lineList} with proper error propagation (\`?\` / \`Result\`) or explicit handling.`
+            : `Replace \`${first.matchedOp}\` at \`${relPath}:${first.lineNo}\` with proper error propagation (\`?\` / \`Result\`) or explicit handling.`,
           confidence: 0.95,
           source: "audit",
         }),

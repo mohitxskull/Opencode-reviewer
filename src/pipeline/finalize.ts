@@ -1,3 +1,4 @@
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -107,6 +108,39 @@ function parseAgentReviewInput(
   };
 }
 
+async function resolveAgentInputFiles(fromSpec: string): Promise<string[]> {
+  const parts = fromSpec
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const files: string[] = [];
+
+  for (const part of parts) {
+    let info: Awaited<ReturnType<typeof stat>>;
+    try {
+      info = await stat(part);
+    } catch {
+      throw new Error(`Input review file or directory not found: ${part}`);
+    }
+
+    if (info.isDirectory()) {
+      const entries = (await readdir(part))
+        .filter((name) => name.endsWith(".md") || name.endsWith(".json"))
+        .sort((a, b) => a.localeCompare(b));
+      if (entries.length === 0) {
+        throw new Error(`No .md or .json review files found in directory: ${part}`);
+      }
+      for (const name of entries) {
+        files.push(join(part, name));
+      }
+    } else {
+      files.push(part);
+    }
+  }
+
+  return files;
+}
+
 export async function runFinalizeStage(input: FinalizeStageInput): Promise<FinalizeStageResult> {
   const {
     repoRoot,
@@ -212,15 +246,42 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
   }
 
   if (!fromPath) {
-    throw new Error("`peer finalize` requires `--from <file>` or `--verdicts <file>`.");
+    throw new Error("`peer finalize` requires `--from <file|dir>` or `--verdicts <file>`.");
   }
 
-  const inputFile = Bun.file(fromPath);
-  if (!(await inputFile.exists())) {
-    throw new Error(`Input review file not found: ${fromPath}`);
+  const inputPaths = await resolveAgentInputFiles(fromPath);
+  let mergedWalkthrough = analyzeBundle.walkthrough;
+  let walkthroughOverridden = false;
+  const mergedFindings: Finding[] = [];
+  const mergedConsidered: ConsideredAndRejectedItem[] = [];
+  const mergedDeletions: DeletionProposedItem[] = [];
+  const mergedQuestions: OpenQuestionItem[] = [];
+  const mergedWarnings: string[] = [];
+
+  for (const filePath of inputPaths) {
+    const rawText = await Bun.file(filePath).text();
+    const parsed = parseAgentReviewInput(rawText, analyzeBundle.walkthrough);
+    if (!walkthroughOverridden && parsed.walkthrough !== analyzeBundle.walkthrough) {
+      mergedWalkthrough = parsed.walkthrough;
+      walkthroughOverridden = true;
+    }
+    mergedFindings.push(...parsed.findings);
+    mergedConsidered.push(...parsed.consideredAndRejected);
+    mergedDeletions.push(...parsed.deletionsProposed);
+    mergedQuestions.push(...parsed.openQuestions);
+    for (const w of parsed.warnings) {
+      mergedWarnings.push(inputPaths.length > 1 ? `[${filePath}] ${w}` : w);
+    }
   }
-  const rawAgentOutput = await inputFile.text();
-  const agentReview = parseAgentReviewInput(rawAgentOutput, analyzeBundle.walkthrough);
+
+  const agentReview = {
+    walkthrough: mergedWalkthrough,
+    findings: mergedFindings,
+    consideredAndRejected: mergedConsidered,
+    deletionsProposed: mergedDeletions,
+    openQuestions: mergedQuestions,
+    warnings: mergedWarnings,
+  };
 
   if (strict && agentReview.warnings.length > 0) {
     throw new Error(`Strict mode failed:\n- ${agentReview.warnings.join("\n- ")}`);

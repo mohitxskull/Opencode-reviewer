@@ -24,6 +24,12 @@ export interface WriteArtifactsMeta {
   readonly configHash?: string;
   readonly symbolGraph?: RustSymbolGraph;
   readonly promptContextMd?: string;
+  readonly cohortPrompts?: ReadonlyArray<{
+    readonly id: string;
+    readonly label: string;
+    readonly filePaths: readonly string[];
+    readonly markdown: string;
+  }>;
   readonly extraToolOutputs?: Readonly<Record<string, unknown>>;
 }
 
@@ -90,6 +96,21 @@ export async function writeAnalyzeStageArtifacts(
 
   if (meta.promptContextMd) {
     writes.push(Bun.write(join(stageDir, "prompt-context.md"), meta.promptContextMd));
+  }
+  if (meta.cohortPrompts && meta.cohortPrompts.length > 0) {
+    const cohortsDir = join(stageDir, "cohorts");
+    await mkdir(cohortsDir, { recursive: true });
+    const indexPayload = meta.cohortPrompts.map((c) => ({
+      id: c.id,
+      label: c.label,
+      file: `${c.id}.md`,
+      fileCount: c.filePaths.length,
+      filePaths: c.filePaths,
+    }));
+    writes.push(Bun.write(join(cohortsDir, "index.json"), JSON.stringify(indexPayload, null, 2)));
+    for (const cohort of meta.cohortPrompts) {
+      writes.push(Bun.write(join(cohortsDir, `${cohort.id}.md`), cohort.markdown));
+    }
   }
   if (meta.symbolGraph) {
     writes.push(

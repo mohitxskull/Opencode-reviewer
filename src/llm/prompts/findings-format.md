@@ -11,17 +11,22 @@ Return your review in the following **Structured Markdown** format (do NOT wrap 
 - state: VERIFIED-DEFECT | NEEDS-RUNTIME-VERIFICATION | DESIGN-CONCERN | SYMPTOM-PATCH
 - mechanism: Concurrency | Security | Performance | Correctness | Design
 - confidence: 0.92
-- title: Imperative, specific defect title
+- title: Imperative, specific headline stating the exact fix (e.g. "Sync the current directory for a basename-only store path.")
 - root_cause: One-line root cause summary for grouping and the Index Table
 - blast_radius: Affected modules/callers/consumers
 - reversible: true
 - depends_on: none
 - verification: cargo test -p <crate> <test_filter> && cargo clippy --workspace --all-targets -- -D warnings
-- traceability: Exact invariant, comment, or test violated
+- traceability: Exact invariant, repo rule, or sibling callsite violated
 
 #### Explanation
 
-Concrete root-cause explanation: name the exact variable/line, trace the failure mechanism step-by-step, and state the smallest-correct-fix (or justify rewrite vs targeted fix).
+Write 3–5 crisp sentences with zero filler:
+
+1. **Trigger:** concrete input, edge case, or interleaving that hits this line.
+2. **Failure:** exact variable/state/line consequence (cite sibling callsites if cross-file).
+3. **Scope:** honest reachability note if current callers narrow the blast radius.
+4. **Fix:** smallest root-cause fix (never sleep/retry masks).
 
 #### Suggestion
 

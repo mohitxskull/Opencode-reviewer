@@ -3,7 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { collectAstDeterministicFindings } from "../src/analyzers/ast-detectors.ts";
 import { runCli } from "../src/cli/index.ts";
+import { parseUnifiedDiff } from "../src/domain/diff.ts";
 import { isRustTestOrBenchPath } from "../src/domain/paths.ts";
 
 const tempDirs: string[] = [];
@@ -147,5 +149,43 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
     expect(isRustTestOrBenchPath("examples/demo.rs")).toBe(true);
     expect(isRustTestOrBenchPath("src/services/common/ledger.rs")).toBe(false);
     expect(isRustTestOrBenchPath("src/services/contest.rs")).toBe(false);
+  });
+
+  test("collectAstDeterministicFindings groups multiple panic calls inside the same function into one finding", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "peer-ast-group-"));
+    tempDirs.push(dir);
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(
+      join(dir, "src", "ledger.rs"),
+      [
+        "pub fn send_sync(a: Option<i32>, b: Option<i32>) -> i32 {",
+        '    let x = a.expect("a missing");',
+        '    let y = b.expect("b missing");',
+        '    if x < 0 { panic!("negative"); }',
+        "    x + y",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const diff = [
+      "diff --git a/src/ledger.rs b/src/ledger.rs",
+      "--- a/src/ledger.rs",
+      "+++ b/src/ledger.rs",
+      "@@ -0,0 +1,6 @@",
+      "+pub fn send_sync(a: Option<i32>, b: Option<i32>) -> i32 {",
+      '+    let x = a.expect("a missing");',
+      '+    let y = b.expect("b missing");',
+      '+    if x < 0 { panic!("negative"); }',
+      "+    x + y",
+      "+}",
+      "",
+    ].join("\n");
+
+    const findings = await collectAstDeterministicFindings(dir, parseUnifiedDiff(diff));
+    expect(findings.length).toBe(1);
+    expect(findings[0]?.title).toContain("3 production panic calls");
+    expect(findings[0]?.title).toContain("`send_sync`");
+    expect(findings[0]?.body).toContain("L2, L3, L4");
   });
 });

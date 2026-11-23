@@ -190,3 +190,119 @@ export function groupDiffFilesIntoCohorts(
 
   return cohorts;
 }
+
+function slugifyCohortLabel(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+/**
+ * Partitions ALL modified production Rust files (or all modified files if test-only)
+ * into subsystem-grouped review cohorts with NO silent truncation cap, so coding CLIs
+ * can fan out parallel subagents and audit 100% of production diff hunks on large PRs.
+ */
+export function planAllSubsystemCohorts(
+  diffMap: Readonly<Record<string, DiffFileMap>>,
+  crateGraph: CrateGraph,
+  maxFilesPerCohort = 6,
+  maxCharsPerCohort = 65_000,
+): FileCohort[] {
+  const allPaths = Object.keys(diffMap);
+  if (allPaths.length === 0) {
+    return [];
+  }
+
+  const clippyEmpty = new Set<string>();
+  const scored = allPaths
+    .map((filePath) => {
+      const fileMap = diffMap[filePath];
+      const layerInfo = resolveFileArchitecturalLayer(crateGraph, filePath);
+      const priority = fileMap
+        ? scoreFileReviewPriority(fileMap, layerInfo.layer, crateGraph.testLayer, clippyEmpty)
+        : { score: 0, isTestOrBench: true, addedLinesCount: 0, riskSignals: [] };
+      const rawChars = fileMap
+        ? fileMap.hunks.reduce((acc, h) => acc + h.annotatedLines.join("\n").length, 0)
+        : 0;
+      return {
+        filePath,
+        groupKey: getSubsystemGroupKey(filePath),
+        layer: layerInfo.layer,
+        ...priority,
+        rawChars,
+      };
+    })
+    .sort((a, b) => {
+      if (a.isTestOrBench !== b.isTestOrBench) {
+        return a.isTestOrBench ? 1 : -1;
+      }
+      if (a.groupKey !== b.groupKey) {
+        return a.groupKey.localeCompare(b.groupKey);
+      }
+      return b.score - a.score || a.filePath.localeCompare(b.filePath);
+    });
+
+  const prodFiles = scored.filter((f) => !f.isTestOrBench);
+  const targetFiles = prodFiles.length > 0 ? prodFiles : scored;
+
+  const grouped = new Map<string, typeof targetFiles>();
+  for (const entry of targetFiles) {
+    const bucket = grouped.get(entry.groupKey) ?? [];
+    bucket.push(entry);
+    grouped.set(entry.groupKey, bucket);
+  }
+
+  const rawBuckets: Array<{ label: string; files: string[]; chars: number }> = [];
+  for (const [groupKey, entries] of grouped.entries()) {
+    let curFiles: string[] = [];
+    let curChars = 0;
+    for (const entry of entries) {
+      const wouldExceedCount = curFiles.length >= maxFilesPerCohort;
+      const wouldExceedChars = curFiles.length > 0 && curChars + entry.rawChars > maxCharsPerCohort;
+      if (wouldExceedCount || wouldExceedChars) {
+        rawBuckets.push({ label: groupKey, files: curFiles, chars: curChars });
+        curFiles = [];
+        curChars = 0;
+      }
+      curFiles.push(entry.filePath);
+      curChars += entry.rawChars;
+    }
+    if (curFiles.length > 0) {
+      rawBuckets.push({ label: groupKey, files: curFiles, chars: curChars });
+    }
+  }
+
+  // Merge tiny adjacent buckets (<=2 files and small char count) so small subsystems don't create excessive cohorts
+  const merged: Array<{ labels: string[]; files: string[]; chars: number }> = [];
+  for (const bucket of rawBuckets) {
+    const prev = merged[merged.length - 1];
+    if (
+      prev &&
+      prev.files.length + bucket.files.length <= maxFilesPerCohort &&
+      prev.chars + bucket.chars <= Math.floor(maxCharsPerCohort * 0.65)
+    ) {
+      prev.labels.push(bucket.label);
+      prev.files.push(...bucket.files);
+      prev.chars += bucket.chars;
+    } else {
+      merged.push({ labels: [bucket.label], files: [...bucket.files], chars: bucket.chars });
+    }
+  }
+
+  return merged.map((m, idx) => {
+    const uniqueLabels = Array.from(new Set(m.labels));
+    const label =
+      uniqueLabels.length <= 2
+        ? uniqueLabels.join("+")
+        : `${uniqueLabels[0]}+${uniqueLabels[1]}+${uniqueLabels.length - 2}more`;
+    const num = String(idx + 1).padStart(2, "0");
+    const slug = slugifyCohortLabel(uniqueLabels[0] ?? "cohort");
+    return {
+      id: `cohort-${num}-${slug || "group"}`,
+      label,
+      filePaths: m.files,
+    };
+  });
+}

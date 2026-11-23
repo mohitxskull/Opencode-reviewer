@@ -21,11 +21,17 @@ import type {
   SecurityAdvisory,
 } from "../domain/models.ts";
 import type { AuditLogger } from "../workspace/audit-log.ts";
+import {
+  formatRepoInstructionsPromptSection,
+  matchRepoInstructions,
+  type RepoInstruction,
+} from "../workspace/instructions.ts";
 import { formatLearningsPromptSection, type RepoLearning } from "../workspace/learnings.ts";
 import {
   compactAnnotatedLines,
   DEFAULT_MAX_INLINE_DIFF_CHARS,
   DEFAULT_MAX_TIER1_FILES,
+  type FileCohort,
   MAX_CHARS_PER_FILE_DIFF,
   scoreFileReviewPriority,
 } from "./cohorts.ts";
@@ -48,6 +54,8 @@ export interface ReviewContext {
   readonly miriReport?: MiriReport | null;
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
+  readonly repoInstructions?: readonly RepoInstruction[];
+  readonly cohorts?: readonly FileCohort[];
   readonly auditLogger?: AuditLogger;
 }
 
@@ -125,8 +133,28 @@ export function buildReviewContextPrompt(
       `## PR Description\n${(context.pr.body.trim() || "(no description)").slice(0, 2000)}`,
   );
 
+  if (context.repoInstructions && context.repoInstructions.length > 0) {
+    const matched = matchRepoInstructions(context.repoInstructions, Object.keys(context.diffMap));
+    const instrSection = formatRepoInstructionsPromptSection(matched);
+    if (instrSection) {
+      sections.push(instrSection);
+    }
+  }
+
   if (context.learnings && context.learnings.length > 0) {
     sections.push(formatLearningsPromptSection(context.learnings));
+  }
+
+  if (context.cohorts && context.cohorts.length > 0) {
+    const cohortLines = context.cohorts.map(
+      (c) =>
+        `- \`01-analyze/cohorts/${c.id}.md\` (${c.filePaths.length} file(s), subsystem: \`${c.label}\`): ${c.filePaths.map((fp) => `\`${fp}\``).join(", ")}`,
+    );
+    sections.push(
+      `## Review Cohorts (Full Untruncated Diff Packets — Fan Out Parallel Subagents)\n` +
+        `Each file below contains the complete, untruncated diff hunks, matching repo instructions, and diagnostics for its subsystem:\n` +
+        cohortLines.join("\n"),
+    );
   }
 
   const clippyFiles = new Set(context.clippyDiagnostics.map((d) => d.filePath));
@@ -289,6 +317,82 @@ export function buildReviewContextPrompt(
         tier2Lines.join("\n"),
     );
   }
+
+  return sections.join("\n\n");
+}
+
+/**
+ * Builds a self-contained, untruncated review packet for a single subsystem cohort.
+ * Every modified hunk of every file in the cohort is emitted verbatim with explicit
+ * right-side line numbers (`L0042 (+): ...`) so subagents never miss bugs in long files.
+ */
+export function buildCohortContextPrompt(context: ReviewContext, cohort: FileCohort): string {
+  const sections: string[] = [];
+  const cohortSet = new Set(cohort.filePaths);
+
+  sections.push(
+    `# Review Cohort Packet: \`${cohort.id}\` (${cohort.label})\n` +
+      `- Repository: ${context.pr.owner}/${context.pr.repo}\n` +
+      `- PR #${context.pr.number}: ${context.pr.title}\n` +
+      `- Author: ${context.pr.author}\n` +
+      `- Range: ${context.diffBaseSha.slice(0, 7)}..${context.headSha.slice(0, 7)} (${context.isIncremental ? "incremental delta" : "full PR diff"})\n` +
+      `- Files in this cohort (${cohort.filePaths.length}): ${cohort.filePaths.map((f) => `\`${f}\``).join(", ")}`,
+  );
+
+  if (context.repoInstructions && context.repoInstructions.length > 0) {
+    const matched = matchRepoInstructions(context.repoInstructions, cohort.filePaths);
+    const instrSection = formatRepoInstructionsPromptSection(matched);
+    if (instrSection) {
+      sections.push(instrSection);
+    }
+  }
+
+  if (context.learnings && context.learnings.length > 0) {
+    sections.push(formatLearningsPromptSection(context.learnings));
+  }
+
+  if (context.symbolGraph && context.symbolGraph.nodes.length > 0) {
+    const cohortNodes = context.symbolGraph.nodes.filter((n) => cohortSet.has(n.filePath));
+    if (cohortNodes.length > 0) {
+      sections.push(
+        `## Rust Symbol & Cross-Workspace Call-Site Graph (Cohort Symbols)\n${formatSymbolGraphSummary({ nodes: cohortNodes })}`,
+      );
+    }
+  }
+
+  const cohortClippy = context.clippyDiagnostics.filter((d) => cohortSet.has(d.filePath));
+  if (cohortClippy.length > 0) {
+    const clippyLines = cohortClippy.map(
+      (d) =>
+        `- [${d.level.toUpperCase()}] \`${d.filePath}:${d.startLine}-${d.endLine}\` (${d.code ?? "rustc"}): ${d.message}` +
+        (d.suggestedReplacement ? ` | suggestion: \`${d.suggestedReplacement.trim()}\`` : ""),
+    );
+    sections.push(
+      `## Local Cargo Clippy / Compiler Diagnostics (Cohort)\n${clippyLines.join("\n")}`,
+    );
+  }
+
+  const diffBlocks: string[] = [];
+  for (const filePath of cohort.filePaths) {
+    const fileMap = context.diffMap[filePath];
+    if (!fileMap) {
+      continue;
+    }
+    const layerInfo = resolveFileArchitecturalLayer(context.crateGraph, filePath);
+    const hunkTexts = fileMap.hunks.map(
+      (hunk) =>
+        `${hunk.header} (right-side valid range: ${hunk.newStart}..${hunk.newEnd})\n` +
+        hunk.annotatedLines.join("\n"),
+    );
+    diffBlocks.push(
+      `### File: \`${filePath}\` (Layer ${layerInfo.layer}, crate \`${layerInfo.crateName}\`)\n` +
+        `\`\`\`diff\n${hunkTexts.join("\n\n")}\n\`\`\``,
+    );
+  }
+
+  sections.push(
+    `## Complete Annotated Diff Hunks (Untruncated)\n${diffBlocks.join("\n\n") || "(none)"}`,
+  );
 
   return sections.join("\n\n");
 }

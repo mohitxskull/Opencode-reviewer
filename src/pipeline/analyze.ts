@@ -51,7 +51,8 @@ import {
   clippyToFindings,
   partitionAndFilterFindings,
 } from "../judge/partition.ts";
-import { buildReviewContextPrompt } from "../llm/context.ts";
+import { planAllSubsystemCohorts } from "../llm/cohorts.ts";
+import { buildCohortContextPrompt, buildReviewContextPrompt } from "../llm/context.ts";
 import {
   loadJsonIfExists,
   loadRawJsonIfExists,
@@ -60,6 +61,7 @@ import {
 import type { AuditLogger } from "../workspace/audit-log.ts";
 import { DEFAULT_PEER_CONFIG, type PeerConfig } from "../workspace/config.ts";
 import { type CheckpointStore, tryGitRawSync, withInPlaceCheckout } from "../workspace/git.ts";
+import { loadRepoInstructions } from "../workspace/instructions.ts";
 import { LearningStore } from "../workspace/learnings.ts";
 
 export type OptionalTool = "deny" | "geiger" | "semver" | "coverage" | "miri";
@@ -439,12 +441,16 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         generatedAt: analyzeContext.generatedAt,
       });
 
-      const learnings = await new LearningStore(repoRoot).getMatchingLearnings(
-        modifiedFiles,
-        pr.baseSha,
-        peerConfig.rules,
-      );
-      const promptContextMd = buildReviewContextPrompt({
+      const [learnings, repoInstructions] = await Promise.all([
+        new LearningStore(repoRoot).getMatchingLearnings(
+          modifiedFiles,
+          pr.baseSha,
+          peerConfig.rules,
+        ),
+        loadRepoInstructions(repoRoot, pr.baseSha),
+      ]);
+      const cohorts = planAllSubsystemCohorts(diffMap, crateGraph);
+      const reviewCtx = {
         repoRoot,
         pr,
         diffBaseSha,
@@ -462,8 +468,17 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         miriReport,
         symbolGraph,
         learnings,
+        repoInstructions,
+        cohorts,
         auditLogger,
-      });
+      };
+      const promptContextMd = buildReviewContextPrompt(reviewCtx);
+      const cohortPrompts = cohorts.map((cohort) => ({
+        id: cohort.id,
+        label: cohort.label,
+        filePaths: cohort.filePaths,
+        markdown: buildCohortContextPrompt(reviewCtx, cohort),
+      }));
 
       const extraToolOutputs: Record<string, unknown> = {};
       if (cargoLockDiff) extraToolOutputs["cargo-lock-diff"] = cargoLockDiff;
@@ -481,6 +496,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         configHash,
         symbolGraph,
         promptContextMd,
+        cohortPrompts,
         extraToolOutputs,
       });
     },

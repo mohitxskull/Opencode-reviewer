@@ -70,7 +70,7 @@ Options:
   --base <ref>               For 'check': base git ref to diff against (default: main -> master -> HEAD~1)
   --sarif <path>             For 'check': write SARIF 2.1.0 report to file
   --update-baseline          For 'check': record current findings into .peer/baseline.json
-  --from <file>              For 'finalize': agent review output file (Structured Markdown or JSON)
+  --from <file|dir>          For 'finalize': agent review file or directory of cohort review .md files
   --verdicts <file>          For 'finalize': skeptic verdicts file to filter Stage 2 findings
   --stage <review|verify>    For 'finalize': target stage folder (default: review)
   --strict                   For 'finalize': fail if any finding blocks are malformed or coerced
