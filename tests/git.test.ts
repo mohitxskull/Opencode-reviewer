@@ -12,7 +12,7 @@ import {
   parseGitHubOwnerRepo,
   resolveGitTopLevel,
   withInPlaceCheckout,
-} from "../src/git.ts";
+} from "../src/workspace/git.ts";
 
 const tempDirs: string[] = [];
 

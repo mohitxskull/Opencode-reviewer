@@ -1,27 +1,27 @@
-import type { AuditLogger } from "../audit.ts";
+import { type CoverageReport, formatCoveragePromptSection } from "../analyzers/coverage.ts";
+import { formatGeigerPromptSection, type GeigerReport } from "../analyzers/geiger.ts";
+import { formatMiriPromptSection, type MiriReport } from "../analyzers/miri.ts";
+import { resolveFileArchitecturalLayer } from "../analyzers/rust.ts";
+import {
+  type CargoLockDiff,
+  formatCargoLockDiffPromptSection,
+  formatSecurityAdvisoriesPromptSection,
+} from "../analyzers/security.ts";
+import { formatSemverPromptSection, type SemverViolation } from "../analyzers/semver.ts";
 import {
   extractSymbolsFromFileMap,
   formatSymbolGraphSummary,
   type RustSymbolGraph,
-} from "../graph.ts";
-import { formatLearningsPromptSection, type RepoLearning } from "../learnings.ts";
+} from "../analyzers/symbol-graph.ts";
 import type {
   ClippyDiagnostic,
   CrateGraph,
   DiffFileMap,
   PullRequestMetadata,
   SecurityAdvisory,
-} from "../models.ts";
-import { resolveFileArchitecturalLayer } from "../rust.ts";
-import {
-  type CargoLockDiff,
-  formatCargoLockDiffPromptSection,
-  formatSecurityAdvisoriesPromptSection,
-} from "../security.ts";
-import { type CoverageReport, formatCoveragePromptSection } from "../tools/coverage.ts";
-import { formatGeigerPromptSection, type GeigerReport } from "../tools/geiger.ts";
-import { formatMiriPromptSection, type MiriReport } from "../tools/miri.ts";
-import { formatSemverPromptSection, type SemverViolation } from "../tools/semver.ts";
+} from "../domain/models.ts";
+import type { AuditLogger } from "../workspace/audit-log.ts";
+import { formatLearningsPromptSection, type RepoLearning } from "../workspace/learnings.ts";
 import {
   compactAnnotatedLines,
   DEFAULT_MAX_INLINE_DIFF_CHARS,

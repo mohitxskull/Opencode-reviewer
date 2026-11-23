@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import type { CrateGraph } from "../src/models.ts";
 import {
   CargoGeigerMissingError,
   collectCargoGeigerReport,
   formatGeigerPromptSection,
   geigerReportToFindings,
   parseCargoGeigerJson,
-} from "../src/tools/geiger.ts";
+} from "../src/analyzers/geiger.ts";
+import type { CrateGraph } from "../src/domain/models.ts";
 
 const SAMPLE_GEIGER_JSON = JSON.stringify({
   packages: [

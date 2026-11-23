@@ -9,7 +9,7 @@ import {
   type PullRequestSummary,
   PullRequestSummarySchema,
   WALKTHROUGH_MARKER,
-} from "./models.ts";
+} from "../domain/models.ts";
 
 export class GitHubAuthError extends Error {
   constructor(message: string) {

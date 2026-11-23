@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
+import type { DiffFileMap } from "../domain/models.ts";
 import { analyzeRustSourceAst, isLineInRegions, type RustAstAnalysis } from "./ast.ts";
-import type { DiffFileMap } from "./models.ts";
 
 export type RustSymbolKind = "fn" | "struct" | "enum" | "trait";
 

@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import type { DiffFileMap } from "../src/models.ts";
 import {
   CargoLlvmCovMissingError,
   collectCargoLlvmCovReport,
   coverageReportToFindings,
   formatCoveragePromptSection,
   groupContiguousLines,
-} from "../src/tools/coverage.ts";
+} from "../src/analyzers/coverage.ts";
+import type { DiffFileMap } from "../src/domain/models.ts";
 
 const SAMPLE_DIFF_MAP: Record<string, DiffFileMap> = {
   "src/engine.rs": {

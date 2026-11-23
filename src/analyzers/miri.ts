@@ -2,10 +2,15 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
-import { analyzeRustSourceAst, isLineInRegions } from "../ast.ts";
-import { buildScrubbedCargoEnv } from "../env.ts";
-import { type CrateGraph, type DiffFileMap, type Finding, FindingSchema } from "../models.ts";
-import { resolveFileArchitecturalLayer } from "../rust.ts";
+import {
+  type CrateGraph,
+  type DiffFileMap,
+  type Finding,
+  FindingSchema,
+} from "../domain/models.ts";
+import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { analyzeRustSourceAst, isLineInRegions } from "./ast.ts";
+import { resolveFileArchitecturalLayer } from "./rust.ts";
 
 export class MiriMissingError extends Error {
   constructor() {

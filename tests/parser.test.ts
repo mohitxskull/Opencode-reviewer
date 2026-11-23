@@ -5,7 +5,7 @@ import {
   parseLensFindingsOutput,
   parseSkepticVerdicts,
   parseWalkthroughOutput,
-} from "../src/prompts/parser.ts";
+} from "../src/llm/parser.ts";
 
 describe("Structured Markdown & JSON lens output parser", () => {
   test("parseWalkthroughOutput parses structured Markdown walkthrough with triage, layered changes, and mermaid diagram", () => {

@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { DiffFileMap } from "../src/models.ts";
 import {
   collectMiriReport,
   formatMiriPromptSection,
   MiriMissingError,
   miriReportToFindings,
   parseMiriOutput,
-} from "../src/tools/miri.ts";
+} from "../src/analyzers/miri.ts";
+import type { DiffFileMap } from "../src/domain/models.ts";
 
 const SAMPLE_MIRI_OUTPUT = `
 running 1 test

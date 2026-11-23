@@ -3,8 +3,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildScrubbedCargoEnv } from "../src/env.ts";
-import { advisoriesToFindings } from "../src/judge.ts";
 import {
   CargoAuditMissingError,
   collectSecurityAdvisories,
@@ -12,7 +10,9 @@ import {
   formatCargoLockDiffPromptSection,
   formatSecurityAdvisoriesPromptSection,
   parseCargoAuditJson,
-} from "../src/security.ts";
+} from "../src/analyzers/security.ts";
+import { buildScrubbedCargoEnv } from "../src/infra/env.ts";
+import { advisoriesToFindings } from "../src/judge/partition.ts";
 
 const tempDirs: string[] = [];
 

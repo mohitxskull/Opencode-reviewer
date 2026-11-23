@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { type Finding, type ReviewBundle, WALKTHROUGH_MARKER } from "../src/models.ts";
+import { type Finding, type ReviewBundle, WALKTHROUGH_MARKER } from "../src/domain/models.ts";
 import {
   renderInlineFindingComment,
   renderPrReviewSummaryBody,

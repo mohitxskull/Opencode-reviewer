@@ -5,14 +5,14 @@
   "private": true,
   "type": "module",
   "bin": {
-    "peer": "./src/cli.ts"
+    "peer": "./src/cli/index.ts"
   },
   "scripts": {
     "lint": "biome lint src tests",
     "format": "bun fmt --no-script src tests",
     "format:check": "bun fmt --no-script --check src tests",
     "typecheck": "bun check",
-    "build": "bun build src/cli.ts --compile --outfile dist/peer",
+    "build": "bun build src/cli/index.ts --compile --outfile dist/peer",
     "test": "bun test"
   },
   "dependencies": {

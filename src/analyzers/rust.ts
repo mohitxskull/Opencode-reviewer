@@ -1,6 +1,5 @@
 import { dirname, relative } from "node:path";
 
-import { buildScrubbedCargoEnv } from "./env.ts";
 import {
   type ClippyDiagnostic,
   ClippyDiagnosticSchema,
@@ -10,7 +9,9 @@ import {
   type DiffFileMap,
   type ReviewBaselineHeader,
   ReviewBaselineHeaderSchema,
-} from "./models.ts";
+} from "../domain/models.ts";
+import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { parseJsonlObjects } from "../infra/jsonl.ts";
 
 export function collectRustToolchainBaseline(repoRoot: string): ReviewBaselineHeader {
   const env = buildScrubbedCargoEnv();
@@ -326,33 +327,7 @@ export async function collectClippyDiagnostics(
     proc.exited,
   ]);
 
-  const jsonlPayload = stdoutText
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("{"))
-    .join("\n");
-  const parsedLines: CargoJsonLine[] = [];
-  if (jsonlPayload.length > 0) {
-    let offset = 0;
-    while (offset < jsonlPayload.length) {
-      const chunk = Bun.JSONL.parseChunk(jsonlPayload.slice(offset));
-      for (const val of chunk.values) {
-        if (val && typeof val === "object") {
-          parsedLines.push(val as CargoJsonLine);
-        }
-      }
-      if (chunk.done) {
-        break;
-      }
-      if (chunk.read > 0) {
-        offset += chunk.read;
-      } else {
-        const nextNl = jsonlPayload.indexOf("\n", offset);
-        if (nextNl === -1) break;
-        offset = nextNl + 1;
-      }
-    }
-  }
+  const parsedLines = parseJsonlObjects<CargoJsonLine>(stdoutText);
   const diagnostics: ClippyDiagnostic[] = [];
   const seenKeys = new Set<string>();
   const sawAnyJsonMessage = parsedLines.length > 0;

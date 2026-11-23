@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { parseToolsOption, runCli } from "../src/cli.ts";
-import { GitHubClient } from "../src/github.ts";
+import { parseToolsOption, runCli } from "../src/cli/index.ts";
+import { GitHubClient } from "../src/github/client.ts";
 
 const tempDirs: string[] = [];
 

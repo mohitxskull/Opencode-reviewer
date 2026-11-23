@@ -12,7 +12,7 @@ import {
   type WalkthroughChangeEntry,
   type WalkthroughReport,
   WalkthroughReportSchema,
-} from "../models.ts";
+} from "../domain/models.ts";
 
 export class LensOutputParseError extends Error {
   constructor(message: string) {

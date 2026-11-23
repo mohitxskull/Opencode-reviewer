@@ -9,7 +9,7 @@ import {
   isValidInlineRange,
   LensFindingsOutputSchema,
   TriageScoreSchema,
-} from "../src/models.ts";
+} from "../src/domain/models.ts";
 
 describe("Task 01: Domain models and profile/hunk rules", () => {
   test("FindingSchema rejects inverted or non-positive line ranges", () => {

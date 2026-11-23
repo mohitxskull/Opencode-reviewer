@@ -2,8 +2,9 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
-import { buildScrubbedCargoEnv } from "../env.ts";
-import { type Finding, FindingSchema } from "../models.ts";
+import { type Finding, FindingSchema } from "../domain/models.ts";
+import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { parseJsonlObjects } from "../infra/jsonl.ts";
 
 export class CargoDenyMissingError extends Error {
   constructor() {
@@ -37,36 +38,7 @@ interface CargoDenyJsonLine {
 export function parseCargoDenyJsonLines(rawOutput: string): CargoDenyDiagnostic[] {
   const results: CargoDenyDiagnostic[] = [];
   const seen = new Set<string>();
-
-  const jsonlPayload = rawOutput
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("{"))
-    .join("\n");
-  if (jsonlPayload.length === 0) {
-    return results;
-  }
-
-  const parsedEntries: CargoDenyJsonLine[] = [];
-  let offset = 0;
-  while (offset < jsonlPayload.length) {
-    const chunk = Bun.JSONL.parseChunk(jsonlPayload.slice(offset));
-    for (const val of chunk.values) {
-      if (val && typeof val === "object") {
-        parsedEntries.push(val as CargoDenyJsonLine);
-      }
-    }
-    if (chunk.done) {
-      break;
-    }
-    if (chunk.read > 0) {
-      offset += chunk.read;
-    } else {
-      const nextNl = jsonlPayload.indexOf("\n", offset);
-      if (nextNl === -1) break;
-      offset = nextNl + 1;
-    }
-  }
+  const parsedEntries = parseJsonlObjects<CargoDenyJsonLine>(rawOutput);
 
   for (const parsed of parsedEntries) {
     if (parsed.type !== "diagnostic" || !parsed.fields) {

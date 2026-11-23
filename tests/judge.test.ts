@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { clippyToFindings, partitionAndFilterFindings } from "../src/judge.ts";
-import type { ClippyDiagnostic, DiffFileMap, Finding } from "../src/models.ts";
+import type { ClippyDiagnostic, DiffFileMap, Finding } from "../src/domain/models.ts";
+import { clippyToFindings, partitionAndFilterFindings } from "../src/judge/partition.ts";
 
 const SAMPLE_DIFF_MAP: Record<string, DiffFileMap> = {
   "src/lib.rs": {

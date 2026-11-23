@@ -8,7 +8,7 @@ import {
   collectCargoDenyDiagnostics,
   denyDiagnosticsToFindings,
   parseCargoDenyJsonLines,
-} from "../src/tools/deny.ts";
+} from "../src/analyzers/deny.ts";
 
 const tempDirs: string[] = [];
 

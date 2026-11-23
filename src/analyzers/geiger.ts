@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-import { buildScrubbedCargoEnv } from "../env.ts";
-import { type CrateGraph, type Finding, FindingSchema } from "../models.ts";
+import { type CrateGraph, type Finding, FindingSchema } from "../domain/models.ts";
+import { buildScrubbedCargoEnv } from "../infra/env.ts";
 
 export class CargoGeigerMissingError extends Error {
   constructor() {

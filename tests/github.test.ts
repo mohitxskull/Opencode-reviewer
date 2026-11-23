@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
+import { PEER_REVIEW_MARKER, WALKTHROUGH_MARKER } from "../src/domain/models.ts";
 import {
   ExistingManualPendingReviewError,
   GitHubAuthError,
   GitHubClient,
   parsePrTarget,
   resolveGitHubToken,
-} from "../src/github.ts";
-import { PEER_REVIEW_MARKER, WALKTHROUGH_MARKER } from "../src/models.ts";
+} from "../src/github/client.ts";
 
 interface RecordedRequest {
   method: string;

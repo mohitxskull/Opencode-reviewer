@@ -6,7 +6,7 @@ import {
   formatSemverPromptSection,
   parseCargoSemverOutput,
   semverViolationsToFindings,
-} from "../src/tools/semver.ts";
+} from "../src/analyzers/semver.ts";
 
 const SAMPLE_SEMVER_OUTPUT = `
 --- failure function_missing: pub fn removed or renamed ---

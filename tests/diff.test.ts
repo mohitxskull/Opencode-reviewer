@@ -5,7 +5,7 @@ import {
   isReviewableRustCodeFile,
   parseUnifiedDiff,
   snapRangeToHunk,
-} from "../src/diff.ts";
+} from "../src/domain/diff.ts";
 
 const SAMPLE_DIFF = `diff --git a/src/lib.rs b/src/lib.rs
 index 1111111..2222222 100644

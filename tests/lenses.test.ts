@@ -3,23 +3,23 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { OpenCodeMultiLensOrchestrator } from "../src/lenses.ts";
 import {
   type OpenCodeClientLike,
   OpenCodeProviderQuotaError,
   parseModelSpec,
-} from "../src/opencode/client.ts";
-import {
-  buildReadOnlySessionPermissions,
-  evaluatePermissionRule,
-  READONLY_SESSION_PERMISSIONS,
-} from "../src/opencode/permissions.ts";
+} from "../src/llm/client.ts";
 import {
   buildReviewContextPrompt,
   buildWalkthroughContextPrompt,
   type ReviewContext,
-} from "../src/prompts/context.ts";
-import { extractJsonObject, LensOutputParseError } from "../src/prompts/parser.ts";
+} from "../src/llm/context.ts";
+import { OpenCodeMultiLensOrchestrator } from "../src/llm/orchestrator.ts";
+import { extractJsonObject, LensOutputParseError } from "../src/llm/parser.ts";
+import {
+  buildReadOnlySessionPermissions,
+  evaluatePermissionRule,
+  READONLY_SESSION_PERMISSIONS,
+} from "../src/llm/permissions.ts";
 
 const tempDirs: string[] = [];
 

@@ -3,8 +3,6 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
-import type { AuditLogger } from "./audit.ts";
-import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir } from "./git.ts";
 import {
   type ConsideredAndRejectedItem,
   ConsideredAndRejectedItemSchema,
@@ -18,36 +16,32 @@ import {
   OpenQuestionItemSchema,
   type WalkthroughReport,
   WalkthroughReportSchema,
-} from "./models.ts";
+} from "../domain/models.ts";
+import { runWithConcurrency } from "../infra/concurrency.ts";
+import type { AuditLogger } from "../workspace/audit-log.ts";
+import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir } from "../workspace/git.ts";
 import {
   createDefaultOpenCodeClient,
   type ModelSpec,
   type OpenCodeClientLike,
   OpenCodeProviderQuotaError,
   parseModelSpec,
-} from "./opencode/client.ts";
-import {
-  buildReadOnlySessionPermissions,
-  type SessionPermissionRule,
-} from "./opencode/permissions.ts";
-import { groupDiffFilesIntoCohorts } from "./prompts/cohorts.ts";
+} from "./client.ts";
+import { groupDiffFilesIntoCohorts } from "./cohorts.ts";
 import {
   buildReviewContextPrompt,
   buildWalkthroughContextPrompt,
   type ReviewContext,
-} from "./prompts/context.ts";
-import {
-  parseLensFindingsOutput,
-  parseSkepticVerdicts,
-  parseWalkthroughOutput,
-} from "./prompts/parser.ts";
+} from "./context.ts";
+import { parseLensFindingsOutput, parseSkepticVerdicts, parseWalkthroughOutput } from "./parser.ts";
+import { buildReadOnlySessionPermissions, type SessionPermissionRule } from "./permissions.ts";
 import {
   COHORT_DEEP_AUDIT_PROMPT,
   IDIOMS_LOGIC_LENS_PROMPT,
   SKEPTIC_VERIFIER_PROMPT,
   SOUNDNESS_CONCURRENCY_LENS_PROMPT,
   WALKTHROUGH_LENS_PROMPT,
-} from "./prompts/templates.ts";
+} from "./prompts/index.ts";
 
 const CachedFindingsPayloadSchema = z.object({
   findings: z.array(FindingSchema),
@@ -55,29 +49,6 @@ const CachedFindingsPayloadSchema = z.object({
   deletionsProposed: z.array(DeletionProposedItemSchema).default([]),
   openQuestions: z.array(OpenQuestionItemSchema).default([]),
 });
-
-async function runWithConcurrency<T>(
-  tasks: readonly (() => Promise<T>)[],
-  limit: number,
-): Promise<T[]> {
-  const results = new Array<T>(tasks.length);
-  const concurrency = Math.max(1, limit);
-  let nextIdx = 0;
-
-  const worker = async () => {
-    while (nextIdx < tasks.length) {
-      const idx = nextIdx;
-      nextIdx += 1;
-      const task = tasks[idx];
-      if (task) {
-        results[idx] = await task();
-      }
-    }
-  };
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
-  return results;
-}
 
 export const DEFAULT_SESSION_WAIT_TIMEOUT_MS = 300_000;
 

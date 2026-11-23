@@ -8,7 +8,7 @@ import {
   collectCrateGraph,
   findSuggestedReplacementForMessage,
   resolveFileArchitecturalLayer,
-} from "../src/rust.ts";
+} from "../src/analyzers/rust.ts";
 
 const tempDirs: string[] = [];
 

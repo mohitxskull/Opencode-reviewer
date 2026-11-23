@@ -1,5 +1,5 @@
-import type { CrateGraph, DiffFileMap } from "../models.ts";
-import { resolveFileArchitecturalLayer } from "../rust.ts";
+import { resolveFileArchitecturalLayer } from "../analyzers/rust.ts";
+import type { CrateGraph, DiffFileMap } from "../domain/models.ts";
 
 // Why: Large PRs (e.g. 50-150 files, >1 MB raw diff) exceed an LLM's effective
 // reasoning window and inflate token usage by 10x if every file is dumped inline.

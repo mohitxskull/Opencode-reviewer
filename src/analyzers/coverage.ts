@@ -2,9 +2,9 @@ import { isAbsolute, join, relative } from "node:path";
 
 import { z } from "zod";
 
-import { analyzeRustSourceAst, isLineInRegions } from "../ast.ts";
-import { buildScrubbedCargoEnv } from "../env.ts";
-import { type DiffFileMap, type Finding, FindingSchema } from "../models.ts";
+import { type DiffFileMap, type Finding, FindingSchema } from "../domain/models.ts";
+import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { analyzeRustSourceAst, isLineInRegions } from "./ast.ts";
 
 export class CargoLlvmCovMissingError extends Error {
   constructor() {

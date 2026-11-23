@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-import { buildScrubbedCargoEnv } from "../env.ts";
-import { type Finding, FindingSchema } from "../models.ts";
+import { type Finding, FindingSchema } from "../domain/models.ts";
+import { buildScrubbedCargoEnv } from "../infra/env.ts";
 
 export class CargoSemverChecksMissingError extends Error {
   constructor() {

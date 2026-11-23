@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import type { ReviewBundle } from "../models.ts";
+import type { ReviewBundle } from "../domain/models.ts";
 
 export function formatTerminalReport(
   bundle: ReviewBundle,

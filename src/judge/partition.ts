@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { snapRangeToHunk } from "./diff.ts";
+import { snapRangeToHunk } from "../domain/diff.ts";
 import {
   allowsFindingForProfile,
   type ClippyDiagnostic,
@@ -11,7 +11,7 @@ import {
   type ReviewProfile,
   type SecurityAdvisory,
   SEVERITY_RANK,
-} from "./models.ts";
+} from "../domain/models.ts";
 
 export async function advisoriesToFindings(
   advisories: readonly SecurityAdvisory[],

@@ -3,12 +3,12 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { parseUnifiedDiff } from "../src/diff.ts";
 import {
   buildRustSymbolGraph,
   extractModifiedRustSymbols,
   formatSymbolGraphSummary,
-} from "../src/graph.ts";
+} from "../src/analyzers/symbol-graph.ts";
+import { parseUnifiedDiff } from "../src/domain/diff.ts";
 
 const tempDirs: string[] = [];
 

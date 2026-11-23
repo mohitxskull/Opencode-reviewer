@@ -7,7 +7,7 @@ import {
   CorruptLearningStoreError,
   formatLearningsPromptSection,
   LearningStore,
-} from "../src/learnings.ts";
+} from "../src/workspace/learnings.ts";
 
 const tempDirs: string[] = [];
 

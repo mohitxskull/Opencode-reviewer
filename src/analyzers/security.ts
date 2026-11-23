@@ -2,9 +2,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildScrubbedCargoEnv } from "./env.ts";
-import { tryGitRawSync } from "./git.ts";
-import { type SecurityAdvisory, SecurityAdvisorySchema } from "./models.ts";
+import { type SecurityAdvisory, SecurityAdvisorySchema } from "../domain/models.ts";
+import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { tryGitRawSync } from "../workspace/git.ts";
 
 export class CargoAuditMissingError extends Error {
   constructor() {

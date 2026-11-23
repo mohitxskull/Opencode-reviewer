@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { analyzeRustSourceAst, isLineInRegions } from "../src/ast.ts";
+import { analyzeRustSourceAst, isLineInRegions } from "../src/analyzers/ast.ts";
 
 describe("Tree-sitter Rust AST analyzer", () => {
   test("extracts enclosing impl methods, unsafe blocks, and inline #[cfg(test)] regions accurately", async () => {
