@@ -248,6 +248,28 @@ export function buildReviewContextPrompt(
     sections.push(`## Local Cargo Clippy / Compiler Diagnostics\nZero warnings or errors.`);
   }
 
+  // Why: When per-subsystem cohort packets (`01-analyze/cohorts/<cohort-id>.md`) are generated,
+  // they already contain 100% of the untruncated production diff hunks. Omitting duplicate
+  // inline diff hunks here prevents burning 30k+ tokens of the orchestrator agent's context window.
+  if (context.cohorts && context.cohorts.length > 0) {
+    const testOnlyFiles = enrichedFiles.filter((f) => f.isTestOrBench && f.fileMap);
+    if (testOnlyFiles.length > 0) {
+      const testLines = testOnlyFiles.map((entry) => {
+        const allRanges = entry.fileMap?.hunks.map((h) => `${h.newStart}..${h.newEnd}`) ?? [];
+        const ranges =
+          allRanges.length > 4
+            ? `${allRanges.slice(0, 4).join(", ")} (+${allRanges.length - 4} more)`
+            : allRanges.join(", ");
+        return `- \`${entry.filePath}\` (Layer ${entry.layer}, crate \`${entry.crateName}\`, +${entry.addedLinesCount} lines, valid hunks: ${ranges})`;
+      });
+      sections.push(
+        `## Test & Benchmark Files Modified (Omitted from Production Cohorts — Read Only If Verifying Test Coverage)\n` +
+          testLines.join("\n"),
+      );
+    }
+    return sections.join("\n\n");
+  }
+
   const rankedByScore = [...enrichedFiles].sort(
     (a, b) => b.score - a.score || a.layer - b.layer || a.filePath.localeCompare(b.filePath),
   );

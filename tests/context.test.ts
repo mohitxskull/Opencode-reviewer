@@ -87,4 +87,20 @@ describe("Review context prompt builders", () => {
     expect(prompt).toContain("PR #42");
     expect(prompt).toContain("Layer 0 | crate: raftstore");
   });
+
+  test("buildReviewContextPrompt omits redundant Tier 1 inline diff hunks when cohort packets are present", () => {
+    const promptWithCohorts = buildReviewContextPrompt({
+      ...SAMPLE_CONTEXT,
+      cohorts: [
+        {
+          id: "peer-cohort-01-components-raftstore-src",
+          label: "1/1: components/raftstore/src",
+          filePaths: ["components/raftstore/src/lib.rs"],
+        },
+      ],
+    });
+    expect(promptWithCohorts).toContain("Review Cohorts (Full Untruncated Diff Packets");
+    expect(promptWithCohorts).not.toContain("Tier 1: Primary High-Risk Rust Diff Hunks");
+    expect(promptWithCohorts).not.toContain("let guard = mutex.lock().unwrap();");
+  });
 });

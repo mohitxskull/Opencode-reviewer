@@ -1,6 +1,42 @@
 import type { Finding, ReviewBundle, Severity } from "../domain/models.ts";
 
-type PriorityTier = "P0" | "P1" | "P2" | "P3";
+export type PriorityTier = "P0" | "P1" | "P2" | "P3";
+
+export interface ReviewTodoItem {
+  readonly id: string;
+  readonly severity: Severity;
+  readonly type: Finding["type"];
+  readonly epistemicState: Finding["epistemicState"];
+  readonly filePath: string;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly title: string;
+  readonly rootCause: string;
+  readonly blastRadius: string;
+  readonly dependsOn: string | null;
+  readonly verificationCommand: string;
+  readonly suggestion: string | null;
+  readonly suggestionVerified: boolean;
+  readonly agentPrompt: string;
+}
+
+export interface ReviewTodoGroup {
+  readonly groupId: string;
+  readonly priority: PriorityTier;
+  readonly rootCause: string;
+  readonly files: readonly string[];
+  readonly verificationCommands: readonly string[];
+  readonly items: readonly ReviewTodoItem[];
+}
+
+export interface ReviewTodoQueue {
+  readonly prNumber: number;
+  readonly headSha: string;
+  readonly totalActionable: number;
+  readonly verifiedSuggestions: number;
+  readonly countsByPriority: Readonly<Record<PriorityTier, number>>;
+  readonly groups: readonly ReviewTodoGroup[];
+}
 
 const TIER_META: Record<PriorityTier, { heading: string; desc: string }> = {
   P0: { heading: "P0 — Critical", desc: "Fix immediately before merge" },
@@ -30,6 +66,83 @@ function groupKeyForFinding(f: Finding): string {
     .trim()
     .slice(0, 48);
   return `${dir}::${normCause}`;
+}
+
+/**
+ * Deterministically builds a machine-readable `todo.json` fix queue for coding agents.
+ */
+export function buildReviewTodoQueue(bundle: ReviewBundle): ReviewTodoQueue {
+  const allFindings = [...bundle.findings, ...(bundle.outsideDiffFindings ?? [])];
+  const byTier: Record<PriorityTier, Finding[]> = { P0: [], P1: [], P2: [], P3: [] };
+  for (const f of allFindings) {
+    byTier[severityToTier(f.severity)].push(f);
+  }
+
+  const groups: ReviewTodoGroup[] = [];
+  let groupSeq = 1;
+
+  for (const tier of ["P0", "P1", "P2", "P3"] as const) {
+    const items = byTier[tier];
+    if (items.length === 0) {
+      continue;
+    }
+    const bucketed = new Map<string, Finding[]>();
+    for (const f of items) {
+      const k = groupKeyForFinding(f);
+      const list = bucketed.get(k) ?? [];
+      list.push(f);
+      bucketed.set(k, list);
+    }
+
+    for (const groupItems of bucketed.values()) {
+      const groupId = `${tier}-G${String(groupSeq).padStart(2, "0")}`;
+      groupSeq += 1;
+      const files = Array.from(new Set(groupItems.map((f) => f.filePath)));
+      const verificationCommands = Array.from(
+        new Set(
+          groupItems.map((f) => f.verificationCommand).filter((cmd): cmd is string => Boolean(cmd)),
+        ),
+      );
+      groups.push({
+        groupId,
+        priority: tier,
+        rootCause: groupItems[0]?.rootCause || groupItems[0]?.title || "",
+        files,
+        verificationCommands,
+        items: groupItems.map((f) => ({
+          id: f.id,
+          severity: f.severity,
+          type: f.type,
+          epistemicState: f.epistemicState ?? "VERIFIED-DEFECT",
+          filePath: f.filePath,
+          startLine: f.startLine,
+          endLine: f.endLine,
+          title: f.title,
+          rootCause: f.rootCause ?? f.title,
+          blastRadius: f.blastRadius ?? "Crate / module boundary",
+          dependsOn: f.dependsOn ?? null,
+          verificationCommand: f.verificationCommand ?? "cargo test --workspace",
+          suggestion: f.suggestion,
+          suggestionVerified: f.suggestionVerified,
+          agentPrompt: f.agentPrompt,
+        })),
+      });
+    }
+  }
+
+  return {
+    prNumber: bundle.pr.number,
+    headSha: bundle.headSha,
+    totalActionable: allFindings.length,
+    verifiedSuggestions: allFindings.filter((f) => f.suggestion && f.suggestionVerified).length,
+    countsByPriority: {
+      P0: byTier.P0.length,
+      P1: byTier.P1.length,
+      P2: byTier.P2.length,
+      P3: byTier.P3.length,
+    },
+    groups,
+  };
 }
 
 /**

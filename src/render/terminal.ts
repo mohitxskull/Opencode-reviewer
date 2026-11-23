@@ -149,6 +149,7 @@ export function formatTerminalReport(
     `  Stage Report: file://${resolve(artifactDir, "report.md")}`,
     `  Latest Link:  file://${resolve(artifactDir, "..", "review.md")}`,
     `  Fix Queue:    file://${resolve(artifactDir, "..", "todo.md")}`,
+    `  Fix Queue JSON: file://${resolve(artifactDir, "..", "todo.json")}`,
     `  Run Manifest: file://${resolve(artifactDir, "..", "run.json")}`,
     `  Audit JSONL:  file://${resolve(artifactDir, "..", "audit.jsonl")}`,
   );

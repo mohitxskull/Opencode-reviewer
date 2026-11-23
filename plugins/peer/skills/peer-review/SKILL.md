@@ -14,30 +14,33 @@ license: MIT
 
 Use `peer` as the deterministic Rust ground-truth & verification engine while using your own LLM capabilities and parallel subagents for deep code reasoning.
 
-## Step 0: Preflight & Stage Discovery
-Verify `peer` is installed in `PATH` and check current review state:
+## Step 0: Preflight & Stage Discovery (Agent-First JSON Mode)
+Pass `--json` (or `--quiet` for single-line JSON) on any `peer` command so you consume structured JSON directly instead of grepping Markdown tables:
 ```bash
-peer doctor
-peer next [PR_NUMBER]
+peer doctor --json
+peer next [PR_NUMBER] --json
 ```
-`peer next` inspects `.peer/<pr>/<short-sha>/`, warns if local git `HEAD` drifted from the cached analysis, and prints the exact next command for your current stage.
-If `peer` is not installed, tell the user to install it with:
-```bash
-curl -fsSL https://raw.githubusercontent.com/mohitxskull/Opencode-reviewer/main/install.sh | sh
-```
-If the user only wants a fast local/CI deterministic check (no PR number, no GitHub token), run:
-```bash
-peer check --base main          # or --staged / --all-files
-```
-Exit codes: `0` = clean, `1` = blocking findings, `2` = tool/git/config/timeout error. Stop after reporting unless they ask for an LLM review.
+- **Universal exit codes across all `peer` subcommands:**
+  - `0` = Success (or clean gate for `peer check` / all required tools installed for `peer doctor`)
+  - `1` = Blocking findings detected (`peer check`) or required toolchain missing (`peer doctor`)
+  - `2` = Usage, configuration, git, network, timeout, strict-parse, or missing-cohort error
+- If `peer` is not installed, tell the user to install it with:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/mohitxskull/Opencode-reviewer/main/install.sh | sh
+  ```
+- If the user only wants a fast local/CI deterministic check (no PR number, no GitHub token), run:
+  ```bash
+  peer check --base main --json    # or --staged / --all-files
+  ```
+  Stop after reporting unless they ask for an LLM review.
 
 ## Step 1: Collect Deterministic Rust Ground Truth & Cohort Packets
 Run Stage 1 on the target PR:
 ```bash
-peer analyze <PR_NUMBER_OR_URL> [--tools deny,geiger,semver,coverage,miri|all]
+peer analyze <PR_NUMBER_OR_URL> --json [--tools deny,geiger,semver,coverage,miri|all]
 ```
-This writes `.peer/<pr>/<short-sha>/01-analyze/`:
-- `prompt-context.md` — PR overview, repo review instructions (`AGENTS.md`, `CLAUDE.md`, `peer.toml`, `.peer/learnings.json`), crate layers, symbol graph, deterministic diagnostics, and the **Review Cohorts** index.
+This returns structured JSON (`counts`, `countsBySeverity`, `enabledTools`, `skippedTools`, `artifacts`, `nextCommand`) and writes `.peer/<pr>/<short-sha>/01-analyze/`:
+- `prompt-context.md` — Compact orchestrator index (PR overview, repo review instructions from `AGENTS.md`/`CLAUDE.md`/`peer.toml`/`.peer/learnings.json`, crate layers, symbol graph, deterministic diagnostics, and the **Review Cohorts** index — without duplicating raw diff hunks).
 - `cohorts/index.json` + `cohorts/<cohort-id>.md` — Self-contained, **untruncated** diff packets covering 100% of modified production Rust files, grouped by subsystem with matching repo instructions.
 - `report.md` — Standalone deterministic report (stop here if the user only asked for Stage 1).
 
@@ -50,32 +53,32 @@ This writes `.peer/<pr>/<short-sha>/01-analyze/`:
    peer prompt idioms
    ```
 3. **Review 100% of production diff hunks with strict file-path handoff:**
-   - For small PRs (1 cohort), review `01-analyze/cohorts/<cohort-id>.md` directly and write `.peer/<pr>/<short-sha>/reviews/review.md`.
+   - For small PRs (1 cohort), review `01-analyze/cohorts/<cohort-id>.md` directly and write `.peer/<pr>/<short-sha>/reviews/<cohort-id>.md`.
    - For multi-cohort PRs, **fan out parallel read-only subagents** (one per cohort file in `01-analyze/cohorts/`).
    - **Context discipline:** Instruct each subagent to write its Structured Markdown findings directly to `.peer/<pr>/<short-sha>/reviews/<cohort-id>.md` and return **ONLY the file path + a 1-line finding count** (never paste full findings back into the main session).
    - Write the walkthrough to `.peer/<pr>/<short-sha>/reviews/walkthrough.md`.
 4. Finalize all cohort review files in one command:
    ```bash
-   peer finalize <PR_NUMBER_OR_URL> --from .peer/<pr>/<short-sha>/reviews --strict
+   peer finalize <PR_NUMBER_OR_URL> --from .peer/<pr>/<short-sha>/reviews --strict --json
    ```
-   `peer finalize` merges all `.md` files (including standalone `walkthrough.md`), deduplicates against Stage 1 ground truth, snaps line ranges, verifies every inline ```` ```rust ```` suggestion with crate-scoped `cargo check -p <crate>`, and writes:
+   `peer finalize` validates `cohortCoverage` against `01-analyze/cohorts/index.json` (failing under `--strict` if any expected `<cohort-id>.md` file is missing so you can self-heal), deduplicates against Stage 1 ground truth, snaps line ranges, verifies every inline ```` ```rust ```` suggestion with crate-scoped `cargo check -p <crate>`, and writes:
    - `.peer/<pr>/<short-sha>/02-review/report.md` & `.peer/<pr>/<short-sha>/review.md`
-   - `.peer/<pr>/<short-sha>/todo.md` — Dependency-ordered `P0`–`P3` fix queue grouped by shared root cause/file.
+   - `.peer/<pr>/<short-sha>/todo.json` & `.peer/<pr>/<short-sha>/todo.md` — Machine-readable (`todo.json`) and human-readable (`todo.md`) dependency-ordered `P0`–`P3` fix queue with `dependsOn`, `verificationCommand`, `suggestion`, and `suggestionVerified`.
+   - `.peer/<pr>/<short-sha>/02-review/skeptic/index.json` + `skeptic-<NN>-<slug>.md` — Lossless per-subsystem skeptic packets.
 
 ## Step 3: Optional Adversarial Skeptic Pass
 When the user asks for skeptic verification (or the PR is high-risk):
 1. Load the skeptic prompt with `peer prompt skeptic`.
-2. Read `.peer/<pr>/<short-sha>/02-review/skeptic/index.json` — `peer finalize` automatically slices all candidate findings (`fp-*` and `audit-ast-*`) into self-contained per-subsystem skeptic packets (`02-review/skeptic/skeptic-<NN>-<slug>.md`).
-3. Fan out parallel read-only skeptic subagents (one per packet in `02-review/skeptic/`) to independently verify or disprove each finding against the codebase.
-4. Combine their `- <finding-id> | KEEP|DROP | <reason>` lines into `.peer/<pr>/<short-sha>/verdicts.md` and apply them deterministically:
+2. Read `.peer/<pr>/<short-sha>/02-review/skeptic/index.json` and fan out parallel read-only skeptic subagents (one per `02-review/skeptic/skeptic-<NN>-<slug>.md` packet) to independently verify or disprove each candidate finding (`fp-*` and `audit-ast-*`) against the codebase.
+3. Combine their `- <finding-id> | KEEP|DROP | <reason>` lines into `.peer/<pr>/<short-sha>/verdicts.md` and apply them deterministically:
    ```bash
-   peer finalize <PR_NUMBER_OR_URL> --verdicts .peer/<pr>/<short-sha>/verdicts.md --strict
+   peer finalize <PR_NUMBER_OR_URL> --verdicts .peer/<pr>/<short-sha>/verdicts.md --strict --json
    ```
-   This prints a **Skeptic Verdict Ledger** (exact before/after counts and dropped IDs) and updates `.peer/<pr>/<short-sha>/03-verify/report.md`, `review.md`, and `todo.md`.
+   This returns structured `reconciliation` JSON (`beforeCount`, `verdictsApplied`, `keptCount`, `droppedCount`, `droppedIds`, `lockedRetainedIds`, `unmatchedVerdictIds`) and updates `03-verify/report.md`, `review.md`, `todo.json`, and `todo.md`.
 
 ## Step 4: Optional GitHub PR Publish
 Only when the user explicitly asks to post to GitHub:
 ```bash
-peer publish <PR_NUMBER_OR_URL>            # Posts PENDING draft review (safe default)
-peer publish <PR_NUMBER_OR_URL> --submit   # Submits immediately as COMMENT
+peer publish <PR_NUMBER_OR_URL> --json            # Posts PENDING draft review (safe default)
+peer publish <PR_NUMBER_OR_URL> --submit --json   # Submits immediately as COMMENT
 ```

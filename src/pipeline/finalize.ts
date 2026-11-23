@@ -1,5 +1,5 @@
 import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   type AnalyzeStageContext,
@@ -25,6 +25,7 @@ import {
 } from "../llm/parser.ts";
 import {
   loadJsonIfExists,
+  loadRawJsonIfExists,
   writeReviewStageArtifacts,
   writeVerifyStageArtifacts,
 } from "../workspace/artifacts.ts";
@@ -45,10 +46,29 @@ export interface FinalizeStageInput {
   readonly auditLogger: AuditLogger;
 }
 
+export interface VerdictReconciliation {
+  readonly beforeCount: number;
+  readonly verdictsApplied: number;
+  readonly keptCount: number;
+  readonly droppedCount: number;
+  readonly droppedIds: readonly string[];
+  readonly lockedRetainedIds: readonly string[];
+  readonly unmatchedVerdictIds: readonly string[];
+}
+
+export interface CohortCoverageReport {
+  readonly expectedCohortIds: readonly string[];
+  readonly matchedCohortIds: readonly string[];
+  readonly missingCohortIds: readonly string[];
+  readonly extraFiles: readonly string[];
+}
+
 export interface FinalizeStageResult {
   readonly bundle: ReviewBundle;
   readonly warnings: string[];
   readonly verdictSummary?: string;
+  readonly reconciliation?: VerdictReconciliation;
+  readonly cohortCoverage?: CohortCoverageReport;
 }
 
 function parseAgentReviewInput(
@@ -258,6 +278,16 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     }
     const verdictSummary = summaryParts.join("\n  ");
 
+    const reconciliation: VerdictReconciliation = {
+      beforeCount,
+      verdictsApplied: verdictMap.size,
+      keptCount,
+      droppedCount: droppedIds.length,
+      droppedIds,
+      lockedRetainedIds: lockedDropIgnoredIds,
+      unmatchedVerdictIds,
+    };
+
     await writeVerifyStageArtifacts(
       repoRoot,
       updatedBundle,
@@ -272,7 +302,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
       },
     );
 
-    return { bundle: updatedBundle, warnings, verdictSummary };
+    return { bundle: updatedBundle, warnings, verdictSummary, reconciliation };
   }
 
   const analyzeContext: AnalyzeStageContext | null = await loadJsonIfExists(
@@ -295,6 +325,31 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
   }
 
   const inputPaths = await resolveAgentInputFiles(fromPath);
+  const cohortIndex = await loadRawJsonIfExists<Array<{ id: string }>>(
+    join(commitDir, "01-analyze", "cohorts", "index.json"),
+  );
+  const expectedCohortIds = (cohortIndex ?? []).map((c) => c.id);
+  const expectedSet = new Set(expectedCohortIds);
+  const matchedCohortIds: string[] = [];
+  const extraFiles: string[] = [];
+
+  for (const fp of inputPaths) {
+    const stem = basename(fp).replace(/\.(md|json)$/i, "");
+    if (expectedSet.has(stem)) {
+      matchedCohortIds.push(stem);
+    } else if (stem !== "walkthrough") {
+      extraFiles.push(basename(fp));
+    }
+  }
+  const matchedSet = new Set(matchedCohortIds);
+  const missingCohortIds = expectedCohortIds.filter((id) => !matchedSet.has(id));
+  const cohortCoverage: CohortCoverageReport = {
+    expectedCohortIds,
+    matchedCohortIds,
+    missingCohortIds,
+    extraFiles,
+  };
+
   let mergedWalkthrough = analyzeBundle.walkthrough;
   let walkthroughOverridden = false;
   const mergedFindings: Finding[] = [];
@@ -302,6 +357,14 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
   const mergedDeletions: DeletionProposedItem[] = [];
   const mergedQuestions: OpenQuestionItem[] = [];
   const mergedWarnings: string[] = [];
+
+  // When cohort-named files (`peer-cohort-*`) are submitted and some cohorts from `01-analyze/cohorts/index.json`
+  // are missing, warn (and fail in --strict mode) so the orchestrator agent self-heals instead of silently dropping cohorts.
+  if (matchedCohortIds.length > 0 && missingCohortIds.length > 0) {
+    mergedWarnings.push(
+      `Missing ${missingCohortIds.length} expected cohort review file(s): ${missingCohortIds.join(", ")}`,
+    );
+  }
 
   for (const filePath of inputPaths) {
     const rawText = await Bun.file(filePath).text();
@@ -392,7 +455,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
         deletionsProposed: [...agentReview.deletionsProposed, ...rustcDeadCodeDeletions],
         openQuestions: agentReview.openQuestions,
         notReviewed: analyzeBundle.notReviewed ?? [],
-        failedCohorts: [],
+        failedCohorts: matchedCohortIds.length > 0 ? missingCohortIds : [],
         clippyDiagnostics: analyzeContext.clippyDiagnostics,
         securityAdvisories: analyzeContext.securityAdvisories,
         generatedAt: new Date().toISOString(),
@@ -424,5 +487,5 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     });
   }
 
-  return { bundle, warnings: agentReview.warnings };
+  return { bundle, warnings: agentReview.warnings, cohortCoverage };
 }

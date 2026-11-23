@@ -83,8 +83,15 @@ Options:
   --fresh                    Ignore saved stage artifacts & checkpoint; re-run from scratch
   --submit                   For 'publish': submit as COMMENT instead of PENDING draft
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
+  --json                     Emit machine-readable JSON output to stdout (agent-first mode)
+  -q, --quiet                Emit single-line compact JSON result to stdout (suppresses progress logs)
   -v, --verbose              Print full finding bodies and code blocks in terminal summary
   -h, --help                 Show this help message
+
+Exit Codes:
+  0  Success (or clean gate for 'peer check' / all tools ready for 'peer doctor')
+  1  Blocking findings detected ('peer check') or required toolchain missing ('peer doctor')
+  2  Usage, configuration, git, network, timeout, strict-parse, or missing-cohort error
 `;
 
 export function parseToolsOption(raw?: string): Set<OptionalTool> {
@@ -149,6 +156,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         fresh: { type: "boolean", default: false },
         submit: { type: "boolean", default: false },
         scope: { type: "string" },
+        json: { type: "boolean", default: false },
+        quiet: { type: "boolean", short: "q", default: false },
         verbose: { type: "boolean", short: "v", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
@@ -160,8 +169,11 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       return 0;
     }
 
+    const isJson = parsed.values.json ?? false;
+    const isQuiet = parsed.values.quiet ?? false;
+
     if (parsed.positionals[0] === "doctor") {
-      return await runDoctorCommand(writeOut);
+      return await runDoctorCommand(writeOut, { json: isJson, quiet: isQuiet });
     }
 
     if (parsed.positionals[0] === "prompt") {
@@ -172,7 +184,10 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const learningStore = new LearningStore(repoRoot);
 
     if (parsed.positionals[0] === "next") {
-      return await runNextCommand(repoRoot, parsed.positionals[1], writeOut);
+      return await runNextCommand(repoRoot, parsed.positionals[1], writeOut, {
+        json: isJson,
+        quiet: isQuiet,
+      });
     }
 
     if (parsed.positionals[0] === "check") {
@@ -188,6 +203,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         strict: parsed.values.strict ?? false,
         allFiles: parsed.values["all-files"] ?? false,
         staged: parsed.values.staged ?? false,
+        json: isJson,
+        quiet: isQuiet,
         writeOut,
         writeErr,
       });
@@ -285,7 +302,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       writeErr(
         "Unable to determine GitHub repository owner/name from 'origin' remote. Configure a GitHub 'origin' remote or pass a full GitHub PR URL (https://github.com/<owner>/<repo>/pull/<number>).",
       );
-      return 1;
+      return 2;
     }
 
     const githubClient =
@@ -295,7 +312,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       const openPrs = await githubClient.listOpenPrs(owner, repo);
       if (openPrs.length === 0) {
         writeErr(`No open Pull Requests found for ${owner}/${repo}.`);
-        return 1;
+        return 2;
       }
       if (deps.promptSelectPr) {
         prNumber = await deps.promptSelectPr(openPrs);
@@ -303,7 +320,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         const firstPr = openPrs[0];
         if (!firstPr) {
           writeErr(`No open Pull Requests found for ${owner}/${repo}.`);
-          return 1;
+          return 2;
         }
         prNumber = firstPr.number;
       }
@@ -346,6 +363,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         existingManifest,
         githubClient,
         checkpointStore,
+        json: isJson,
+        quiet: isQuiet,
         writeOut,
         writeErr,
       });
@@ -363,6 +382,39 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       sameStringArray(existingManifest.enabledTools, effectiveToolsList) &&
       existingManifest.completedStages.includes("analyze")
     ) {
+      if (isJson || isQuiet) {
+        writeOut(
+          JSON.stringify(
+            {
+              status: "cached",
+              stage: "analyze",
+              prNumber: pr.number,
+              headSha: pr.headSha,
+              baseSha: pr.baseSha,
+              profile: effectiveProfile,
+              enabledTools: effectiveToolsList,
+              skippedTools: existingManifest.skippedTools,
+              counts: {
+                inline: existingManifest.inlineFindingsCount,
+                outsideDiff: existingManifest.outsideDiffFindingsCount,
+                nitpicks: existingManifest.nitpickFindingsCount,
+                clippy: existingManifest.clippyCount,
+                securityAdvisories: existingManifest.securityAdvisoriesCount,
+              },
+              artifacts: {
+                commitDir: resolve(commitDir),
+                promptContextMd: resolve(commitDir, "01-analyze", "prompt-context.md"),
+                cohortsIndexJson: resolve(commitDir, "01-analyze", "cohorts", "index.json"),
+                reportMd: resolve(commitDir, "01-analyze", "report.md"),
+              },
+              nextCommand: `peer finalize ${pr.number} --from ${commitDir}/reviews --strict`,
+            },
+            null,
+            isQuiet ? undefined : 2,
+          ),
+        );
+        return 0;
+      }
       writeOut(
         `Already analyzed PR #${pr.number} @ ${pr.headSha.slice(0, 7)} (profile=${effectiveProfile}, tools=${effectiveToolsList.join(",") || "core"}).\nContext: file://${resolve(commitDir, "01-analyze", "prompt-context.md")}\nReport:  file://${resolve(commitDir, "01-analyze", "report.md")}\nPass --fresh to force a re-run.`,
       );
@@ -373,7 +425,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       repoRoot,
       prNumber: pr.number,
       headSha: pr.headSha,
-      onProgress: (line) => writeOut(line),
+      onProgress: isJson || isQuiet ? undefined : (line) => writeOut(line),
     });
 
     if (command === "analyze") {
@@ -411,6 +463,56 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         checkpointStore,
         auditLogger,
       });
+
+      if (isJson || isQuiet) {
+        const allActionable = [
+          ...analyzeOut.analyzeBundle.findings,
+          ...(analyzeOut.analyzeBundle.outsideDiffFindings ?? []),
+        ];
+        const countsBySeverity = {
+          Critical: allActionable.filter((f) => f.severity === "Critical").length,
+          Major: allActionable.filter((f) => f.severity === "Major").length,
+          Minor: allActionable.filter((f) => f.severity === "Minor").length,
+          Trivial: allActionable.filter((f) => f.severity === "Trivial").length,
+          Info: allActionable.filter((f) => f.severity === "Info").length,
+        };
+        writeOut(
+          JSON.stringify(
+            {
+              status: "completed",
+              stage: "analyze",
+              prNumber: pr.number,
+              headSha: pr.headSha,
+              baseSha: pr.baseSha,
+              diffBaseSha: analyzeOut.analyzeBundle.diffBaseSha,
+              isIncremental: analyzeOut.analyzeBundle.isIncremental,
+              profile: effectiveProfile,
+              enabledTools: effectiveToolsList,
+              skippedTools: analyzeOut.skippedTools,
+              counts: {
+                totalActionable: allActionable.length,
+                inline: analyzeOut.analyzeBundle.findings.length,
+                outsideDiff: analyzeOut.analyzeBundle.outsideDiffFindings?.length ?? 0,
+                nitpicks: analyzeOut.analyzeBundle.nitpickFindings?.length ?? 0,
+                clippy: analyzeOut.analyzeBundle.clippyDiagnostics.length,
+                securityAdvisories: analyzeOut.analyzeBundle.securityAdvisories?.length ?? 0,
+              },
+              countsBySeverity,
+              artifacts: {
+                commitDir: resolve(commitDir),
+                promptContextMd: resolve(commitDir, "01-analyze", "prompt-context.md"),
+                cohortsIndexJson: resolve(commitDir, "01-analyze", "cohorts", "index.json"),
+                reportMd: resolve(commitDir, "01-analyze", "report.md"),
+                bundleJson: resolve(commitDir, "01-analyze", "bundle.json"),
+              },
+              nextCommand: `peer finalize ${pr.number} --from ${commitDir}/reviews --strict`,
+            },
+            null,
+            isQuiet ? undefined : 2,
+          ),
+        );
+        return 0;
+      }
 
       writeOut(
         formatTerminalReport(analyzeOut.analyzeBundle, repoRoot, join(commitDir, "01-analyze"), {
@@ -455,10 +557,70 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
 
     const stageFolder = verdictsPath || finalizeStage === "verify" ? "03-verify" : "02-review";
+
+    if (isJson || isQuiet) {
+      const allActionable = [
+        ...result.bundle.findings,
+        ...(result.bundle.outsideDiffFindings ?? []),
+      ];
+      const verifiedSuggestions = allActionable.filter(
+        (f) => f.suggestion !== null && f.suggestionVerified,
+      ).length;
+      const unverifiedSuggestions = allActionable.filter(
+        (f) => f.suggestion !== null && !f.suggestionVerified,
+      ).length;
+      const countsBySeverity = {
+        Critical: allActionable.filter((f) => f.severity === "Critical").length,
+        Major: allActionable.filter((f) => f.severity === "Major").length,
+        Minor: allActionable.filter((f) => f.severity === "Minor").length,
+        Trivial: allActionable.filter((f) => f.severity === "Trivial").length,
+        Info: allActionable.filter((f) => f.severity === "Info").length,
+      };
+      writeOut(
+        JSON.stringify(
+          {
+            status: (result.bundle.failedCohorts?.length ?? 0) > 0 ? "partial" : "completed",
+            stage: stageFolder === "03-verify" ? "verify" : "review",
+            prNumber: pr.number,
+            headSha: pr.headSha,
+            counts: {
+              totalActionable: allActionable.length,
+              inline: result.bundle.findings.length,
+              outsideDiff: result.bundle.outsideDiffFindings?.length ?? 0,
+              nitpicks: result.bundle.nitpickFindings?.length ?? 0,
+              verifiedSuggestions,
+              unverifiedSuggestions,
+            },
+            countsBySeverity,
+            ...(result.cohortCoverage ? { cohortCoverage: result.cohortCoverage } : {}),
+            ...(result.reconciliation ? { reconciliation: result.reconciliation } : {}),
+            warnings: result.warnings,
+            artifacts: {
+              stageReportMd: resolve(commitDir, stageFolder, "report.md"),
+              reviewMd: resolve(commitDir, "review.md"),
+              todoMd: resolve(commitDir, "todo.md"),
+              todoJson: resolve(commitDir, "todo.json"),
+              bundleJson: resolve(commitDir, stageFolder, "bundle.json"),
+              ...(stageFolder === "02-review"
+                ? { skepticIndexJson: resolve(commitDir, "02-review", "skeptic", "index.json") }
+                : { skepticJson: resolve(commitDir, "03-verify", "skeptic.json") }),
+            },
+            nextCommand:
+              stageFolder === "02-review"
+                ? `peer finalize ${pr.number} --verdicts ${commitDir}/verdicts.md --strict`
+                : `peer publish ${pr.number}`,
+          },
+          null,
+          isQuiet ? undefined : 2,
+        ),
+      );
+      return 0;
+    }
+
     const nextHint =
       stageFolder === "02-review"
         ? `Skeptic packets ready at file://${resolve(commitDir, "02-review", "skeptic", "index.json")} — or run \`peer next ${pr.number}\``
-        : `Ready to publish (\`peer publish ${pr.number}\`) or hand off \`todo.md\``;
+        : `Ready to publish (\`peer publish ${pr.number}\`) or hand off \`todo.md\` / \`todo.json\``;
     writeOut(
       formatTerminalReport(result.bundle, repoRoot, join(commitDir, stageFolder), {
         verbose: parsed.values.verbose ?? false,

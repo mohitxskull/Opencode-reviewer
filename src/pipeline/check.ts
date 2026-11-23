@@ -44,6 +44,8 @@ export interface CheckGateInput {
   readonly strict?: boolean;
   readonly allFiles?: boolean;
   readonly staged?: boolean;
+  readonly json?: boolean;
+  readonly quiet?: boolean;
   readonly writeOut: (text: string) => void;
   readonly writeErr: (text: string) => void;
 }
@@ -74,6 +76,8 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     strict = false,
     allFiles = false,
     staged = false,
+    json = false,
+    quiet = false,
     writeOut,
   } = input;
 
@@ -213,6 +217,20 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
 
   if (updateBaseline) {
     const baselinePath = await saveBaselineFingerprints(repoRoot, allActionable);
+    if (json || quiet) {
+      writeOut(
+        JSON.stringify(
+          {
+            status: "baseline_updated",
+            fingerprintsCount: allActionable.length,
+            baselinePath: resolve(baselinePath),
+          },
+          null,
+          quiet ? undefined : 2,
+        ),
+      );
+      return 0;
+    }
     writeOut(
       `Updated baseline with ${allActionable.length} finding fingerprint(s): file://${resolve(baselinePath)}`,
     );
@@ -245,7 +263,57 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
   if (sarifPath) {
     const absSarif = resolve(sarifPath);
     await Bun.write(absSarif, renderSarifReport(newFindings));
-    writeOut(`SARIF report written: file://${absSarif}`);
+    if (!json && !quiet) {
+      writeOut(`SARIF report written: file://${absSarif}`);
+    }
+  }
+
+  const blockingFindings = strict
+    ? newFindings
+    : newFindings.filter((f) => f.severity === "Critical" || f.severity === "Major");
+  const exitCode = blockingFindings.length > 0 ? 1 : 0;
+
+  if (json || quiet) {
+    const countsBySeverity = {
+      Critical: newFindings.filter((f) => f.severity === "Critical").length,
+      Major: newFindings.filter((f) => f.severity === "Major").length,
+      Minor: newFindings.filter((f) => f.severity === "Minor").length,
+      Trivial: newFindings.filter((f) => f.severity === "Trivial").length,
+      Info: newFindings.filter((f) => f.severity === "Info").length,
+    };
+    writeOut(
+      JSON.stringify(
+        {
+          exitCode,
+          baseSha,
+          headSha,
+          profile,
+          modifiedRustFiles: modifiedFiles.size,
+          newCount: newFindings.length,
+          blockingCount: blockingFindings.length,
+          baselinedCount,
+          countsBySeverity,
+          enabledTools: Array.from(enabledTools).sort(),
+          skippedTools,
+          reportMd: resolve(localDir, "report.md"),
+          sarifPath: sarifPath ? resolve(sarifPath) : null,
+          findings: newFindings.map((f) => ({
+            id: f.id,
+            severity: f.severity,
+            type: f.type,
+            filePath: f.filePath,
+            startLine: f.startLine,
+            endLine: f.endLine,
+            title: f.title,
+            rootCause: f.rootCause,
+            verificationCommand: f.verificationCommand,
+          })),
+        },
+        null,
+        quiet ? undefined : 2,
+      ),
+    );
+    return exitCode;
   }
 
   writeOut(
@@ -269,8 +337,5 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
   }
   writeOut(`Report: file://${resolve(localDir, "report.md")}`);
 
-  const blockingFindings = strict
-    ? newFindings
-    : newFindings.filter((f) => f.severity === "Critical" || f.severity === "Major");
-  return blockingFindings.length > 0 ? 1 : 0;
+  return exitCode;
 }

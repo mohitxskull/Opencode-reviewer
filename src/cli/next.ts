@@ -54,12 +54,31 @@ export async function runNextCommand(
   repoRoot: string,
   prArg: string | undefined,
   writeOut: (text: string) => void,
+  options: { readonly json?: boolean; readonly quiet?: boolean } = {},
 ): Promise<number> {
   const prFilter =
     prArg && /^\d+$/.test(prArg.trim()) ? Number.parseInt(prArg.trim(), 10) : undefined;
   const latest = await findLatestRunManifest(repoRoot, prFilter);
 
   if (!latest) {
+    if (options.json || options.quiet) {
+      writeOut(
+        JSON.stringify(
+          {
+            status: "uninitialized",
+            prNumber: prFilter ?? null,
+            nextAction: {
+              stage: "analyze",
+              command: prFilter ? `peer analyze ${prFilter}` : "peer analyze <PR_NUMBER>",
+              fallbackLocalGate: "peer check --base main",
+            },
+          },
+          null,
+          options.quiet ? undefined : 2,
+        ),
+      );
+      return 0;
+    }
     writeOut(
       [
         "peer next — No saved PR review run found in .peer/",
@@ -80,6 +99,63 @@ export async function runNextCommand(
     currentHead.length >= 7 &&
     !manifest.headSha.startsWith(currentHead.slice(0, 7)) &&
     !currentHead.startsWith(manifest.headSha.slice(0, 7));
+
+  if (options.json || options.quiet) {
+    const nextAction =
+      manifest.latestStage === "analyze"
+        ? {
+            stage: "review",
+            command: `peer finalize ${manifest.prNumber} --from ${relDir}/reviews --strict`,
+            cohortsIndex: resolve(commitDir, "01-analyze", "cohorts", "index.json"),
+          }
+        : manifest.latestStage === "review"
+          ? {
+              stage: "verify",
+              command: `peer finalize ${manifest.prNumber} --verdicts ${relDir}/verdicts.md --strict`,
+              skepticIndex: resolve(commitDir, "02-review", "skeptic", "index.json"),
+            }
+          : {
+              stage: "publish",
+              command: `peer publish ${manifest.prNumber}`,
+              todoJson: resolve(commitDir, "todo.json"),
+            };
+
+    writeOut(
+      JSON.stringify(
+        {
+          status: manifest.status,
+          prNumber: manifest.prNumber,
+          headSha: manifest.headSha,
+          localHeadSha: currentHead || null,
+          headDrifted,
+          latestStage: manifest.latestStage,
+          completedStages: manifest.completedStages,
+          enabledTools: manifest.enabledTools,
+          skippedTools: manifest.skippedTools,
+          failedCohorts: manifest.failedCohorts,
+          counts: {
+            inline: manifest.inlineFindingsCount,
+            outsideDiff: manifest.outsideDiffFindingsCount,
+            nitpicks: manifest.nitpickFindingsCount,
+            clippy: manifest.clippyCount,
+            securityAdvisories: manifest.securityAdvisoriesCount,
+          },
+          artifacts: {
+            commitDir: resolve(commitDir),
+            reviewMd: resolve(commitDir, "review.md"),
+            todoMd: resolve(commitDir, "todo.md"),
+            todoJson: resolve(commitDir, "todo.json"),
+            cohortsIndexJson: resolve(commitDir, "01-analyze", "cohorts", "index.json"),
+            skepticIndexJson: resolve(commitDir, "02-review", "skeptic", "index.json"),
+          },
+          nextAction,
+        },
+        null,
+        options.quiet ? undefined : 2,
+      ),
+    );
+    return 0;
+  }
 
   const lines: string[] = [
     `peer next — PR #${manifest.prNumber} @ ${manifest.headSha.slice(0, 7)} (latestStage=${manifest.latestStage}, completed=[${manifest.completedStages.join(", ")}])`,

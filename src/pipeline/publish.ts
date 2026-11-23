@@ -30,6 +30,8 @@ export interface PublishStageInput {
   readonly existingManifest: RunManifest | null;
   readonly githubClient: GitHubClient;
   readonly checkpointStore: CheckpointStore;
+  readonly json?: boolean;
+  readonly quiet?: boolean;
   readonly writeOut: (text: string) => void;
   readonly writeErr: (text: string) => void;
 }
@@ -48,6 +50,8 @@ export async function runPublishStage(input: PublishStageInput): Promise<number>
     existingManifest,
     githubClient,
     checkpointStore,
+    json = false,
+    quiet = false,
     writeOut,
     writeErr,
   } = input;
@@ -86,7 +90,7 @@ export async function runPublishStage(input: PublishStageInput): Promise<number>
     writeErr(
       `No local review artifacts found for PR #${pr.number} @ ${pr.headSha.slice(0, 7)}. Run \`peer analyze ${pr.number}\` (and optionally \`peer finalize ${pr.number} --from <file>\`) first.`,
     );
-    return 1;
+    return 2;
   }
 
   const walkthroughCommentBody = renderWalkthroughComment(bundleToPublish);
@@ -134,6 +138,26 @@ export async function runPublishStage(input: PublishStageInput): Promise<number>
       enabledTools: existingManifest?.enabledTools ?? enabledToolsList,
     },
   );
+
+  if (json || quiet) {
+    writeOut(
+      JSON.stringify(
+        {
+          stage: "publish",
+          prNumber: pr.number,
+          headSha: pr.headSha,
+          sourceStage,
+          mode: submitReview ? "COMMENT" : "PENDING",
+          inlineCommentsCount: inlineComments.length,
+          receiptMd: resolve(commitDir, "04-publish", "report.md"),
+          htmlUrl: pr.htmlUrl,
+        },
+        null,
+        quiet ? undefined : 2,
+      ),
+    );
+    return 0;
+  }
 
   writeOut(
     `Published PR #${pr.number} @ ${pr.headSha.slice(0, 7)} from stage \`${sourceStage}\` (${inlineComments.length} inline comment(s), mode=${submitReview ? "COMMENT" : "PENDING"}).\nReceipt: file://${resolve(commitDir, "04-publish", "report.md")}`,

@@ -233,10 +233,31 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
     expect(errs.join("\n")).toContain("fetch-depth: 0");
   });
 
-  test("Tier 0 Fingerprint v2: distinct .unwrap() calls in different fns get distinct fingerprints; shifting unsafe line preserves fingerprint", async () => {
+  test("Tier 0 Fingerprint v2: panics across multiple functions in one file collapse to 1 per-file finding whose fingerprint changes when a new fn panic is added; shifting unsafe line preserves fingerprint", async () => {
     const dir = await mkdtemp(join(tmpdir(), "peer-fp-v2-"));
     tempDirs.push(dir);
     await mkdir(join(dir, "src"), { recursive: true });
+
+    await writeFile(
+      join(dir, "src", "lib.rs"),
+      [
+        "pub fn alpha(a: Option<i32>) -> i32 { a.unwrap() }",
+        "pub fn gamma(p: *const i32) -> i32 { unsafe { *p } }",
+        "",
+      ].join("\n"),
+    );
+
+    const diffOnlyAlpha = [
+      "diff --git a/src/lib.rs b/src/lib.rs",
+      "--- a/src/lib.rs",
+      "+++ b/src/lib.rs",
+      "@@ -0,0 +1,2 @@",
+      "+pub fn alpha(a: Option<i32>) -> i32 { a.unwrap() }",
+      "+pub fn gamma(p: *const i32) -> i32 { unsafe { *p } }",
+      "",
+    ].join("\n");
+    const fAlphaOnly = await collectAstDeterministicFindings(dir, parseUnifiedDiff(diffOnlyAlpha));
+    const panicAlphaOnly = fAlphaOnly.find((f) => f.type === "Bug");
 
     await writeFile(
       join(dir, "src", "lib.rs"),
@@ -261,9 +282,11 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
 
     const f1 = await collectAstDeterministicFindings(dir, parseUnifiedDiff(diff1));
     const panics = f1.filter((f) => f.type === "Bug");
-    expect(panics.length).toBe(2);
-    // Two distinct .unwrap() calls in the same file MUST have different fingerprints
-    expect(panics[0]?.rootCause).not.toBe(panics[1]?.rootCause);
+    // Multiple panics in the same file collapse into 1 per-file finding listing both functions
+    expect(panics.length).toBe(1);
+    expect(panics[0]?.title).toContain("`alpha`, `beta`");
+    // Adding beta's .unwrap() MUST change the per-file finding's rootCause/fingerprint
+    expect(panics[0]?.rootCause).not.toBe(panicAlphaOnly?.rootCause);
 
     const unsafe1 = f1.find((f) => f.type === "Soundness");
     expect(unsafe1).toBeDefined();

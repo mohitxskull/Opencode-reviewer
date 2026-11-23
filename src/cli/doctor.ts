@@ -113,41 +113,95 @@ function probeMiri(): { status: string; detail: string } {
   return { status: "missing", detail: "rustup +nightly component add miri" };
 }
 
-export async function runDoctorCommand(writeOut: (text: string) => void): Promise<number> {
-  const rows: Array<{ Tool: string; Kind: string; Status: string; Details: string }> = [];
-  let missingRequired = 0;
+export interface DoctorToolStatus {
+  readonly name: string;
+  readonly kind: "required" | "optional";
+  readonly installed: boolean;
+  readonly status: "ok" | "missing";
+  readonly detail: string;
+  readonly installHint: string;
+}
+
+export interface DoctorReport {
+  readonly ok: boolean;
+  readonly missingRequired: readonly string[];
+  readonly missingOptional: readonly string[];
+  readonly tools: readonly DoctorToolStatus[];
+}
+
+export async function runDoctorCommand(
+  writeOut: (text: string) => void,
+  options: { readonly json?: boolean; readonly quiet?: boolean } = {},
+): Promise<number> {
+  const tools: DoctorToolStatus[] = [];
+  const missingRequired: string[] = [];
+  const missingOptional: string[] = [];
 
   for (const spec of TOOL_SPECS) {
     const resolved = Bun.which(spec.bin);
     if (resolved) {
-      rows.push({
-        Tool: spec.name,
-        Kind: spec.required ? "required" : "optional",
-        Status: "ok",
-        Details: probeVersion(resolved, spec.versionArgs),
+      tools.push({
+        name: spec.name,
+        kind: spec.required ? "required" : "optional",
+        installed: true,
+        status: "ok",
+        detail: probeVersion(resolved, spec.versionArgs),
+        installHint: spec.installHint,
       });
     } else {
       if (spec.required) {
-        missingRequired += 1;
+        missingRequired.push(spec.name);
+      } else {
+        missingOptional.push(spec.name);
       }
-      rows.push({
-        Tool: spec.name,
-        Kind: spec.required ? "required" : "optional",
-        Status: "missing",
-        Details: spec.installHint,
+      tools.push({
+        name: spec.name,
+        kind: spec.required ? "required" : "optional",
+        installed: false,
+        status: "missing",
+        detail: spec.installHint,
+        installHint: spec.installHint,
       });
     }
   }
 
   const miri = probeMiri();
-  rows.push({
-    Tool: "miri (+nightly)",
-    Kind: "optional",
-    Status: miri.status,
-    Details: miri.detail,
+  const miriInstalled = miri.status === "ok";
+  if (!miriInstalled) {
+    missingOptional.push("miri");
+  }
+  tools.push({
+    name: "miri (+nightly)",
+    kind: "optional",
+    installed: miriInstalled,
+    status: miriInstalled ? "ok" : "missing",
+    detail: miri.detail,
+    installHint: "rustup toolchain install nightly && rustup +nightly component add miri",
   });
 
+  const report: DoctorReport = {
+    ok: missingRequired.length === 0,
+    missingRequired,
+    missingOptional,
+    tools,
+  };
+
+  if (options.json || options.quiet) {
+    writeOut(JSON.stringify(report, null, options.quiet ? undefined : 2));
+    return report.ok ? 0 : 1;
+  }
+
   writeOut("peer doctor — Local Toolchain & Rust Analyzer Readiness\n");
-  writeOut(Bun.inspect.table(rows, ["Tool", "Kind", "Status", "Details"]));
-  return missingRequired > 0 ? 1 : 0;
+  writeOut(
+    Bun.inspect.table(
+      tools.map((t) => ({
+        Tool: t.name,
+        Kind: t.kind,
+        Status: t.status,
+        Details: t.detail,
+      })),
+      ["Tool", "Kind", "Status", "Details"],
+    ),
+  );
+  return report.ok ? 0 : 1;
 }

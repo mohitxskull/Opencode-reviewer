@@ -242,9 +242,23 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     expect(finalizeCode).toBe(0);
     expect(await Bun.file(join(commitDir, "02-review", "report.md")).exists()).toBe(true);
     expect(await Bun.file(join(commitDir, "02-review", "bundle.json")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "todo.json")).exists()).toBe(true);
     expect(await Bun.file(join(commitDir, "02-review", "skeptic", "index.json")).exists()).toBe(
       true,
     );
+
+    const nextJsonOut: string[] = [];
+    await runCli(["next", "42", "--json", "--repo", repoDir], {
+      stdout: (t) => nextJsonOut.push(t),
+    });
+    const parsedNext = JSON.parse(nextJsonOut.join("\n")) as {
+      latestStage: string;
+      counts: { inline: number };
+      artifacts: { todoJson: string };
+    };
+    expect(parsedNext.latestStage).toBe("review");
+    expect(parsedNext.counts.inline).toBe(2);
+    expect(parsedNext.artifacts.todoJson).toContain("todo.json");
 
     const nextAfterReview: string[] = [];
     await runCli(["next", "42", "--repo", repoDir], {

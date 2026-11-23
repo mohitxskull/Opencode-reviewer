@@ -204,15 +204,19 @@ export async function collectAstDeterministicFindings(
 
     // 2. Detect newly added production panic paths (.unwrap/.expect/panic!/todo!/unimplemented!)
     // via Tree-sitter AST nodes (never fooled by string literals, URLs, or block comments).
-    // Why: Grouping multiple panic calls inside the same enclosing function prevents
-    // spamming N nearly identical inline comments on one function (e.g. a writer helper).
+    // Why: Grouping all production panic calls inside the same file into a single finding
+    // prevents padding the Minor tier with N rows per file that an implementer agent has to churn through,
+    // while recording every enclosing function + snippet in rootCause so baseline fingerprints
+    // still invalidate whenever a new panic call is added to another function in the file.
     interface PanicHit {
       readonly lineNo: number;
       readonly matchedOp: string;
       readonly isStubMacro: boolean;
+      readonly fnName: string | null;
+      readonly snippet: string;
     }
 
-    const panicGroups = new Map<string, { fnName: string | null; hits: PanicHit[] }>();
+    const filePanicHits: PanicHit[] = [];
     const fnSymbols = ast.symbols.filter((s) => s.kind === "fn" && !s.isTest);
 
     const seenPanicKey = new Set<string>();
@@ -252,50 +256,53 @@ export async function collectAstDeterministicFindings(
         continue;
       }
 
-      const groupKey = enclosingFn
-        ? `${enclosingFn.name}:${enclosingFn.startLine}`
-        : `line:${call.line}`;
-      const existing = panicGroups.get(groupKey);
-      if (existing) {
-        existing.hits.push({
-          lineNo: call.line,
-          matchedOp: call.op,
-          isStubMacro: call.isStubMacro,
-        });
-      } else {
-        panicGroups.set(groupKey, {
-          fnName: enclosingFn?.name ?? null,
-          hits: [{ lineNo: call.line, matchedOp: call.op, isStubMacro: call.isStubMacro }],
-        });
-      }
+      filePanicHits.push({
+        lineNo: call.line,
+        matchedOp: call.op,
+        isStubMacro: call.isStubMacro,
+        fnName: enclosingFn?.name ?? null,
+        snippet: (lines[call.line - 1] ?? "").trim(),
+      });
     }
 
-    for (const group of panicGroups.values()) {
-      const first = group.hits[0];
-      if (!first) {
-        continue;
-      }
-      const hasStubMacro = group.hits.some((h) => h.isStubMacro);
-      const uniqueOps = Array.from(new Set(group.hits.map((h) => `\`${h.matchedOp}\``)));
-      const lineList = group.hits.map((h) => `L${h.lineNo}`).join(", ");
-      const isMulti = group.hits.length > 1;
+    const first = filePanicHits[0];
+    if (first) {
+      const hasStubMacro = filePanicHits.some((h) => h.isStubMacro);
+      const uniqueOps = Array.from(new Set(filePanicHits.map((h) => `\`${h.matchedOp}\``)));
+      const uniqueFns = Array.from(
+        new Set(filePanicHits.map((h) => h.fnName).filter((n): n is string => Boolean(n))),
+      );
+      const lineList = filePanicHits.map((h) => `L${h.lineNo}`).join(", ");
+      const isMulti = filePanicHits.length > 1;
+      const scopeLabel = uniqueFns.length > 0 ? uniqueFns.join(",") : "module";
+      const fnSummary =
+        uniqueFns.length === 1
+          ? ` in \`${uniqueFns[0]}\``
+          : uniqueFns.length > 1
+            ? ` across ${uniqueFns.map((f) => `\`${f}\``).join(", ")}`
+            : "";
 
-      const firstSnippet = (lines[first.lineNo - 1] ?? "").trim();
-      const scopeLabel = group.fnName ?? "module";
       const title = isMulti
-        ? `${group.hits.length} production panic calls (${uniqueOps.join(", ")}) introduced${group.fnName ? ` in \`${group.fnName}\`` : ""}`
-        : `Production panic call \`${first.matchedOp}\` introduced`;
+        ? `${filePanicHits.length} production panic calls (${uniqueOps.join(", ")}) introduced${fnSummary}`
+        : `Production panic call \`${first.matchedOp}\` introduced${fnSummary}`;
       const rootCause = isMulti
-        ? `Unchecked panic operations (${group.hits.map((h) => h.matchedOp).join(", ")}) in ${relPath}::${scopeLabel}`
-        : `Unchecked panic operation ${first.matchedOp} in ${relPath}::${scopeLabel} (${firstSnippet})`;
+        ? `Unchecked panic operations (${filePanicHits.map((h) => `${h.fnName ?? "mod"}:${h.matchedOp}`).join(", ")}) in ${relPath}::${scopeLabel}`
+        : `Unchecked panic operation ${first.matchedOp} in ${relPath}::${scopeLabel} (${first.snippet})`;
       const fp = computeFindingFingerprint({
         filePath: relPath,
         type: "Bug",
         title,
         rootCause,
         symbol: scopeLabel,
-        snippet: firstSnippet,
+        snippet: filePanicHits.map((h) => h.snippet).join(" | "),
       });
+
+      const hitDetails = filePanicHits
+        .map(
+          (h) =>
+            `- \`${relPath}:${h.lineNo}\`${h.fnName ? ` (\`${h.fnName}\`)` : ""}: \`${h.matchedOp}\``,
+        )
+        .join("\n");
 
       findings.push(
         FindingSchema.parse({
@@ -309,8 +316,8 @@ export async function collectAstDeterministicFindings(
           evidenceMechanism: "Correctness",
           title,
           body: isMulti
-            ? `Added ${group.hits.length} panic calls (${uniqueOps.join(", ")}) in \`${relPath}\`${group.fnName ? ` (\`${group.fnName}\`)` : ""} at ${lineList}. Propagate errors with \`?\` / \`Result\` or handle the \`None\`/\`Err\` cases explicitly.`
-            : `Added \`${first.matchedOp}\` on production line \`${relPath}:${first.lineNo}\`. Propagate errors with \`?\` / \`Result\` or handle the \`None\`/\`Err\` case explicitly.`,
+            ? `Added ${filePanicHits.length} production panic calls (${uniqueOps.join(", ")}) in \`${relPath}\`${fnSummary} at ${lineList}:\n${hitDetails}\nPropagate errors with \`?\` / \`Result\` or document the invariant with \`// Why:\` / \`/// # Panics\`.`
+            : `Added \`${first.matchedOp}\` on production line \`${relPath}:${first.lineNo}\`${fnSummary}. Propagate errors with \`?\` / \`Result\` or document the invariant with \`// Why:\` / \`/// # Panics\`.`,
           rootCause,
           blastRadius: "Runtime crash / thread panic in production code",
           reversible: true,
@@ -320,8 +327,8 @@ export async function collectAstDeterministicFindings(
           suggestion: null,
           suggestionVerified: false,
           agentPrompt: isMulti
-            ? `Replace the ${group.hits.length} panic calls (${uniqueOps.join(", ")}) in \`${relPath}\` at ${lineList} with proper error propagation (\`?\` / \`Result\`) or explicit handling.`
-            : `Replace \`${first.matchedOp}\` at \`${relPath}:${first.lineNo}\` with proper error propagation (\`?\` / \`Result\`) or explicit handling.`,
+            ? `Audit the ${filePanicHits.length} panic calls (${uniqueOps.join(", ")}) in \`${relPath}\` at ${lineList}. Replace unguarded panics with \`?\` / \`Result\` propagation, or document proven structural invariants.`
+            : `Audit \`${first.matchedOp}\` at \`${relPath}:${first.lineNo}\`. Replace unguarded panic with \`?\` / \`Result\` propagation, or document the structural invariant.`,
           confidence: 0.95,
           source: "audit",
         }),

@@ -56,14 +56,14 @@ export default {
       editor.add({
         name: "peer_doctor",
         description:
-          "Check local Rust toolchain and analyzer readiness (clippy, audit, deny, geiger, semver, llvm-cov, miri).",
+          "Check local Rust toolchain and analyzer readiness (clippy, audit, deny, geiger, semver, llvm-cov, miri). Returns structured JSON.",
         input: {
           type: "object",
           properties: {},
           additionalProperties: false,
         },
         async execute() {
-          const res = await runPeer(["doctor"], directory);
+          const res = await runPeer(["doctor", "--json"], directory);
           return { content: res.stdout.trim() || res.stderr.trim() };
         },
       });
@@ -71,7 +71,7 @@ export default {
       editor.add({
         name: "peer_next",
         description:
-          "Inspect saved .peer/<pr>/<sha>/ artifacts, check whether git HEAD has changed, and print the current review stage + exact recommended next command.",
+          "Inspect saved .peer/<pr>/<sha>/ artifacts, check whether git HEAD has changed, and return structured JSON with the current stage, counts, artifact paths, and recommended next command.",
         input: {
           type: "object",
           properties: {
@@ -83,7 +83,7 @@ export default {
           additionalProperties: false,
         },
         async execute(args) {
-          const cliArgs = ["next"];
+          const cliArgs = ["next", "--json"];
           if (typeof args.pr === "string" && args.pr) cliArgs.push(args.pr);
           const res = await runPeer(cliArgs, directory);
           return { content: res.stdout.trim() || res.stderr.trim() };
@@ -147,7 +147,7 @@ export default {
           additionalProperties: false,
         },
         async execute(args) {
-          const cliArgs = ["check"];
+          const cliArgs = ["check", "--json"];
           if (typeof args.base === "string" && args.base) cliArgs.push("--base", args.base);
           if (typeof args.tools === "string" && args.tools) cliArgs.push("--tools", args.tools);
           if (args.strict === true) cliArgs.push("--strict");
@@ -166,7 +166,7 @@ export default {
       editor.add({
         name: "peer_analyze",
         description:
-          "Run Stage 1 deterministic Rust PR analysis (git diff, clippy, cargo-audit CVE delta, Cargo.lock diff, Tree-sitter AST symbol/unsafe/panic graph, and optional tools). Writes .peer/<pr>/<sha>/01-analyze/prompt-context.md and cohorts/.",
+          "Run Stage 1 deterministic Rust PR analysis (git diff, clippy, cargo-audit CVE delta, Cargo.lock diff, Tree-sitter AST symbol/unsafe/panic graph, and optional tools). Writes .peer/<pr>/<sha>/01-analyze/prompt-context.md and cohorts/ and returns structured JSON.",
         input: {
           type: "object",
           properties: {
@@ -192,7 +192,7 @@ export default {
           additionalProperties: false,
         },
         async execute(args) {
-          const cliArgs = ["analyze", String(args.pr)];
+          const cliArgs = ["analyze", String(args.pr), "--json"];
           if (typeof args.tools === "string" && args.tools) cliArgs.push("--tools", args.tools);
           if (typeof args.profile === "string" && args.profile)
             cliArgs.push("--profile", args.profile);
@@ -210,7 +210,7 @@ export default {
       editor.add({
         name: "peer_finalize",
         description:
-          "Run Judge merge + crate-scoped `cargo check` suggestion verification on an agent review file or directory (--from), or apply deterministic skeptic verdicts (--verdicts).",
+          "Run Judge merge + crate-scoped `cargo check` suggestion verification on an agent review file or directory (--from), or apply deterministic skeptic verdicts (--verdicts). Returns structured JSON with counts, cohortCoverage/reconciliation, and artifact paths.",
         input: {
           type: "object",
           properties: {
@@ -233,7 +233,7 @@ export default {
             },
             strict: {
               type: "boolean",
-              description: "Fail if any finding blocks are malformed",
+              description: "Fail if any finding blocks are malformed or expected cohort files are missing",
             },
             profile: {
               type: "string",
@@ -244,7 +244,7 @@ export default {
           additionalProperties: false,
         },
         async execute(args) {
-          const cliArgs = ["finalize", String(args.pr)];
+          const cliArgs = ["finalize", String(args.pr), "--json"];
           if (typeof args.from === "string" && args.from) cliArgs.push("--from", args.from);
           if (typeof args.verdicts === "string" && args.verdicts)
             cliArgs.push("--verdicts", args.verdicts);
@@ -265,7 +265,7 @@ export default {
       editor.add({
         name: "peer_publish",
         description:
-          "Upload the latest saved local review stage (01-analyze, 02-review, or 03-verify) to the GitHub PR as a PENDING draft (or submitted COMMENT with submit=true).",
+          "Upload the latest saved local review stage (01-analyze, 02-review, or 03-verify) to the GitHub PR as a PENDING draft (or submitted COMMENT with submit=true). Returns structured JSON.",
         input: {
           type: "object",
           properties: {
@@ -282,7 +282,7 @@ export default {
           additionalProperties: false,
         },
         async execute(args) {
-          const cliArgs = ["publish", String(args.pr)];
+          const cliArgs = ["publish", String(args.pr), "--json"];
           if (args.submit === true) cliArgs.push("--submit");
           const res = await runPeer(cliArgs, directory);
           if (res.exitCode !== 0) {

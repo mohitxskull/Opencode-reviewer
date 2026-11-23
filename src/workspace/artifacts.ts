@@ -13,7 +13,7 @@ import {
   type ToolOutcome,
 } from "../domain/models.ts";
 import { renderCombinedLocalReviewMarkdown, renderWalkthroughComment } from "../render/markdown.ts";
-import { renderReviewTodoMarkdown } from "../render/todo.ts";
+import { buildReviewTodoQueue, renderReviewTodoMarkdown } from "../render/todo.ts";
 import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir } from "./git.ts";
 
 export interface WriteArtifactsMeta {
@@ -145,6 +145,7 @@ export async function writeReviewStageArtifacts(
   const walkthroughMd = renderWalkthroughComment(bundle);
   const reportMd = renderCombinedLocalReviewMarkdown(bundle);
   const todoMd = renderReviewTodoMarkdown(bundle);
+  const todoJson = buildReviewTodoQueue(bundle);
   const manifest = buildRunManifest(bundle, {
     ...meta,
     completedStages: ["analyze", "review"],
@@ -237,6 +238,7 @@ export async function writeReviewStageArtifacts(
     Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
     Bun.write(join(commitDir, "review.md"), reportMd),
     Bun.write(join(commitDir, "todo.md"), todoMd),
+    Bun.write(join(commitDir, "todo.json"), JSON.stringify(todoJson, null, 2)),
     Bun.write(join(commitDir, "run.json"), JSON.stringify(manifest, null, 2)),
     ...skepticWrites,
   ]);
@@ -260,6 +262,7 @@ export async function writeVerifyStageArtifacts(
 
   const reportMd = renderCombinedLocalReviewMarkdown(bundle);
   const todoMd = renderReviewTodoMarkdown(bundle);
+  const todoJson = buildReviewTodoQueue(bundle);
   const manifest = buildRunManifest(bundle, {
     ...meta,
     completedStages: ["analyze", "review", "verify"],
@@ -269,6 +272,7 @@ export async function writeVerifyStageArtifacts(
   await Promise.all([
     Bun.write(join(stageDir, "report.md"), reportMd),
     Bun.write(join(commitDir, "todo.md"), todoMd),
+    Bun.write(join(commitDir, "todo.json"), JSON.stringify(todoJson, null, 2)),
     Bun.write(join(stageDir, "skeptic.json"), JSON.stringify(skepticSummary, null, 2)),
     Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
     Bun.write(join(commitDir, "review.md"), reportMd),
