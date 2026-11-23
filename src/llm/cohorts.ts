@@ -2,20 +2,6 @@ import { resolveFileArchitecturalLayer } from "../analyzers/rust.ts";
 import type { CrateGraph, DiffFileMap } from "../domain/models.ts";
 import { isRustTestOrBenchPath } from "../domain/paths.ts";
 
-// Why: Large PRs (e.g. 50-150 files, >1 MB raw diff) exceed an LLM's effective
-// reasoning window and inflate token usage by 10x if every file is dumped inline.
-// We use Progressive Context Disclosure:
-// - Tier 1 (Primary High-Risk Production Rust files): scored by risk signals
-//   (`unsafe`, `.await`, locks, `select!`, `unwrap`/`panic!`, Clippy hits, non-test
-//   layer) and included with compact annotated diff hunks (up to 7 files / 22k chars).
-// - Tier 2 (Secondary / Test / Mechanical files): ONLY the file path, crate layer,
-//   valid right-side hunk line ranges, and modified symbol names are listed so the
-//   agent can request a specific file via `read` only if needed.
-export const DEFAULT_MAX_INLINE_DIFF_CHARS = 22_000;
-export const DEFAULT_MAX_TIER1_FILES = 7;
-export const MAX_HUNK_LINES_BEFORE_COMPACT = 32;
-export const MAX_CHARS_PER_FILE_DIFF = 5_500;
-
 const HIGH_RISK_RUST_TOKEN_REGEX =
   /\b(?:unsafe|await|Mutex|RwLock|parking_lot|select!|unwrap|expect|panic!|transmute|from_raw|into_raw|Send|Sync)\b/;
 
@@ -59,27 +45,6 @@ export function scoreFileReviewPriority(
     addedLinesCount,
     riskSignals: Array.from(riskSignalsSet),
   };
-}
-
-export function compactAnnotatedLines(lines: readonly string[]): string[] {
-  if (lines.length <= MAX_HUNK_LINES_BEFORE_COMPACT) {
-    return [...lines];
-  }
-  const selected: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) {
-      continue;
-    }
-    const isAdded = line.includes("(+):");
-    const isNeighborAdded =
-      (i > 0 && (lines[i - 1]?.includes("(+):") ?? false)) ||
-      (i + 1 < lines.length && (lines[i + 1]?.includes("(+):") ?? false));
-    if (isAdded || isNeighborAdded || i < 2 || i >= lines.length - 2) {
-      selected.push(line);
-    }
-  }
-  return selected.slice(0, MAX_HUNK_LINES_BEFORE_COMPACT);
 }
 
 export interface FileCohort {

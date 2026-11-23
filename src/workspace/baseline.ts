@@ -14,7 +14,7 @@ export class CorruptBaselineError extends Error {
 }
 
 export const PeerBaselineSchema = z.object({
-  version: z.literal(2).default(2),
+  version: z.literal(2),
   updatedAt: z.string(),
   fingerprints: z.array(z.string().min(1)).default([]),
 });

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  buildCohortContextPrompt,
   buildReviewContextPrompt,
-  buildWalkthroughContextPrompt,
   type ReviewContext,
 } from "../src/llm/context.ts";
 
@@ -71,36 +71,32 @@ const SAMPLE_CONTEXT: ReviewContext = {
     },
   },
   clippyDiagnostics: [],
+  cohorts: [
+    {
+      id: "cohort-01-components-raftstore-src",
+      label: "components/raftstore/src",
+      filePaths: ["components/raftstore/src/lib.rs"],
+    },
+  ],
 };
 
 describe("Review context prompt builders", () => {
-  test("buildReviewContextPrompt puts high-risk prod files in Tier 1 and test files in Tier 2", () => {
+  test("buildReviewContextPrompt emits compact orchestrator index without duplicating inline diff hunks", () => {
     const prompt = buildReviewContextPrompt(SAMPLE_CONTEXT);
-    expect(prompt).toContain("Tier 1: Primary High-Risk Rust Diff Hunks");
-    expect(prompt).toContain("components/raftstore/src/lib.rs");
-    expect(prompt).toContain("Tier 2: Secondary & Test Files");
-    expect(prompt).toContain("components/raftstore/tests/integration_test.rs");
-  });
-
-  test("buildWalkthroughContextPrompt includes crate layers and PR metadata", () => {
-    const prompt = buildWalkthroughContextPrompt(SAMPLE_CONTEXT);
     expect(prompt).toContain("PR #42");
     expect(prompt).toContain("Layer 0 | crate: raftstore");
+    expect(prompt).toContain("Review Cohorts (Full Untruncated Diff Packets");
+    expect(prompt).toContain("components/raftstore/src/lib.rs");
+    expect(prompt).toContain("Test & Benchmark Files Modified");
+    expect(prompt).toContain("components/raftstore/tests/integration_test.rs");
+    expect(prompt).not.toContain("let guard = mutex.lock().unwrap();");
   });
 
-  test("buildReviewContextPrompt omits redundant Tier 1 inline diff hunks when cohort packets are present", () => {
-    const promptWithCohorts = buildReviewContextPrompt({
-      ...SAMPLE_CONTEXT,
-      cohorts: [
-        {
-          id: "peer-cohort-01-components-raftstore-src",
-          label: "1/1: components/raftstore/src",
-          filePaths: ["components/raftstore/src/lib.rs"],
-        },
-      ],
-    });
-    expect(promptWithCohorts).toContain("Review Cohorts (Full Untruncated Diff Packets");
-    expect(promptWithCohorts).not.toContain("Tier 1: Primary High-Risk Rust Diff Hunks");
-    expect(promptWithCohorts).not.toContain("let guard = mutex.lock().unwrap();");
+  test("buildCohortContextPrompt emits untruncated diff hunks for the cohort", () => {
+    const cohort = SAMPLE_CONTEXT.cohorts?.[0];
+    if (!cohort) throw new Error("Expected cohort");
+    const packet = buildCohortContextPrompt(SAMPLE_CONTEXT, cohort);
+    expect(packet).toContain("Review Cohort Packet: `cohort-01-components-raftstore-src`");
+    expect(packet).toContain("L0011 (+):     let guard = mutex.lock().unwrap();");
   });
 });
