@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { analyzeRustSourceAst, isLineInRegions, type RustAstAnalysis } from "./ast.ts";
 import type { DiffFileMap } from "./models.ts";
 
 export type RustSymbolKind = "fn" | "struct" | "enum" | "trait";
@@ -151,18 +153,86 @@ function isTestPath(filePath: string): boolean {
   );
 }
 
-// Why: Instead of vector embeddings (which retrieve fuzzy text chunks and miss
-// exact callers) or letting the LLM burn 20+ grep tool calls discovering who calls
-// a modified function, we run a single batch `git grep -n -w` over `*.rs` in the
-// checked-out repository to build an exact cross-workspace Call-Site & Reference
-// Graph in <50ms. This immediately surfaces 0-caller dead methods (e.g. a
-// state-reset method that is never invoked in production) and cross-crate callers.
+export async function extractModifiedRustSymbolsWithAst(
+  repoRoot: string,
+  diffMap: Readonly<Record<string, DiffFileMap>>,
+  maxSymbols = 24,
+): Promise<{
+  symbols: ModifiedRustSymbol[];
+  astByFile: Map<string, RustAstAnalysis>;
+}> {
+  const all: ModifiedRustSymbol[] = [];
+  const seenGlobal = new Set<string>();
+  const astByFile = new Map<string, RustAstAnalysis>();
+
+  for (const fileMap of Object.values(diffMap)) {
+    if (!fileMap.filePath.endsWith(".rs")) {
+      continue;
+    }
+
+    const diskFile = Bun.file(join(repoRoot, fileMap.filePath));
+    let fileSymbols: ModifiedRustSymbol[] = [];
+
+    if (await diskFile.exists()) {
+      try {
+        const source = await diskFile.text();
+        const ast = await analyzeRustSourceAst(source);
+        astByFile.set(fileMap.filePath, ast);
+
+        for (const sym of ast.symbols) {
+          if (sym.isTest || IGNORED_COMMON_RUST_NAMES.has(sym.name) || sym.name.length < 4) {
+            continue;
+          }
+          const overlapsHunk = fileMap.hunks.some(
+            (h) => sym.startLine <= h.newEnd && sym.endLine >= h.newStart,
+          );
+          if (overlapsHunk) {
+            fileSymbols.push({
+              name: sym.name,
+              kind: sym.kind,
+              filePath: fileMap.filePath,
+              line: sym.startLine,
+              isPublic: sym.isPublic,
+            });
+          }
+        }
+      } catch {
+        fileSymbols = extractSymbolsFromFileMap(fileMap);
+      }
+    } else {
+      fileSymbols = extractSymbolsFromFileMap(fileMap);
+    }
+
+    for (const sym of fileSymbols) {
+      const key = symbolKey(sym.filePath, sym.name);
+      if (seenGlobal.has(key)) {
+        continue;
+      }
+      seenGlobal.add(key);
+      all.push(sym);
+      if (all.length >= maxSymbols) {
+        return { symbols: all, astByFile };
+      }
+    }
+  }
+
+  return { symbols: all, astByFile };
+}
+
+// Why: Combining `tree-sitter-rust` AST symbol extraction with a single batch
+// `git grep -n -w` over `*.rs` catches methods whose `fn` line is outside a
+// diff hunk and classifies inline `#[cfg(test)]` callers inside `src/*.rs` as
+// test references rather than production callers.
 export async function buildRustSymbolGraph(
   repoRoot: string,
   diffMap: Readonly<Record<string, DiffFileMap>>,
   maxSymbols = 24,
 ): Promise<RustSymbolGraph> {
-  const symbols = extractModifiedRustSymbols(diffMap, maxSymbols);
+  const { symbols, astByFile } = await extractModifiedRustSymbolsWithAst(
+    repoRoot,
+    diffMap,
+    maxSymbols,
+  );
   if (symbols.length === 0) {
     return { nodes: [] };
   }
@@ -220,6 +290,9 @@ export async function buildRustSymbolGraph(
         continue;
       }
 
+      const fileAst = astByFile.get(filePath);
+      const isInlineTestRef = fileAst ? isLineInRegions(lineNo, fileAst.testRegions) : false;
+
       for (const { sym, key, wordRegex, declRegex } of compiledBySymbol) {
         if (filePath === sym.filePath && Math.abs(lineNo - sym.line) <= 1) {
           continue;
@@ -236,7 +309,7 @@ export async function buildRustSymbolGraph(
           line: lineNo,
           snippet: snippet.slice(0, 100),
         };
-        if (isTestPath(filePath)) {
+        if (isTestPath(filePath) || isInlineTestRef) {
           testByKey.get(key)?.push(ref);
         } else {
           prodByKey.get(key)?.push(ref);
