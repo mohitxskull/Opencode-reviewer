@@ -43,6 +43,23 @@ export const PeerConfigRuleSchema = z
   })
   .strict();
 
+export const PeerDetectorModeSchema = z.enum(["error", "warn", "off"]);
+export type PeerDetectorMode = z.infer<typeof PeerDetectorModeSchema>;
+
+export const PeerDetectorsConfigSchema = z
+  .object({
+    unsafe: PeerDetectorModeSchema.default("error"),
+    panic: PeerDetectorModeSchema.default("warn"),
+  })
+  .strict();
+
+export const PeerTimeoutsConfigSchema = z
+  .object({
+    analyzer_secs: z.number().int().min(10).default(300),
+    verifier_secs: z.number().int().min(10).default(120),
+  })
+  .strict();
+
 export const PeerConfigSchema = z
   .object({
     profile: ReviewProfileSchema.default("assertive"),
@@ -54,6 +71,14 @@ export const PeerConfigSchema = z
       semver: false,
       coverage: false,
       miri: false,
+    }),
+    detectors: PeerDetectorsConfigSchema.default({
+      unsafe: "error",
+      panic: "warn",
+    }),
+    timeouts: PeerTimeoutsConfigSchema.default({
+      analyzer_secs: 300,
+      verifier_secs: 120,
     }),
     diff: PeerDiffConfigSchema.default({ ignore: [] }),
     publish: PeerPublishConfigSchema.default({ mode: "draft" }),
@@ -82,6 +107,15 @@ geiger = false     # unsafe-code surface audit
 semver = false     # breaking public API check against PR base
 coverage = false   # changed-line coverage via cargo-llvm-cov
 miri = false       # AST-gated UB check (runs only when diff touches unsafe)
+
+[detectors]
+# Built-in Tree-sitter AST detectors: "error" (Major) | "warn" (Minor) | "off"
+unsafe = "error"
+panic = "warn"
+
+[timeouts]
+analyzer_secs = 300  # timeout per Cargo analyzer (clippy, miri, llvm-cov, etc.)
+verifier_secs = 120  # timeout per suggestion cargo check
 
 [diff]
 # Extra glob patterns to exclude from review (in addition to docs/, .github/, *.md, *.lock)

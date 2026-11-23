@@ -59,6 +59,11 @@ export const PeerRustReviewerPlugin: Plugin = async ({ directory }) => ({
         if (args.tools) cliArgs.push("--tools", args.tools);
         if (args.strict) cliArgs.push("--strict");
         const res = await runPeer(cliArgs, directory);
+        if (res.exitCode >= 2) {
+          throw new Error(
+            res.stderr.trim() || res.stdout.trim() || `peer check failed (exit ${res.exitCode})`,
+          );
+        }
         return res.stdout.trim() || res.stderr.trim();
       },
     }),

@@ -30,7 +30,7 @@ export function runPromptCommand(
   const content = PROMPTS[name];
   if (!content) {
     writeErr(`Unknown prompt "${name}". Available: ${validNames.join(", ")}`);
-    return 1;
+    return 2;
   }
 
   writeOut(content);

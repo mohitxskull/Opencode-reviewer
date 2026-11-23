@@ -299,7 +299,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
           ? buildRustSymbolGraph(repoRoot, diffMap)
           : Promise.resolve({ nodes: [] }),
         modifiedFiles.size > 0
-          ? collectAstDeterministicFindings(repoRoot, diffMap)
+          ? collectAstDeterministicFindings(repoRoot, diffMap, peerConfig.detectors)
           : Promise.resolve([]),
       ]);
 

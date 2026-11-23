@@ -13,7 +13,7 @@ export async function runInitCommand(
 
   if ((await file.exists()) && !options.fresh) {
     writeErr(`Error: ${targetPath} already exists. Pass --fresh to overwrite.`);
-    return 1;
+    return 2;
   }
 
   await Bun.write(targetPath, DEFAULT_PEER_TOML_TEMPLATE);

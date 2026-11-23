@@ -10,8 +10,10 @@ import {
   type ReviewBundle,
   type RunManifest,
   RunManifestSchema,
+  type ToolOutcome,
 } from "../domain/models.ts";
 import { renderCombinedLocalReviewMarkdown, renderWalkthroughComment } from "../render/markdown.ts";
+import { renderReviewTodoMarkdown } from "../render/todo.ts";
 import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir } from "./git.ts";
 
 export interface WriteArtifactsMeta {
@@ -21,6 +23,7 @@ export interface WriteArtifactsMeta {
   readonly latestStage?: PipelineStage;
   readonly enabledTools?: readonly string[];
   readonly skippedTools?: readonly string[];
+  readonly toolOutcomes?: Readonly<Record<string, ToolOutcome>>;
   readonly configHash?: string;
   readonly symbolGraph?: RustSymbolGraph;
   readonly promptContextMd?: string;
@@ -50,6 +53,7 @@ function buildRunManifest(bundle: ReviewBundle, meta: WriteArtifactsMeta): RunMa
     latestStage: meta.latestStage ?? "review",
     enabledTools: meta.enabledTools ?? [],
     skippedTools: meta.skippedTools ?? [],
+    toolOutcomes: meta.toolOutcomes ?? {},
     failedCohorts,
     inlineFindingsCount: bundle.findings.length,
     outsideDiffFindingsCount: bundle.outsideDiffFindings?.length ?? 0,
@@ -139,6 +143,7 @@ export async function writeReviewStageArtifacts(
 
   const walkthroughMd = renderWalkthroughComment(bundle);
   const reportMd = renderCombinedLocalReviewMarkdown(bundle);
+  const todoMd = renderReviewTodoMarkdown(bundle);
   const manifest = buildRunManifest(bundle, {
     ...meta,
     completedStages: ["analyze", "review"],
@@ -150,6 +155,7 @@ export async function writeReviewStageArtifacts(
     Bun.write(join(stageDir, "walkthrough.md"), walkthroughMd),
     Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
     Bun.write(join(commitDir, "review.md"), reportMd),
+    Bun.write(join(commitDir, "todo.md"), todoMd),
     Bun.write(join(commitDir, "run.json"), JSON.stringify(manifest, null, 2)),
   ]);
 
@@ -171,6 +177,7 @@ export async function writeVerifyStageArtifacts(
   await mkdir(stageDir, { recursive: true });
 
   const reportMd = renderCombinedLocalReviewMarkdown(bundle);
+  const todoMd = renderReviewTodoMarkdown(bundle);
   const manifest = buildRunManifest(bundle, {
     ...meta,
     completedStages: ["analyze", "review", "verify"],
@@ -179,6 +186,7 @@ export async function writeVerifyStageArtifacts(
 
   await Promise.all([
     Bun.write(join(stageDir, "report.md"), reportMd),
+    Bun.write(join(commitDir, "todo.md"), todoMd),
     Bun.write(join(stageDir, "skeptic.json"), JSON.stringify(skepticSummary, null, 2)),
     Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
     Bun.write(join(commitDir, "review.md"), reportMd),

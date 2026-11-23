@@ -42,9 +42,13 @@ export interface CheckGateInput {
   readonly sarifPath?: string;
   readonly updateBaseline?: boolean;
   readonly strict?: boolean;
+  readonly allFiles?: boolean;
+  readonly staged?: boolean;
   readonly writeOut: (text: string) => void;
   readonly writeErr: (text: string) => void;
 }
+
+const GIT_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 function resolveLocalBaseSha(repoRoot: string, explicitBase?: string): string {
   const candidates = explicitBase ? [explicitBase] : ["main", "master", "HEAD~1"];
@@ -68,11 +72,13 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     sarifPath,
     updateBaseline = false,
     strict = false,
+    allFiles = false,
+    staged = false,
     writeOut,
   } = input;
 
-  const baseSha = resolveLocalBaseSha(repoRoot, baseRef);
   const headSha = runGitSync(repoRoot, ["rev-parse", "HEAD"]);
+  const baseSha = allFiles || staged ? headSha : resolveLocalBaseSha(repoRoot, baseRef);
   const peerConfig = await loadPeerConfig(repoRoot, baseSha);
   const profile: ReviewProfile = profileOverride ?? peerConfig.profile;
 
@@ -83,13 +89,22 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     }
   }
 
-  // If HEAD === baseSha, diff against working tree so `peer check` works on uncommitted edits too
-  const diffArgs =
-    baseSha === headSha
-      ? ["diff", "--no-color", "--unified=3", baseSha]
-      : ["diff", "--no-color", "--unified=3", `${baseSha}...HEAD`];
+  // Support --all-files (diff against Git empty tree), --staged (pre-commit), or base...HEAD
+  const diffArgs = allFiles
+    ? ["diff", "--no-color", "--unified=3", GIT_EMPTY_TREE_SHA, "HEAD"]
+    : staged
+      ? ["diff", "--no-color", "--unified=3", "--cached"]
+      : baseSha === headSha
+        ? ["diff", "--no-color", "--unified=3", baseSha]
+        : ["diff", "--no-color", "--unified=3", `${baseSha}...HEAD`];
   const diffAttempt = tryGitRawSync(repoRoot, diffArgs);
-  const diffText = diffAttempt.ok ? diffAttempt.stdout : "";
+  if (!diffAttempt.ok) {
+    throw new Error(
+      `git ${diffArgs.join(" ")} failed: ${diffAttempt.stderr.trim() || "unable to compute merge-base diff"}. ` +
+        `If running in CI with a shallow clone, configure actions/checkout with \`fetch-depth: 0\` or run \`git fetch --unshallow\`.`,
+    );
+  }
+  const diffText = diffAttempt.stdout;
 
   const rawDiffMap = parseUnifiedDiff(diffText);
   const diffMap = filterCodeOnlyDiffMap(rawDiffMap, peerConfig.diff.ignore);
@@ -135,7 +150,7 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
       runAuditWithPolicy(),
       runDenyWithPolicy(),
       modifiedFiles.size > 0
-        ? collectAstDeterministicFindings(repoRoot, diffMap)
+        ? collectAstDeterministicFindings(repoRoot, diffMap, peerConfig.detectors)
         : Promise.resolve([]),
     ]);
 
@@ -161,11 +176,11 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
       filePath,
       startLine: 1,
       endLine: 1,
-      severity: "Major",
+      severity: "Info",
       type: "Security",
       epistemicState: "NEEDS-RUNTIME-VERIFICATION",
       evidenceMechanism: "Security",
-      title: `Sensitive build/toolchain/CI file modified: \`${filePath}\``,
+      title: `Sensitive file modified (needs human review): \`${filePath}\``,
       body: `Security-sensitive file \`${filePath}\` was modified.`,
       rootCause: `Modification to sensitive configuration file ${filePath}`,
       blastRadius: "Build pipeline / toolchain / CI security boundary",

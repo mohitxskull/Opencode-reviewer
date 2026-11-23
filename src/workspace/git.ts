@@ -131,7 +131,7 @@ export function tryGitSync(
 export function tryGitRawSync(
   repoRoot: string,
   args: readonly string[],
-): { ok: boolean; stdout: string } {
+): { ok: boolean; stdout: string; stderr: string } {
   const proc = Bun.spawnSync(["git", ...args], {
     cwd: repoRoot,
     stdout: "pipe",
@@ -140,6 +140,7 @@ export function tryGitRawSync(
   return {
     ok: proc.exitCode === 0,
     stdout: proc.stdout.toString(),
+    stderr: proc.stderr.toString(),
   };
 }
 

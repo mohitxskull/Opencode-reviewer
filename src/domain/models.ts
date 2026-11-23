@@ -5,13 +5,19 @@ import packageJson from "../../package.json";
 export class AnalyzerExecutionError extends Error {
   readonly tool: string;
   readonly exitCode: number;
+  readonly timedOut: boolean;
 
-  constructor(tool: string, exitCode: number, stderr: string) {
+  constructor(tool: string, exitCode: number, stderr: string, timedOut = false) {
     const snippet = stderr.trim().slice(0, 400) || "(no stderr)";
-    super(`\`${tool}\` exited with code ${exitCode} without valid output: ${snippet}`);
+    super(
+      timedOut
+        ? `\`${tool}\` timed out: ${snippet}`
+        : `\`${tool}\` exited with code ${exitCode} without valid output: ${snippet}`,
+    );
     this.name = "AnalyzerExecutionError";
     this.tool = tool;
     this.exitCode = exitCode;
+    this.timedOut = timedOut;
   }
 }
 
@@ -289,6 +295,9 @@ export const PEER_VERSION: string = packageJson.version;
 export const PipelineStageSchema = z.enum(["analyze", "review", "verify", "publish"]);
 export type PipelineStage = z.infer<typeof PipelineStageSchema>;
 
+export const ToolOutcomeSchema = z.enum(["ok", "skipped", "failed", "timed_out"]);
+export type ToolOutcome = z.infer<typeof ToolOutcomeSchema>;
+
 export const RunManifestSchema = z.object({
   prNumber: z.number().int().min(1),
   headSha: z.string().min(7),
@@ -304,6 +313,7 @@ export const RunManifestSchema = z.object({
   latestStage: PipelineStageSchema.default("review"),
   enabledTools: z.array(z.string()).default([]),
   skippedTools: z.array(z.string()).default([]),
+  toolOutcomes: z.record(z.string(), ToolOutcomeSchema).default({}),
   failedCohorts: z.array(z.string()).default([]),
   inlineFindingsCount: z.number().int().min(0),
   outsideDiffFindingsCount: z.number().int().min(0),
@@ -379,11 +389,20 @@ export function allowsFindingForProfile(
 }
 
 export function computeFindingFingerprint(
-  finding: Pick<Finding, "filePath" | "type" | "title" | "rootCause">,
+  finding: Pick<Finding, "filePath" | "type" | "title" | "rootCause"> & {
+    readonly symbol?: string;
+    readonly snippet?: string;
+  },
 ): string {
   const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
-  const payload = `${finding.filePath}\n${finding.type}\n${norm(finding.rootCause || finding.title)}`;
-  return new Bun.CryptoHasher("sha256").update(payload).digest("hex").slice(0, 12);
+  const parts = [
+    finding.filePath.replace(/\\/g, "/").replace(/^\.\//, ""),
+    finding.type.toLowerCase(),
+    finding.symbol ? norm(finding.symbol) : "",
+    finding.snippet ? finding.snippet.replace(/\s+/g, " ").trim() : "",
+    norm(finding.rootCause || finding.title),
+  ].filter(Boolean);
+  return new Bun.CryptoHasher("sha256").update(parts.join("\n")).digest("hex").slice(0, 12);
 }
 
 export function isValidInlineRange(

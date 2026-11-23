@@ -1,4 +1,9 @@
-import { type Finding, PEER_VERSION, type Severity } from "../domain/models.ts";
+import {
+  computeFindingFingerprint,
+  type Finding,
+  PEER_VERSION,
+  type Severity,
+} from "../domain/models.ts";
 
 function severityToSarifLevel(severity: Severity): "error" | "warning" | "note" {
   switch (severity) {
@@ -44,7 +49,7 @@ export function renderSarifReport(findings: readonly Finding[], version = PEER_V
         },
       ],
       partialFingerprints: {
-        primaryLocationLineHash: f.id,
+        primaryLocationLineHash: computeFindingFingerprint(f),
       },
     };
   });

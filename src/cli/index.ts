@@ -69,6 +69,8 @@ Options:
   --profile <profile>        Strictness profile: quiet | chill | assertive (default: assertive)
   --tools <list|all>         Optional Cargo analyzers: deny,geiger,semver,coverage,miri or all
   --base <ref>               For 'check': base git ref to diff against (default: main -> master -> HEAD~1)
+  --all-files                For 'check': scan entire repository (diff against empty tree)
+  --staged                   For 'check': scan staged changes only (pre-commit mode)
   --sarif <path>             For 'check': write SARIF 2.1.0 report to file
   --update-baseline          For 'check': record current findings into .peer/baseline.json
   --from <file|dir>          For 'finalize': agent review file or directory of cohort review .md files
@@ -132,6 +134,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         profile: { type: "string" },
         tools: { type: "string" },
         base: { type: "string" },
+        "all-files": { type: "boolean", default: false },
+        staged: { type: "boolean", default: false },
         sarif: { type: "string" },
         "update-baseline": { type: "boolean", default: false },
         from: { type: "string" },
@@ -174,6 +178,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         sarifPath: parsed.values.sarif,
         updateBaseline: parsed.values["update-baseline"] ?? false,
         strict: parsed.values.strict ?? false,
+        allFiles: parsed.values["all-files"] ?? false,
+        staged: parsed.values.staged ?? false,
         writeOut,
         writeErr,
       });
@@ -223,20 +229,20 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     if (submitReview && command !== "publish") {
       writeErr("Error: --submit is only valid with `peer publish`.");
-      return 1;
+      return 2;
     }
 
     const finalizeStage = (parsed.values.stage ?? "review") as "review" | "verify";
     if (command === "finalize") {
       if (!parsed.values.from && !parsed.values.verdicts) {
         writeErr(
-          "Error: `peer finalize` requires `--from <file>` or `--verdicts <file>` with the agent's review output.",
+          "Error: `peer finalize` requires `--from <file|dir>` or `--verdicts <file>` with the agent's review output.",
         );
-        return 1;
+        return 2;
       }
       if (finalizeStage !== "review" && finalizeStage !== "verify") {
         writeErr("Error: --stage must be `review` or `verify`.");
-        return 1;
+        return 2;
       }
     }
 
@@ -440,7 +446,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     return 0;
   } catch (err) {
     writeErr(`Error: ${err instanceof Error ? err.message : String(err)}`);
-    return 1;
+    return 2;
   }
 }
 

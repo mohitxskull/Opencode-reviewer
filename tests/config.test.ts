@@ -157,7 +157,7 @@ rule = "Never hold std::sync::Mutex across .await"
       stdout: (t) => out.push(t),
       stderr: (t) => err.push(t),
     });
-    expect(code2).toBe(1);
+    expect(code2).toBe(2);
     expect(err.join("\n")).toContain("already exists");
 
     // Second run with --fresh succeeds

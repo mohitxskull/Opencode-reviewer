@@ -1,6 +1,7 @@
 import { dirname, relative } from "node:path";
 
 import {
+  AnalyzerExecutionError,
   type ClippyDiagnostic,
   ClippyDiagnosticSchema,
   type CrateGraph,
@@ -60,20 +61,33 @@ interface CargoMetadataPayload {
   workspace_root: string;
 }
 
-export async function collectCrateGraph(repoRoot: string): Promise<CrateGraph> {
-  const { stdout: stdoutText, exitCode } = await runTrackedCommand(
-    ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-    {
-      cwd: repoRoot,
-      env: buildScrubbedCargoEnv(),
-    },
-  );
-
-  if (exitCode !== 0) {
+export async function collectCrateGraph(
+  repoRoot: string,
+  options: { timeoutMs?: number } = {},
+): Promise<CrateGraph> {
+  if (!(await Bun.file(`${repoRoot}/Cargo.toml`).exists())) {
     return CrateGraphSchema.parse({
       crates: {},
       testLayer: 1,
     });
+  }
+
+  const {
+    stdout: stdoutText,
+    stderr: stderrText,
+    exitCode,
+    timedOut,
+  } = await runTrackedCommand(["cargo", "metadata", "--format-version", "1", "--no-deps"], {
+    cwd: repoRoot,
+    env: buildScrubbedCargoEnv(),
+    timeoutMs: options.timeoutMs,
+  });
+
+  if (timedOut) {
+    throw new AnalyzerExecutionError("cargo metadata", exitCode, stderrText, true);
+  }
+  if (exitCode !== 0) {
+    throw new AnalyzerExecutionError("cargo metadata", exitCode, stderrText);
   }
 
   const payload = JSON.parse(stdoutText) as CargoMetadataPayload;
@@ -301,6 +315,7 @@ export async function collectClippyDiagnostics(
   repoRoot: string,
   modifiedFiles: ReadonlySet<string>,
   diffMap?: Readonly<Record<string, DiffFileMap>>,
+  options: { timeoutMs?: number } = {},
 ): Promise<ClippyDiagnostic[]> {
   if (modifiedFiles.size === 0) {
     return [];
@@ -310,13 +325,19 @@ export async function collectClippyDiagnostics(
     stdout: stdoutText,
     stderr: stderrText,
     exitCode,
+    timedOut,
   } = await runTrackedCommand(
     ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json"],
     {
       cwd: repoRoot,
       env: buildScrubbedCargoEnv(),
+      timeoutMs: options.timeoutMs,
     },
   );
+
+  if (timedOut) {
+    throw new AnalyzerExecutionError("cargo clippy", exitCode, stderrText, true);
+  }
 
   const parsedLines = parseJsonlObjects<CargoJsonLine>(stdoutText);
   const diagnostics: ClippyDiagnostic[] = [];

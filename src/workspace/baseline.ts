@@ -14,7 +14,7 @@ export class CorruptBaselineError extends Error {
 }
 
 export const PeerBaselineSchema = z.object({
-  version: z.literal(1).default(1),
+  version: z.literal(2).default(2),
   updatedAt: z.string(),
   fingerprints: z.array(z.string().min(1)).default([]),
 });
@@ -80,7 +80,7 @@ export async function saveBaselineFingerprints(
   await mkdir(join(repoRoot, ".peer"), { recursive: true });
   const fingerprints = Array.from(new Set(findings.map(findingBaselineKey))).sort();
   const payload: PeerBaseline = {
-    version: 1,
+    version: 2,
     updatedAt: new Date().toISOString(),
     fingerprints,
   };

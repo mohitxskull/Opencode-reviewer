@@ -34,10 +34,38 @@ function hasSafetyCommentAbove(lines: readonly string[], startLine: number): boo
   return false;
 }
 
+function hasInlineAllowSuppression(
+  lines: readonly string[],
+  lineNo: number,
+  detector: "unsafe" | "panic",
+): boolean {
+  // Check the target line and up to 2 lines immediately above for `// peer:allow(<detector>): <reason>`
+  const fromIdx = Math.max(0, lineNo - 3);
+  const toIdx = Math.min(lines.length - 1, lineNo - 1);
+  const pattern = new RegExp(`//\\s*peer:allow\\s*\\(\\s*${detector}\\s*\\)\\s*:\\s*\\S`, "i");
+  for (let i = fromIdx; i <= toIdx; i++) {
+    if (pattern.test(lines[i] ?? "")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export interface AstDetectorOptions {
+  readonly unsafe?: "error" | "warn" | "off";
+  readonly panic?: "error" | "warn" | "off";
+}
+
 export async function collectAstDeterministicFindings(
   repoRoot: string,
   diffMap: Readonly<Record<string, DiffFileMap>>,
+  options: AstDetectorOptions = {},
 ): Promise<Finding[]> {
+  const unsafeMode = options.unsafe ?? "error";
+  const panicMode = options.panic ?? "warn";
+  if (unsafeMode === "off" && panicMode === "off") {
+    return [];
+  }
   const findings: Finding[] = [];
 
   for (const [relPath, fileMap] of Object.entries(diffMap)) {
@@ -63,47 +91,80 @@ export async function collectAstDeterministicFindings(
       continue;
     }
 
+    const nonTestSymbols = ast.symbols.filter((s) => !s.isTest);
+    const findEnclosingSymbol = (lineNo: number, onlyFns = false): string | null => {
+      let best: (typeof nonTestSymbols)[number] | null = null;
+      for (const sym of nonTestSymbols) {
+        if (onlyFns && sym.kind !== "fn") {
+          continue;
+        }
+        if (lineNo >= sym.startLine && lineNo <= sym.endLine) {
+          if (!best || sym.endLine - sym.startLine < best.endLine - best.startLine) {
+            best = sym;
+          }
+        }
+      }
+      return best?.name ?? null;
+    };
+
     // 1. Detect newly added `unsafe` blocks/fns/impls without a `// SAFETY:` comment
-    for (const region of ast.unsafeRegions) {
-      if (!addedLines.has(region.startLine) || isLineInRegions(region.startLine, ast.testRegions)) {
-        continue;
-      }
-      if (hasSafetyCommentAbove(lines, region.startLine)) {
-        continue;
-      }
-      const title = "New `unsafe` block/item without `// SAFETY:` invariant comment";
-      const rootCause = `Undocumented unsafe region at ${relPath}:${region.startLine}`;
-      const fp = computeFindingFingerprint({
-        filePath: relPath,
-        type: "Soundness",
-        title,
-        rootCause,
-      });
-      findings.push(
-        FindingSchema.parse({
-          id: `audit-ast-unsafe-${fp}`,
+    if (unsafeMode !== "off") {
+      for (const region of ast.unsafeRegions) {
+        if (
+          !addedLines.has(region.startLine) ||
+          isLineInRegions(region.startLine, ast.testRegions)
+        ) {
+          continue;
+        }
+        if (
+          hasSafetyCommentAbove(lines, region.startLine) ||
+          hasInlineAllowSuppression(lines, region.startLine, "unsafe")
+        ) {
+          continue;
+        }
+        const enclosingSym = findEnclosingSymbol(region.startLine) ?? "module";
+        const snippet = (lines[region.startLine - 1] ?? "").trim();
+        const title = "New `unsafe` block/item without `// SAFETY:` invariant comment";
+        // Why: Omit line numbers from rootCause so edits above this block do not break baseline fingerprints
+        const rootCause = `Undocumented unsafe region in ${relPath}::${enclosingSym}`;
+        const fp = computeFindingFingerprint({
           filePath: relPath,
-          startLine: region.startLine,
-          endLine: region.startLine,
-          severity: "Major",
           type: "Soundness",
-          epistemicState: "VERIFIED-DEFECT",
-          evidenceMechanism: "Security",
           title,
-          body: `Added \`unsafe\` code at \`${relPath}:${region.startLine}\` has no preceding \`// SAFETY:\` comment proving why its soundness invariants hold.`,
           rootCause,
-          blastRadius: "Memory safety / Undefined Behavior boundary",
-          reversible: true,
-          dependsOn: null,
-          verificationCommand: "cargo clippy --workspace --all-targets",
-          traceability: `tree-sitter AST unsafe detector (${relPath}:${region.startLine})`,
-          suggestion: null,
-          suggestionVerified: false,
-          agentPrompt: `Add a concrete \`// SAFETY:\` comment directly above \`${relPath}:${region.startLine}\` proving every precondition required by the \`unsafe\` operation, or replace it with safe Rust.`,
-          confidence: 1.0,
-          source: "audit",
-        }),
-      );
+          symbol: enclosingSym,
+          snippet,
+        });
+        findings.push(
+          FindingSchema.parse({
+            id: `audit-ast-unsafe-${fp}`,
+            filePath: relPath,
+            startLine: region.startLine,
+            endLine: region.startLine,
+            severity: unsafeMode === "warn" ? "Minor" : "Major",
+            type: "Soundness",
+            epistemicState: "VERIFIED-DEFECT",
+            evidenceMechanism: "Security",
+            title,
+            body: `Added \`unsafe\` code at \`${relPath}:${region.startLine}\` has no preceding \`// SAFETY:\` comment proving why its soundness invariants hold.`,
+            rootCause,
+            blastRadius: "Memory safety / Undefined Behavior boundary",
+            reversible: true,
+            dependsOn: null,
+            verificationCommand: "cargo clippy --workspace --all-targets",
+            traceability: `tree-sitter AST unsafe detector (${relPath}:${region.startLine})`,
+            suggestion: null,
+            suggestionVerified: false,
+            agentPrompt: `Add a concrete \`// SAFETY:\` comment directly above \`${relPath}:${region.startLine}\` proving every precondition required by the \`unsafe\` operation, or replace it with safe Rust.`,
+            confidence: 1.0,
+            source: "audit",
+          }),
+        );
+      }
+    }
+
+    if (panicMode === "off") {
+      continue;
     }
 
     // 2. Detect newly added production panic paths (.unwrap/.expect/panic!/todo!/unimplemented!)
@@ -125,7 +186,8 @@ export async function collectAstDeterministicFindings(
       if (
         call.isTest ||
         !addedLines.has(call.line) ||
-        isLineInRegions(call.line, ast.testRegions)
+        isLineInRegions(call.line, ast.testRegions) ||
+        hasInlineAllowSuppression(lines, call.line, "panic")
       ) {
         continue;
       }
@@ -175,17 +237,21 @@ export async function collectAstDeterministicFindings(
       const lineList = group.hits.map((h) => `L${h.lineNo}`).join(", ");
       const isMulti = group.hits.length > 1;
 
+      const firstSnippet = (lines[first.lineNo - 1] ?? "").trim();
+      const scopeLabel = group.fnName ?? "module";
       const title = isMulti
         ? `${group.hits.length} production panic calls (${uniqueOps.join(", ")}) introduced${group.fnName ? ` in \`${group.fnName}\`` : ""}`
         : `Production panic call \`${first.matchedOp}\` introduced`;
       const rootCause = isMulti
-        ? `Unchecked panic operations (${group.hits.map((h) => h.matchedOp).join(", ")}) in production path ${relPath}${group.fnName ? `::${group.fnName}` : ""}`
-        : `Unchecked panic operation ${first.matchedOp} in production path ${relPath}`;
+        ? `Unchecked panic operations (${group.hits.map((h) => h.matchedOp).join(", ")}) in ${relPath}::${scopeLabel}`
+        : `Unchecked panic operation ${first.matchedOp} in ${relPath}::${scopeLabel} (${firstSnippet})`;
       const fp = computeFindingFingerprint({
         filePath: relPath,
         type: "Bug",
         title,
         rootCause,
+        symbol: scopeLabel,
+        snippet: firstSnippet,
       });
 
       findings.push(
@@ -194,7 +260,7 @@ export async function collectAstDeterministicFindings(
           filePath: relPath,
           startLine: first.lineNo,
           endLine: first.lineNo,
-          severity: hasStubMacro ? "Major" : "Minor",
+          severity: panicMode === "error" || hasStubMacro ? "Major" : "Minor",
           type: "Bug",
           epistemicState: "VERIFIED-DEFECT",
           evidenceMechanism: "Correctness",

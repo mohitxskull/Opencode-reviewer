@@ -310,7 +310,7 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
       stderr: (text) => stderrChunks.push(text),
     });
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(2);
     expect(networkCalled).toBe(false);
     expect(stderrChunks.join("\n")).toContain("src/lib.rs");
     expect(runGit(repoDir, ["rev-parse", "HEAD"])).toBe(baseSha);
@@ -330,7 +330,7 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
       stdout: (t) => out.push(t),
       stderr: (t) => err.push(t),
     });
-    expect(badSubmitCode).toBe(1);
+    expect(badSubmitCode).toBe(2);
     expect(err.join("\n")).toContain("--submit is only valid with `peer publish`");
 
     err.length = 0;
@@ -338,8 +338,8 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
       stdout: (t) => out.push(t),
       stderr: (t) => err.push(t),
     });
-    expect(missingFromCode).toBe(1);
-    expect(err.join("\n")).toContain("requires `--from <file>`");
+    expect(missingFromCode).toBe(2);
+    expect(err.join("\n")).toContain("requires `--from <file|dir>`");
 
     out.length = 0;
     const addCode = await runCli(
@@ -396,7 +396,7 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     const badPromptCode = await runCli(["prompt", "nonexistent"], {
       stderr: (t) => err.push(t),
     });
-    expect(badPromptCode).toBe(1);
+    expect(badPromptCode).toBe(2);
     expect(err.join("\n")).toContain('Unknown prompt "nonexistent"');
   });
 });

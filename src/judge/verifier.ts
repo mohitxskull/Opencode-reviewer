@@ -8,6 +8,7 @@ import { type CrateGraph, type Finding, FindingSchema } from "../domain/models.t
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
 import { parseJsonlObjects } from "../infra/jsonl.ts";
 import { registerSignalCleanup } from "../infra/lifecycle.ts";
+import { DEFAULT_VERIFIER_TIMEOUT_MS, runTrackedCommand } from "../infra/process.ts";
 import type { AuditLogger } from "../workspace/audit-log.ts";
 
 export interface CargoCheckResult {
@@ -24,36 +25,30 @@ export type CargoCheckRunner = (
 async function defaultCargoCheckRunner(
   repoRoot: string,
   packageName?: string,
+  timeoutMs = DEFAULT_VERIFIER_TIMEOUT_MS,
 ): Promise<CargoCheckResult> {
   const args = packageName
     ? ["cargo", "check", "-p", packageName, "--all-targets", "--message-format=json"]
     : ["cargo", "check", "--workspace", "--all-targets", "--message-format=json"];
-  const proc = Bun.spawn(args, {
+
+  const {
+    stdout: stdoutText,
+    stderr: stderrText,
+    exitCode,
+    timedOut,
+  } = await runTrackedCommand(args, {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
+    timeoutMs,
   });
 
-  const unregisterKill = registerSignalCleanup(() => {
-    try {
-      proc.kill();
-    } catch {
-      // Ignore if process already exited
-    }
-  });
-
-  let stdoutText: string;
-  let stderrText: string;
-  let exitCode: number;
-  try {
-    [stdoutText, stderrText, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-  } finally {
-    unregisterKill();
+  if (timedOut) {
+    return {
+      ok: false,
+      errorSummary:
+        stderrText.trim() || `cargo check timed out after ${Math.round(timeoutMs / 1000)}s`,
+      errorMessages: [],
+    };
   }
 
   const errorMessages: string[] = [];

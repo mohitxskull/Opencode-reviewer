@@ -205,4 +205,146 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
     expect(findings[0]?.title).toContain("`send_sync`");
     expect(findings[0]?.body).toContain("L2, L3, L4");
   });
+
+  test("Tier 0: peer check exits 2 (hard error) instead of 0 when git diff merge-base fails (e.g. shallow/disjoint history)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "peer-check-disjoint-"));
+    tempDirs.push(dir);
+    runGit(dir, ["init", "-b", "main"]);
+    runGit(dir, ["config", "user.name", "Local Dev"]);
+    runGit(dir, ["config", "user.email", "dev@local"]);
+    await writeFile(
+      join(dir, "Cargo.toml"),
+      `[package]\nname = "d"\nversion = "0.1.0"\nedition = "2021"\n`,
+    );
+    runGit(dir, ["add", "."]);
+    runGit(dir, ["commit", "-m", "main root"]);
+
+    // Create an orphan branch with no common ancestor with `main`
+    runGit(dir, ["checkout", "--orphan", "orphan-pr"]);
+    await writeFile(join(dir, "README.md"), "disjoint\n");
+    runGit(dir, ["add", "."]);
+    runGit(dir, ["commit", "-m", "orphan root"]);
+
+    const errs: string[] = [];
+    const code = await runCli(["check", "--base", "main", "--repo", dir], {
+      stderr: (t) => errs.push(t),
+    });
+    expect(code).toBe(2);
+    expect(errs.join("\n")).toContain("fetch-depth: 0");
+  });
+
+  test("Tier 0 Fingerprint v2: distinct .unwrap() calls in different fns get distinct fingerprints; shifting unsafe line preserves fingerprint", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "peer-fp-v2-"));
+    tempDirs.push(dir);
+    await mkdir(join(dir, "src"), { recursive: true });
+
+    await writeFile(
+      join(dir, "src", "lib.rs"),
+      [
+        "pub fn alpha(a: Option<i32>) -> i32 { a.unwrap() }",
+        "pub fn beta(b: Option<i32>) -> i32 { b.unwrap() }",
+        "pub fn gamma(p: *const i32) -> i32 { unsafe { *p } }",
+        "",
+      ].join("\n"),
+    );
+
+    const diff1 = [
+      "diff --git a/src/lib.rs b/src/lib.rs",
+      "--- a/src/lib.rs",
+      "+++ b/src/lib.rs",
+      "@@ -0,0 +1,3 @@",
+      "+pub fn alpha(a: Option<i32>) -> i32 { a.unwrap() }",
+      "+pub fn beta(b: Option<i32>) -> i32 { b.unwrap() }",
+      "+pub fn gamma(p: *const i32) -> i32 { unsafe { *p } }",
+      "",
+    ].join("\n");
+
+    const f1 = await collectAstDeterministicFindings(dir, parseUnifiedDiff(diff1));
+    const panics = f1.filter((f) => f.type === "Bug");
+    expect(panics.length).toBe(2);
+    // Two distinct .unwrap() calls in the same file MUST have different fingerprints
+    expect(panics[0]?.rootCause).not.toBe(panics[1]?.rootCause);
+
+    const unsafe1 = f1.find((f) => f.type === "Soundness");
+    expect(unsafe1).toBeDefined();
+
+    // Shift gamma down by 2 blank lines -> unsafe fingerprint / rootCause MUST remain identical
+    await writeFile(
+      join(dir, "src", "lib.rs"),
+      [
+        "// line 1",
+        "// line 2",
+        "pub fn alpha(a: Option<i32>) -> i32 { a.unwrap() }",
+        "pub fn beta(b: Option<i32>) -> i32 { b.unwrap() }",
+        "pub fn gamma(p: *const i32) -> i32 { unsafe { *p } }",
+        "",
+      ].join("\n"),
+    );
+    const diff2 = [
+      "diff --git a/src/lib.rs b/src/lib.rs",
+      "--- a/src/lib.rs",
+      "+++ b/src/lib.rs",
+      "@@ -0,0 +1,5 @@",
+      "+// line 1",
+      "+// line 2",
+      "+pub fn alpha(a: Option<i32>) -> i32 { a.unwrap() }",
+      "+pub fn beta(b: Option<i32>) -> i32 { b.unwrap() }",
+      "+pub fn gamma(p: *const i32) -> i32 { unsafe { *p } }",
+      "",
+    ].join("\n");
+    const f2 = await collectAstDeterministicFindings(dir, parseUnifiedDiff(diff2));
+    const unsafe2 = f2.find((f) => f.type === "Soundness");
+    expect(unsafe2?.rootCause).toBe(unsafe1?.rootCause);
+    expect(unsafe2?.id).toBe(unsafe1?.id);
+  });
+
+  test("Tier 1: inline // peer:allow(panic|unsafe): reason suppresses detectors and [detectors] off disables them", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "peer-allow-"));
+    tempDirs.push(dir);
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(
+      join(dir, "src", "lib.rs"),
+      [
+        "pub fn suppressed(a: Option<i32>, p: *const i32) -> i32 {",
+        "    // peer:allow(panic): invariant guaranteed by caller",
+        "    let x = a.unwrap();",
+        "    // peer:allow(unsafe): pointer validated above",
+        "    unsafe { *p + x }",
+        "}",
+        "pub fn unsuppressed(b: Option<i32>) -> i32 {",
+        "    // peer:allow(panic):",
+        "    b.unwrap()",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const diff = [
+      "diff --git a/src/lib.rs b/src/lib.rs",
+      "--- a/src/lib.rs",
+      "+++ b/src/lib.rs",
+      "@@ -0,0 +1,10 @@",
+      "+pub fn suppressed(a: Option<i32>, p: *const i32) -> i32 {",
+      "+    // peer:allow(panic): invariant guaranteed by caller",
+      "+    let x = a.unwrap();",
+      "+    // peer:allow(unsafe): pointer validated above",
+      "+    unsafe { *p + x }",
+      "+}",
+      "+pub fn unsuppressed(b: Option<i32>) -> i32 {",
+      "+    // peer:allow(panic):",
+      "+    b.unwrap()",
+      "+}",
+      "",
+    ].join("\n");
+
+    const diffMap = parseUnifiedDiff(diff);
+    const findings = await collectAstDeterministicFindings(dir, diffMap);
+    // Suppressed panic & unsafe are skipped; reason-less `// peer:allow(panic):` is still flagged
+    expect(findings.length).toBe(1);
+    expect(findings[0]?.startLine).toBe(9);
+
+    // Disabling panic detector returns 0 findings
+    const disabled = await collectAstDeterministicFindings(dir, diffMap, { panic: "off" });
+    expect(disabled.length).toBe(0);
+  });
 });

@@ -54,7 +54,10 @@ runs:
         if [ -n "${INPUT_BASE}" ]; then
           ARGS+=(--base "${INPUT_BASE}")
         elif [ -n "${GITHUB_BASE_REF:-}" ]; then
-          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" || true
+          if [ -f .git/shallow ]; then
+            git fetch --no-tags --unshallow origin || true
+          fi
+          git fetch --no-tags origin "${GITHUB_BASE_REF}"
           ARGS+=(--base "origin/${GITHUB_BASE_REF}")
         fi
         if [ -n "${INPUT_TOOLS}" ]; then

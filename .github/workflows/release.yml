@@ -18,6 +18,15 @@ jobs:
         with:
           bun-version: "1.4.5"
 
+      - name: Verify release tag matches package.json version
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          PKG_VER="$(bun -e 'import p from "./package.json"; console.log(p.version)')"
+          if [ "${TAG_VER}" != "${PKG_VER}" ]; then
+            echo "Tag version (${TAG_VER}) does not match package.json (${PKG_VER})" >&2
+            exit 1
+          fi
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 

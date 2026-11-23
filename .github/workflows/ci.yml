@@ -24,10 +24,28 @@ jobs:
       - name: Build standalone binary
         run: make build
 
-      - name: Smoke-test standalone binary outside node_modules
+      - name: Smoke-test standalone binary outside node_modules (with embedded Tree-sitter WASM)
         run: |
           cp dist/peer /tmp/peer-standalone
           chmod +x /tmp/peer-standalone
           cd /tmp
           ./peer-standalone --help
           ./peer-standalone doctor || true
+          rm -rf /tmp/peer-smoke-repo
+          mkdir -p /tmp/peer-smoke-repo/src
+          cd /tmp/peer-smoke-repo
+          git init -b main
+          git config user.name "CI"
+          git config user.email "ci@local"
+          printf '[package]\nname = "smoke"\nversion = "0.1.0"\nedition = "2021"\n' > Cargo.toml
+          printf 'pub fn ok() -> i32 { 1 }\n' > src/lib.rs
+          git add . && git commit -m "base"
+          git checkout -b feat
+          printf 'pub fn bad(p: *const i32) -> i32 { unsafe { *p } }\n' > src/lib.rs
+          git add . && git commit -m "add unsafe"
+          set +e
+          /tmp/peer-standalone check --base main
+          CODE=$?
+          set -e
+          echo "Standalone peer check exit code: ${CODE}"
+          test "${CODE}" -eq 1
