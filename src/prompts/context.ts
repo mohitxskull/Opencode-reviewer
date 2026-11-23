@@ -15,6 +15,7 @@ import type {
 import { resolveFileArchitecturalLayer } from "../rust.ts";
 import { formatSecurityAdvisoriesPromptSection } from "../security.ts";
 import { formatGeigerPromptSection, type GeigerReport } from "../tools/geiger.ts";
+import { formatSemverPromptSection, type SemverViolation } from "../tools/semver.ts";
 import {
   compactAnnotatedLines,
   DEFAULT_MAX_INLINE_DIFF_CHARS,
@@ -35,6 +36,7 @@ export interface ReviewContext {
   readonly clippyDiagnostics: readonly ClippyDiagnostic[];
   readonly securityAdvisories?: readonly SecurityAdvisory[];
   readonly geigerReport?: GeigerReport | null;
+  readonly semverViolations?: readonly SemverViolation[];
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
   readonly auditLogger?: AuditLogger;
@@ -169,6 +171,10 @@ export function buildReviewContextPrompt(
 
   if (context.geigerReport) {
     sections.push(formatGeigerPromptSection(context.geigerReport));
+  }
+
+  if (context.semverViolations && context.semverViolations.length > 0) {
+    sections.push(formatSemverPromptSection(context.semverViolations));
   }
 
   if (context.clippyDiagnostics.length > 0) {

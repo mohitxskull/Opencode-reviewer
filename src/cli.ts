@@ -56,6 +56,11 @@ import {
   type GeigerReport,
   geigerReportToFindings,
 } from "./tools/geiger.ts";
+import {
+  collectCargoSemverViolations,
+  type SemverViolation,
+  semverViolationsToFindings,
+} from "./tools/semver.ts";
 import { SuggestionCompilerVerifier } from "./verifier.ts";
 
 export type LensRunnerFn = (context: ReviewContext) => Promise<MultiLensRunResult>;
@@ -89,6 +94,7 @@ Options:
   --skeptic                  Run an adversarial skeptic pass to disprove false positives (uses extra LLM calls)
   --deny                     Run cargo-deny supply-chain/license/ban checks (auto-runs if deny.toml exists)
   --geiger                   Run cargo-geiger unsafe-code surface audit on workspace crates
+  --semver                   Run cargo-semver-checks against PR base commit for breaking public API changes
   --concurrency <n>          Max parallel OpenCode lens sessions (default: 4; use 1 for single-GPU local models)
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
@@ -113,6 +119,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         skeptic: { type: "boolean", default: false },
         deny: { type: "boolean", default: false },
         geiger: { type: "boolean", default: false },
+        semver: { type: "boolean", default: false },
         concurrency: { type: "string" },
         model: { type: "string" },
         scope: { type: "string" },
@@ -185,6 +192,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const skeptic = parsed.values.skeptic ?? false;
     const forceDeny = parsed.values.deny ?? false;
     const enableGeiger = parsed.values.geiger ?? false;
+    const enableSemver = parsed.values.semver ?? false;
     const rawConcurrency = parsed.values.concurrency;
     let concurrencyLimit = 4;
     if (rawConcurrency !== undefined) {
@@ -324,6 +332,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     let capturedSymbolGraph: RustSymbolGraph | undefined;
     let capturedDenyDiagnostics: CargoDenyDiagnostic[] = [];
     let capturedGeigerReport: GeigerReport | null = null;
+    let capturedSemverViolations: SemverViolation[] = [];
     const bundle = await withInPlaceCheckout(
       {
         repoRoot,
@@ -457,13 +466,20 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           buildRustSymbolGraph(repoRoot, diffMap),
           learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha),
         ]);
-        const geigerReport = await collectCargoGeigerReport(repoRoot, {
-          enabled: enableGeiger,
-          crateGraph,
-        });
+        const [geigerReport, semverViolations] = await Promise.all([
+          collectCargoGeigerReport(repoRoot, {
+            enabled: enableGeiger,
+            crateGraph,
+          }),
+          collectCargoSemverViolations(repoRoot, {
+            enabled: enableSemver,
+            baseSha: pr.baseSha,
+          }),
+        ]);
         capturedSymbolGraph = symbolGraph;
         capturedDenyDiagnostics = denyDiagnostics;
         capturedGeigerReport = geigerReport;
+        capturedSemverViolations = semverViolations;
 
         await auditLogger.logEvent(
           "stage.rust_ground_truth.completed",
@@ -499,6 +515,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           clippyDiagnostics,
           securityAdvisories,
           geigerReport,
+          semverViolations,
           symbolGraph,
           learnings,
           auditLogger,
@@ -542,12 +559,14 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         const geigerFindings = geigerReport
           ? geigerReportToFindings(geigerReport, modifiedCrates, crateGraph)
           : [];
+        const semverFindings = semverViolationsToFindings(semverViolations);
         const partitioned = partitionAndFilterFindings(
           [
             ...clippyFindings,
             ...auditFindings,
             ...denyFindings,
             ...geigerFindings,
+            ...semverFindings,
             ...rawLensFindings,
           ],
           diffMap,
@@ -630,6 +649,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
     if (capturedGeigerReport) {
       extraToolOutputs.geiger = capturedGeigerReport;
+    }
+    if (capturedSemverViolations.length > 0) {
+      extraToolOutputs.semver = capturedSemverViolations;
     }
 
     // Step 5: Persist per-commit artifacts & tool diagnostics inside .peer/<pr>/<short-sha>/
