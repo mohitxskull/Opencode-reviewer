@@ -1,53 +1,132 @@
-# Peer — Local-First Rust PR Reviewer (OpenCode SDK + Octokit)
+# Peer — Agent-Agnostic Rust PR Ground-Truth & Verification Engine
 
-`peer` is a local-first GitHub Pull Request reviewer built in **100% TypeScript on Bun**, powered by **`@opencode/client`** (OpenCode SDK, supporting free models like `hy4-flash-free` and `big-pickle`) and **`@octokit/rest`**.
+`peer` is a local-first Rust Pull Request analysis, suggestion-verification, and GitHub publishing engine built in **TypeScript on Bun** (`1.4+`).
 
-Designed specifically for **complex Rust workspaces**, `peer` runs directly inside your local dev repository with your warm `target/` build cache—combining architectural PR walkthroughs and surgical inline comments with real `cargo clippy`, cross-workspace Rust symbol call-site graphs, native Rust soundness/concurrency/idiom audit rules, and transactional `cargo check` verification of every proposed ```` ```suggestion ```` block.
+Instead of locking you into one LLM SDK, `peer` handles everything deterministic that LLMs cannot do reliably — running directly inside your local Rust workspace with your warm `target/` cache — and pairs with thin native plugins for **Antigravity**, **OpenCode**, **Claude Code**, **Cursor**, or any coding agent.
 
-## Key Capabilities
+## How It Works (4-Stage Composable Pipeline)
 
-- **In-Place Checkout with Clean-Tree Gate & Signal-Safe Restoration:** Refuses to run if your working tree has uncommitted changes, checks out the PR commit in detached HEAD (reusing your warm `target/` cache without multi-GB worktree duplication), and guarantees restoration of your original branch on exit, error, or `SIGINT`/`SIGTERM`.
-- **Local Rust Ground Truth (`cargo metadata` + `cargo clippy` + Symbol Call-Site Graph):**
-  - Orders modified files by topological Cargo crate dependency layer (`L0` leaf/core crates $\rightarrow$ dependent crates $\rightarrow$ test layer).
-  - Extracts `cargo clippy --workspace --all-targets --message-format=json` diagnostics.
-  - Builds a cross-workspace **Rust Symbol & Call-Site Graph** via `git grep -n -w` in <50ms, surfacing 0-caller methods and production vs. test call sites.
-- **Subsystem Cohort Sharding & Native Rust Audit Rules:**
-  - Filters out non-code files (`.md`, `docs/`, lockfiles) and shards multi-file PRs into balanced subsystem cohorts so every production Rust file receives a deep audit for soundness, concurrency, state-machine invariants, and PingCAP/TiKV Rust conventions.
-- **Transactional `cargo check` Suggestion Verifier:**
-  - Every candidate ```` ```suggestion ```` block is transactionally patched onto disk, compile-checked with `cargo check --workspace --all-targets`, and immediately restored bit-for-bit (`Uint8Array` snapshot). Broken suggestions that fail to compile are automatically stripped before posting.
-- **CodeRabbit-Grade Output & Safe GitHub Posting:**
-  - Top-level PR Walkthrough comment (`<!-- peer-walkthrough-comment -->`) with effort/risk triage score, architectural layer table, and Mermaid `sequenceDiagram`.
-  - Inline diff comments (`_Type_ | _Severity_`, verified ```` ```suggestion ```` blocks, and sanitized `<details><summary>Prompt for Coding Agents</summary>`), collapsible **⚠️ Outside diff range comments**, and **🧹 Nitpick comments**.
-  - Posts inline reviews as a **`PENDING` (draft) GitHub PR review** by default (`--submit-review` to publish immediately as `COMMENT`).
-- **Live CLI Stage Progress & Streaming JSONL Audit Log:**
-  - Streams live stage, cohort, and `cargo check` progress with elapsed timers (`[MM:SS.s]`) and writes a detailed append-only JSONL audit trail to `.git/peer/reviews/pr-<num>/audit.jsonl` (and `.git/peer/reviews/pr-<num>/runs/run-<id>.jsonl`).
-- **Persistent Repository Learnings:**
-  - Store global or path-scoped rules locally in `.git/peer/learnings.json` via `peer learn add|list|remove`.
+Every stage writes its own report and structured artifacts to `.peer/<pr-number>/<short-sha>/` (auto-excluded via `.git/info/exclude` so `git status` stays clean) and short-circuits immediately when a commit has already been processed:
 
-## Installation
+1. **Stage 1 — `peer analyze [PR]` (0 LLM calls):**
+   - Enforces a clean working tree, checks out the PR commit in detached HEAD (signal-safe LIFO restoration on exit, error, or `SIGINT`/`SIGTERM`), and computes the 3-dot merge-base diff.
+   - Runs core deterministic Rust analyzers with a scrubbed Cargo environment (no GitHub/AWS/SSH secrets leaked to `build.rs` or proc-macros):
+     - `cargo metadata` — topological crate dependency layers (`L0` core → dependents → tests)
+     - `cargo clippy --workspace --all-targets --message-format=json` — hunk-filtered diagnostics + multi-span suggestion splicing
+     - `cargo audit --json` — base-vs-head CVE/RustSec delta (only newly introduced advisories)
+     - `Cargo.lock` TOML diff — added, upgraded, and removed dependencies (`Bun.TOML.parse`)
+     - **Tree-sitter Rust AST** (`web-tree-sitter` + `tree-sitter-rust`) — exact enclosing symbol spans, `unsafe` regions, inline `#[cfg(test)]` classification, and cross-workspace call-site graph
+   - Optional analyzers via `--tools <list|all>` (fail-loud with install instructions if missing):
+     - `deny` (`cargo-deny` — auto-runs if `deny.toml` exists)
+     - `geiger` (`cargo-geiger` — unsafe-code surface in modified workspace crates)
+     - `semver` (`cargo-semver-checks` — breaking public API changes vs `pr.baseSha`)
+     - `coverage` (`cargo-llvm-cov` — untested changed production lines, excluding tests & inline `#[cfg(test)]`)
+     - `miri` (`cargo +nightly miri test` — Tree-sitter AST-gated: only runs on crates whose diff touches `unsafe` regions)
+   - Writes `.peer/<pr>/<short-sha>/01-analyze/{report.md,prompt-context.md,context.json,bundle.json,tools/*.json}`.
+
+2. **Stage 2 — Agent Multi-Lens Review + `peer finalize [PR] --from <file>`:**
+   - Any coding agent (Antigravity, OpenCode, Claude Code, Cursor) reads `01-analyze/prompt-context.md` and reviews the PR using its own model/subagents and the bundled Rust lens prompts (`walkthrough`, `soundness`, `idioms`).
+   - `peer finalize` parses the agent's Structured Markdown (or JSON) output, merges and deduplicates it with Stage 1 ground truth, snaps ranges to valid GitHub diff hunks, runs **transactional `cargo check`** on every inline ```` ```rust ```` suggestion (bit-for-bit byte restoration; non-compiling suggestions are stripped), and writes `02-review/report.md` + top-level `review.md`.
+
+3. **Stage 3 — Optional Skeptic Verification (`peer finalize [PR] --from <file> --stage verify`):**
+   - Run an adversarial skeptic pass to disprove false positives and save the verified bundle to `03-verify/`.
+
+4. **Stage 4 — `peer publish [PR]` (0 builds, 0 LLM calls):**
+   - Uploads the latest saved stage (`03-verify` → `02-review` → `01-analyze`) to GitHub as a Walkthrough comment + **`PENDING` draft review** by default (`--submit` to publish immediately as `COMMENT`), and updates the incremental review checkpoint.
+
+## `.peer/` Artifact Layout
+
+```text
+.peer/
+├── learnings.json                    # Optional version-controlled repo rules (`peer learn ...`)
+└── <pr-number>/<short-sha>/          # Auto-ignored via .git/info/exclude
+    ├── run.json                      # Pipeline manifest (completedStages, counts, timings)
+    ├── review.md                     # Always mirrors the latest completed stage's report.md
+    ├── audit.jsonl                   # Streaming execution event log
+    ├── 01-analyze/
+    │   ├── report.md                 # Standalone deterministic report (0 LLM calls)
+    │   ├── prompt-context.md         # Curated context package for any coding agent
+    │   ├── context.json              # Saved diffMap, crateGraph, baseline, findings
+    │   ├── bundle.json
+    │   └── tools/{clippy,audit,symbol-graph,cargo-lock-diff,deny,geiger,semver,coverage,miri}.json
+    ├── 02-review/
+    │   ├── report.md                 # Post-Judge, cargo-check-verified report
+    │   ├── walkthrough.md
+    │   └── bundle.json
+    ├── 03-verify/
+    │   ├── report.md                 # Post-skeptic report
+    │   ├── skeptic.json
+    │   └── bundle.json
+    └── 04-publish/
+        └── report.md                 # GitHub publish receipt
+```
+
+## Installation & Build
 
 ```bash
 bun install
 make check
+make build    # Compiles standalone binary -> dist/peer
 ```
 
-## Usage
+Copy `dist/peer` into your `PATH` (e.g. `cp dist/peer ~/.local/bin/peer`).
+
+### Agent Plugins
+
+- **Antigravity:**
+  ```bash
+  agy plugin install ./plugins/antigravity
+  ```
+  Installs the `peer-review` skill ([plugins/antigravity/skills/peer-review/SKILL.md](plugins/antigravity/skills/peer-review/SKILL.md)) and all 5 Rust lens reference prompts.
+- **OpenCode:**
+  Copy or symlink [plugins/opencode/index.ts](plugins/opencode/index.ts) into `.opencode/plugins/peer.ts` (or `~/.config/opencode/plugins/peer.ts`) to expose `peer_analyze`, `peer_finalize`, and `peer_publish` tools inside OpenCode.
+
+## CLI Usage
 
 ```bash
-# Review PR #23 locally (writes walkthrough.md, review.md, findings.json, and audit.jsonl to .git/peer/reviews/pr-23/)
-bun src/cli.ts review 23 --repo /path/to/rust-repo --local-only
+# Stage 1: Deterministic Rust analysis only (default command)
+peer analyze 42 --repo /path/to/rust-repo
+peer analyze https://github.com/owner/repo/pull/42 --tools deny,geiger,semver,coverage,miri
+peer analyze 42 --tools all --fresh
 
-# Review by PR number or full URL and post Walkthrough + PENDING draft review to GitHub
-bun src/cli.ts review https://github.com/owner/repo/pull/23 --repo /path/to/rust-repo --post
+# Stage 2 / 3: Judge merge + transactional `cargo check` suggestion verification
+peer finalize 42 --from .peer/42/<sha>/agent-review.md
+peer finalize 42 --from .peer/42/<sha>/agent-verified.md --stage verify
 
-# Submit review immediately on GitHub instead of PENDING draft
-bun src/cli.ts review 23 --post --submit-review
+# Stage 4: Upload latest saved stage to GitHub PR
+peer publish 42            # Posts PENDING draft review
+peer publish 42 --submit   # Submits immediately as COMMENT
 
-# Override OpenCode model (defaults to opencode/hy4-flash-free)
-bun src/cli.ts review 23 --model big-pickle --local-only
+# Manage persistent repository learnings
+peer learn add "Avoid holding std::sync::Mutex across .await" --scope "src/services/**"
+peer learn list
+peer learn remove <id>
+```
 
-# Manage repository learnings
-bun src/cli.ts learn add "Dual account snapshots are reconciled at barrier points." --scope "src/services/**"
-bun src/cli.ts learn list
-bun src/cli.ts learn remove <id>
+### GitHub Authentication Precedence
+1. `PEER_GITHUB_TOKEN` environment variable
+2. `GITHUB_TOKEN` environment variable
+3. OS Keychain via `Bun.secrets` (`service: "peer-cli"`, `name: "github-token"`)
+4. `gh auth token` CLI fallback
+
+## Architecture & Development
+
+```text
+src/
+├── cli/         # CLI entrypoint (index.ts) & `peer learn` subcommand
+├── pipeline/    # Composable stages: analyze.ts, finalize.ts, publish.ts
+├── analyzers/   # All deterministic Rust analyzers (ast, rust, symbol-graph, security, deny, geiger, semver, coverage, miri)
+├── llm/         # Agent context builders, cohort scoring, Structured Markdown/JSON parser, lens prompts
+├── judge/       # Finding dedup/hunk-snapping (partition.ts) & transactional `cargo check` verifier
+├── render/      # Pure Markdown & Bun.inspect.table terminal renderers
+├── workspace/   # `.peer/` stage artifacts, git checkout session, checkpoints, learnings, JSONL audit log
+├── github/      # Octokit REST client & token resolution
+├── domain/      # Zod schemas, unified diff parser, template filler
+└── infra/       # Scrubbed Cargo env, Bun.JSONL recovery parser, LIFO signal cleanup
+```
+
+```bash
+make fmt      # bun fmt (configured via bunfig.toml)
+make check    # bun fmt --check && biome lint && bun check && bun test
+make build    # bun build src/cli/index.ts --compile --outfile dist/peer
 ```
