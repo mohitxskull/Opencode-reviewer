@@ -7,6 +7,7 @@ import {
   CheckpointStore,
   detectRepoOwnerAndName,
   ensureCleanWorkingTree,
+  resolveGitTopLevel,
   runGitSync,
   tryGitRawSync,
   withInPlaceCheckout,
@@ -106,7 +107,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       return 0;
     }
 
-    const repoRoot = resolve(parsed.values.repo ?? process.cwd());
+    const repoRoot = resolveGitTopLevel(resolve(parsed.values.repo ?? process.cwd()));
     const learningStore = new LearningStore(repoRoot);
 
     if (parsed.positionals[0] === "learn") {
@@ -284,6 +285,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           prBaseSha: pr.baseSha,
           currentHeadSha: pr.headSha,
           fresh,
+          profile,
         });
 
         let diffText: string;
@@ -313,7 +315,22 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
         const rawDiffMap = parseUnifiedDiff(diffText);
         const diffMap = filterCodeOnlyDiffMap(rawDiffMap);
-        activeDiffMap = diffMap;
+        // Anchor GitHub inline comments against the full PR diff (pr.baseSha...pr.headSha)
+        // when running incrementally so reverted hunks do not trigger GitHub HTTP 422.
+        if (isIncremental) {
+          const fullPrDiffAttempt = tryGitRawSync(repoRoot, [
+            "diff",
+            "--no-color",
+            "--unified=3",
+            `${pr.baseSha}...${pr.headSha}`,
+          ]);
+          activeDiffMap =
+            fullPrDiffAttempt.ok && fullPrDiffAttempt.stdout.length > 0
+              ? filterCodeOnlyDiffMap(parseUnifiedDiff(fullPrDiffAttempt.stdout))
+              : diffMap;
+        } else {
+          activeDiffMap = diffMap;
+        }
         const modifiedFiles = new Set(Object.keys(diffMap));
         const excludedFiles = Object.keys(rawDiffMap).filter((fp) => !modifiedFiles.has(fp));
 
@@ -482,24 +499,25 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         const existingDeletionRefs = new Set(
           (lensResult.deletionsProposed ?? []).map((d) => d.pathOrSymbol),
         );
-        const graphDeletions: DeletionProposedItem[] = symbolGraph.nodes
-          .filter(
-            (n) =>
-              !n.isPublic &&
-              n.prodReferences.length === 0 &&
-              n.testReferences.length === 0 &&
-              !n.name.startsWith("test_") &&
-              !n.filePath.includes("tests"),
-          )
-          .map((n) => ({
-            pathOrSymbol: `${n.kind} ${n.name} (${n.filePath}:${n.line})`,
-            reachabilityEvidence:
-              "git grep -n -w across *.rs -> 0 production callers and 0 test references outside definition",
-            replacement: "Remove unreferenced private symbol or wire into caller",
+        // Why: Use compiler-verified `dead_code` diagnostics from rustc/clippy rather
+        // than regex grep counts, which false-positive on trait impl methods and inline tests.
+        const rustcDeadCodeDeletions: DeletionProposedItem[] = clippyDiagnostics
+          .filter((d) => d.code === "dead_code")
+          .map((d) => ({
+            pathOrSymbol: `${d.filePath}:${d.startLine}`,
+            reachabilityEvidence: `rustc dead_code diagnostic: ${d.message}`,
+            replacement: "Remove dead symbol or wire into production caller",
           }))
           .filter((d) => !existingDeletionRefs.has(d.pathOrSymbol));
 
-        const mergedDeletions = [...(lensResult.deletionsProposed ?? []), ...graphDeletions];
+        const mergedDeletions = [
+          ...(lensResult.deletionsProposed ?? []),
+          ...rustcDeadCodeDeletions,
+        ];
+
+        const notReviewedItems = excludedFiles.map(
+          (f) => `${f} (non-Rust or documentation file skipped)`,
+        );
 
         return ReviewBundleSchema.parse({
           pr,
@@ -515,7 +533,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           consideredAndRejected: lensResult.consideredAndRejected ?? [],
           deletionsProposed: mergedDeletions,
           openQuestions: lensResult.openQuestions ?? [],
-          notReviewed: excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
+          notReviewed: notReviewedItems,
           failedCohorts: lensResult.failedCohorts ?? [],
           clippyDiagnostics: [...clippyDiagnostics],
           securityAdvisories: [...securityAdvisories],
@@ -524,18 +542,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       },
     );
 
-    // Step 5: Persist local artifacts & checkpoint inside .git/peer/reviews/pr-<num>/
-    // Do not advance incremental checkpoint if any cohort failed (F-07)
+    // Step 5: Persist local artifacts inside .git/peer/reviews/pr-<num>/
     const artifactDir = await writeLocalReviewArtifacts(repoRoot, bundle);
-    if (failedCohortsCount === 0) {
-      await checkpointStore.save({
-        prNumber: pr.number,
-        baseSha: pr.baseSha,
-        lastReviewedHeadSha: pr.headSha,
-        reviewedAt: bundle.generatedAt,
-        profile: bundle.profile,
-      });
-    }
 
     await auditLogger.logEvent(
       "run.completed",
@@ -580,6 +588,18 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         diffMap: activeDiffMap,
         submit: submitReview,
         summaryBody: renderPrReviewSummaryBody(bundle),
+      });
+    }
+
+    // Advance incremental checkpoint ONLY after local artifacts and optional GitHub post succeed
+    // and only when 0 cohorts failed (F-07)
+    if (failedCohortsCount === 0) {
+      await checkpointStore.save({
+        prNumber: pr.number,
+        baseSha: pr.baseSha,
+        lastReviewedHeadSha: pr.headSha,
+        reviewedAt: bundle.generatedAt,
+        profile: bundle.profile,
       });
     }
 

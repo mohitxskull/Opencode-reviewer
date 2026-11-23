@@ -9,6 +9,7 @@ import {
   GitRemoteError,
   InPlaceCheckoutSession,
   parseGitHubOwnerRepo,
+  resolveGitTopLevel,
   withInPlaceCheckout,
 } from "../src/git.ts";
 
@@ -238,6 +239,24 @@ describe("Task 02: Git session and checkpoint store", () => {
       diffBaseSha: prBaseSha,
       isIncremental: false,
     });
+
+    // 4. Profile change invalidates incremental reuse and triggers full PR diff
+    const profileMismatchResolution = await store.resolveDiffBase({
+      prNumber: 42,
+      prBaseSha,
+      currentHeadSha: prHeadV2,
+      fresh: false,
+      profile: "assertive",
+    });
+    expect(profileMismatchResolution).toEqual({
+      diffBaseSha: prBaseSha,
+      isIncremental: false,
+    });
+
+    // 5. resolveGitTopLevel normalizes nested subdirectory to git repository root
+    const nestedDir = join(repo, "crates", "sub");
+    await mkdir(nestedDir, { recursive: true });
+    expect(resolveGitTopLevel(nestedDir)).toBe(repo);
   });
 
   test("F-10: CheckpointStore resolves common git dir inside a linked git worktree where .git is a file", async () => {

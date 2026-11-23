@@ -3,12 +3,20 @@ import { rmSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { registerSignalCleanup, triggerSignalCleanup } from "./lifecycle.ts";
-import { type ReviewCheckpoint, ReviewCheckpointSchema } from "./models.ts";
+import { type ReviewCheckpoint, ReviewCheckpointSchema, type ReviewProfile } from "./models.ts";
 
 // Why: Storing checkpoints and reports under .git/peer/reviews/pr-<number>/ keeps
 // review state inside git's administrative directory so in-place branch checkouts
 // never collide with generated files and `git status --porcelain` stays clean
 // without modifying the user's .gitignore.
+export function resolveGitTopLevel(dir: string): string {
+  const res = tryGitSync(dir, ["rev-parse", "--show-toplevel"]);
+  if (res.ok && res.stdout.length > 0) {
+    return resolve(res.stdout);
+  }
+  return resolve(dir);
+}
+
 export function resolveGitCommonDir(repoRoot: string): string {
   const res = tryGitSync(repoRoot, ["rev-parse", "--git-common-dir"]);
   if (res.ok && res.stdout.length > 0) {
@@ -271,6 +279,7 @@ export interface ResolveDiffBaseOptions {
   readonly prBaseSha: string;
   readonly currentHeadSha: string;
   readonly fresh: boolean;
+  readonly profile?: ReviewProfile;
 }
 
 export class CheckpointStore {
@@ -325,7 +334,8 @@ export class CheckpointStore {
 
     if (
       existing.baseSha !== options.prBaseSha ||
-      existing.lastReviewedHeadSha === options.currentHeadSha
+      existing.lastReviewedHeadSha === options.currentHeadSha ||
+      (options.profile !== undefined && existing.profile !== options.profile)
     ) {
       return { diffBaseSha: options.prBaseSha, isIncremental: false };
     }
