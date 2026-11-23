@@ -90,6 +90,7 @@ export interface AnalyzeStageInput {
 export interface AnalyzeStageOutput {
   readonly analyzeContext: AnalyzeStageContext;
   readonly analyzeBundle: ReviewBundle;
+  readonly skippedTools: readonly string[];
   readonly symbolGraph?: RustSymbolGraph;
   readonly cargoLockDiff: CargoLockDiff | null;
   readonly geigerReport: GeigerReport | null;
@@ -155,6 +156,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
   let semverViolations: SemverViolation[] = [];
   let coverageReport: CoverageReport | null = null;
   let miriReport: MiriReport | null = null;
+  const skippedTools: string[] = [];
 
   if (analyzeContext && analyzeBundle) {
     const toolsDir = join(commitDir, "01-analyze", "tools");
@@ -176,6 +178,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     return {
       analyzeContext,
       analyzeBundle,
+      skippedTools,
       symbolGraph,
       cargoLockDiff,
       geigerReport,
@@ -243,7 +246,11 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         `▶ Stage 1 (analyze): Running deterministic Rust analyzers on ${modifiedFiles.size} file(s)...`,
       );
 
-      const skippedTools: string[] = [];
+      for (const optTool of ["deny", "geiger", "semver", "coverage", "miri"] as const) {
+        if (!enabledTools.has(optTool)) {
+          skippedTools.push(`${optTool} (not enabled; pass --tools ${optTool} or --tools all)`);
+        }
+      }
 
       const runAuditWithPolicy = async () => {
         if (modifiedFiles.size === 0 || !peerConfig.tools.audit) {
@@ -524,6 +531,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
   return {
     analyzeContext,
     analyzeBundle,
+    skippedTools,
     symbolGraph,
     cargoLockDiff,
     geigerReport,

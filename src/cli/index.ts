@@ -31,6 +31,7 @@ import { LearningStore } from "../workspace/learnings.ts";
 import { runDoctorCommand } from "./doctor.ts";
 import { runInitCommand } from "./init.ts";
 import { runLearnCommand } from "./learn.ts";
+import { runNextCommand } from "./next.ts";
 import { runPromptCommand } from "./prompt.ts";
 
 export interface CliDependencies {
@@ -56,6 +57,7 @@ Commands:
   peer finalize [PR] --from <file> Stage 2/3: Judge merge + cargo check suggestion verifier -> review.md
   peer finalize [PR] --verdicts <f> Stage 3: Apply skeptic verdicts deterministically -> 03-verify/
   peer publish  [PR]               Stage 4: Upload latest saved stage (01, 02, or 03) to GitHub PR
+  peer next     [PR]               Inspect .peer/<pr>/<sha>/ artifacts and print current stage + next command
   peer doctor                      Check local Rust toolchain & analyzer readiness
   peer prompt <name|list>          Print embedded Rust lens prompt (walkthrough|soundness|idioms|skeptic|format)
   peer restore                     Restore original branch after an interrupted checkout (e.g. SIGKILL)
@@ -81,6 +83,7 @@ Options:
   --fresh                    Ignore saved stage artifacts & checkpoint; re-run from scratch
   --submit                   For 'publish': submit as COMMENT instead of PENDING draft
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
+  -v, --verbose              Print full finding bodies and code blocks in terminal summary
   -h, --help                 Show this help message
 `;
 
@@ -146,6 +149,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         fresh: { type: "boolean", default: false },
         submit: { type: "boolean", default: false },
         scope: { type: "string" },
+        verbose: { type: "boolean", short: "v", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
       allowPositionals: true,
@@ -166,6 +170,10 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     const repoRoot = resolveGitTopLevel(resolve(parsed.values.repo ?? process.cwd()));
     const learningStore = new LearningStore(repoRoot);
+
+    if (parsed.positionals[0] === "next") {
+      return await runNextCommand(repoRoot, parsed.positionals[1], writeOut);
+    }
 
     if (parsed.positionals[0] === "check") {
       return await runCheckGate({
@@ -405,7 +413,12 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       });
 
       writeOut(
-        formatTerminalReport(analyzeOut.analyzeBundle, repoRoot, join(commitDir, "01-analyze")),
+        formatTerminalReport(analyzeOut.analyzeBundle, repoRoot, join(commitDir, "01-analyze"), {
+          verbose: parsed.values.verbose ?? false,
+          enabledTools: effectiveToolsList,
+          skippedTools: analyzeOut.skippedTools,
+          nextStepHint: `Run \`peer next ${pr.number}\` or fan out cohort reviews from ${join(commitDir, "01-analyze", "cohorts", "index.json")}`,
+        }),
       );
       writeOut(
         `Agent Prompt Context: file://${resolve(commitDir, "01-analyze", "prompt-context.md")}`,
@@ -442,7 +455,17 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
 
     const stageFolder = verdictsPath || finalizeStage === "verify" ? "03-verify" : "02-review";
-    writeOut(formatTerminalReport(result.bundle, repoRoot, join(commitDir, stageFolder)));
+    const nextHint =
+      stageFolder === "02-review"
+        ? `Skeptic packets ready at file://${resolve(commitDir, "02-review", "skeptic", "index.json")} — or run \`peer next ${pr.number}\``
+        : `Ready to publish (\`peer publish ${pr.number}\`) or hand off \`todo.md\``;
+    writeOut(
+      formatTerminalReport(result.bundle, repoRoot, join(commitDir, stageFolder), {
+        verbose: parsed.values.verbose ?? false,
+        verdictSummary: result.verdictSummary,
+        nextStepHint: nextHint,
+      }),
+    );
     return 0;
   } catch (err) {
     writeErr(`Error: ${err instanceof Error ? err.message : String(err)}`);

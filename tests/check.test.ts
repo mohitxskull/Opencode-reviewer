@@ -347,4 +347,54 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
     const disabled = await collectAstDeterministicFindings(dir, diffMap, { panic: "off" });
     expect(disabled.length).toBe(0);
   });
+
+  test("collectAstDeterministicFindings skips .expect() calls preceded by /// # Panics or // Why: rationale comments", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "peer-invariant-expect-"));
+    tempDirs.push(dir);
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(
+      join(dir, "src", "state.rs"),
+      [
+        "/// Returns the primary spec.",
+        "/// # Panics",
+        "/// Panics only if constructed without legs (impossible via OrderRecord::new).",
+        "pub fn primary_spec(legs: &[i32]) -> i32 {",
+        '    *legs.first().expect("OrderRecord always has at least one leg")',
+        "}",
+        "pub fn why_commented(v: Option<i32>) -> i32 {",
+        "    // Why: validated non-empty by preflight check above",
+        '    v.expect("guaranteed by preflight")',
+        "}",
+        "pub fn unguarded(v: Option<i32>) -> i32 {",
+        '    v.expect("unexplained expect")',
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const diff = [
+      "diff --git a/src/state.rs b/src/state.rs",
+      "--- a/src/state.rs",
+      "+++ b/src/state.rs",
+      "@@ -0,0 +1,13 @@",
+      "+/// Returns the primary spec.",
+      "+/// # Panics",
+      "+/// Panics only if constructed without legs (impossible via OrderRecord::new).",
+      "+pub fn primary_spec(legs: &[i32]) -> i32 {",
+      '+    *legs.first().expect("OrderRecord always has at least one leg")',
+      "+}",
+      "+pub fn why_commented(v: Option<i32>) -> i32 {",
+      "+    // Why: validated non-empty by preflight check above",
+      '+    v.expect("guaranteed by preflight")',
+      "+}",
+      "+pub fn unguarded(v: Option<i32>) -> i32 {",
+      '+    v.expect("unexplained expect")',
+      "+}",
+      "",
+    ].join("\n");
+
+    const findings = await collectAstDeterministicFindings(dir, parseUnifiedDiff(diff));
+    expect(findings.length).toBe(1);
+    expect(findings[0]?.startLine).toBe(12);
+  });
 });

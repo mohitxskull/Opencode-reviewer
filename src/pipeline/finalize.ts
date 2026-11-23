@@ -48,6 +48,7 @@ export interface FinalizeStageInput {
 export interface FinalizeStageResult {
   readonly bundle: ReviewBundle;
   readonly warnings: string[];
+  readonly verdictSummary?: string;
 }
 
 function parseAgentReviewInput(
@@ -183,16 +184,33 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     }
 
     const refutedItems: ConsideredAndRejectedItem[] = [];
+    const droppedIds: string[] = [];
+    const lockedDropIgnoredIds: string[] = [];
+    const matchedIds = new Set<string>();
+    const beforeCount =
+      reviewBundle.findings.length + (reviewBundle.outsideDiffFindings?.length ?? 0);
+
     const filterList = (list: readonly Finding[]): Finding[] => {
       const kept: Finding[] = [];
       for (const f of list) {
-        // Deterministic compiler/audit findings are ground truth and never refuted by LLM skeptic
-        if (f.source === "clippy" || f.source === "audit") {
+        const v = verdictMap.get(f.id);
+        if (v) {
+          matchedIds.add(f.id);
+        }
+        // Why: Hard compiler diagnostics (`clippy`) and CVE/sensitive-file findings (`audit` excluding
+        // heuristic `audit-ast-*` detectors) are non-refutable ground truth. Heuristic AST panic/unsafe
+        // findings (`audit-ast-*`) CAN be refuted by the skeptic when guarded by invariants.
+        const isLockedGroundTruth =
+          f.source === "clippy" || (f.source === "audit" && !f.id.startsWith("audit-ast-"));
+        if (isLockedGroundTruth) {
+          if (v && !v.keep) {
+            lockedDropIgnoredIds.push(f.id);
+          }
           kept.push(f);
           continue;
         }
-        const v = verdictMap.get(f.id);
         if (v && !v.keep) {
+          droppedIds.push(f.id);
           refutedItems.push({
             location: `${f.filePath}:${f.startLine}`,
             hypothesis: f.title,
@@ -213,11 +231,38 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
       generatedAt: new Date().toISOString(),
     });
 
+    const keptCount =
+      updatedBundle.findings.length + (updatedBundle.outsideDiffFindings?.length ?? 0);
+    const unmatchedVerdictIds = Array.from(verdictMap.keys()).filter((id) => !matchedIds.has(id));
+    if (lockedDropIgnoredIds.length > 0) {
+      warnings.push(
+        `Ignored DROP verdict on ${lockedDropIgnoredIds.length} non-refutable compiler/CVE finding(s): ${lockedDropIgnoredIds.join(", ")}`,
+      );
+    }
+    if (unmatchedVerdictIds.length > 0) {
+      warnings.push(
+        `${unmatchedVerdictIds.length} verdict ID(s) did not match any Stage 2 finding: ${unmatchedVerdictIds.join(", ")}`,
+      );
+    }
+
+    const summaryParts = [
+      `Before: ${beforeCount} -> Kept: ${keptCount} | Dropped: ${droppedIds.length}${
+        droppedIds.length > 0 ? ` (${droppedIds.join(", ")})` : ""
+      }`,
+    ];
+    if (lockedDropIgnoredIds.length > 0) {
+      summaryParts.push(`Locked ground-truth retained: ${lockedDropIgnoredIds.join(", ")}`);
+    }
+    if (unmatchedVerdictIds.length > 0) {
+      summaryParts.push(`Unmatched verdict IDs: ${unmatchedVerdictIds.join(", ")}`);
+    }
+    const verdictSummary = summaryParts.join("\n  ");
+
     await writeVerifyStageArtifacts(
       repoRoot,
       updatedBundle,
       {
-        keptCount: updatedBundle.findings.length + (updatedBundle.outsideDiffFindings?.length ?? 0),
+        keptCount,
         refutedItems,
       },
       {
@@ -227,7 +272,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
       },
     );
 
-    return { bundle: updatedBundle, warnings };
+    return { bundle: updatedBundle, warnings, verdictSummary };
   }
 
   const analyzeContext: AnalyzeStageContext | null = await loadJsonIfExists(

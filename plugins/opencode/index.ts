@@ -1,4 +1,30 @@
-import { type Plugin, tool } from "@opencode-ai/plugin";
+/**
+ * OpenCode V2 Plugin for `peer` (Agent-Agnostic Rust PR Ground-Truth & Verification Engine).
+ *
+ * Compatible with OpenCode v2.0.4+ / v2.4.0+ (`{ id, setup }` contract via `ctx.tool.transform`).
+ * Zero external npm dependencies required.
+ */
+
+interface ToolEditor {
+  add(tool: {
+    name: string;
+    description: string;
+    input: Record<string, unknown>;
+    execute: (
+      input: Record<string, unknown>,
+      context?: unknown,
+    ) => Promise<{ content: string }>;
+  }): void;
+}
+
+interface OpenCodeV2Context {
+  readonly location?: {
+    readonly directory?: string;
+  };
+  readonly tool?: {
+    transform(fn: (editor: ToolEditor) => void): Promise<unknown>;
+  };
+}
 
 async function runPeer(
   args: string[],
@@ -18,134 +44,255 @@ async function runPeer(
   return { stdout, stderr, exitCode };
 }
 
-export const PeerRustReviewerPlugin: Plugin = async ({ directory }) => ({
-  tool: {
-    peer_doctor: tool({
-      description: "Check local Rust toolchain and analyzer readiness (clippy, audit, deny, geiger, semver, llvm-cov, miri).",
-      args: {},
-      async execute() {
-        const res = await runPeer(["doctor"], directory);
-        return res.stdout.trim() || res.stderr.trim();
-      },
-    }),
+export default {
+  id: "peer",
+  async setup(ctx: OpenCodeV2Context) {
+    if (!ctx?.tool || typeof ctx.tool.transform !== "function") {
+      return;
+    }
+    const directory = ctx.location?.directory || process.cwd();
 
-    peer_prompt: tool({
-      description: "Retrieve a built-in Rust review lens prompt directly from the peer binary (single source of truth).",
-      args: {
-        name: tool.schema
-          .enum(["walkthrough", "soundness", "idioms", "skeptic", "format", "list"])
-          .describe("Lens prompt name"),
-      },
-      async execute(args) {
-        const res = await runPeer(["prompt", args.name], directory);
-        if (res.exitCode !== 0) {
-          throw new Error(res.stderr.trim() || `peer prompt exited ${res.exitCode}`);
-        }
-        return res.stdout.trim();
-      },
-    }),
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "peer_doctor",
+        description:
+          "Check local Rust toolchain and analyzer readiness (clippy, audit, deny, geiger, semver, llvm-cov, miri).",
+        input: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+        async execute() {
+          const res = await runPeer(["doctor"], directory);
+          return { content: res.stdout.trim() || res.stderr.trim() };
+        },
+      });
 
-    peer_check: tool({
-      description:
-        "Run peer's local deterministic Rust gate (0 GitHub token, 0 LLM): clippy, cargo-audit delta, AST unsafe/panic detectors, sensitive-file checks, baseline ratchet, and optional SARIF.",
-      args: {
-        base: tool.schema.string().optional().describe("Base git ref (default: main -> master -> HEAD~1)"),
-        tools: tool.schema.string().optional().describe("Optional Cargo analyzers: deny,geiger,semver,coverage,miri or all"),
-        strict: tool.schema.boolean().optional().describe("Fail on Minor/Info findings too"),
-      },
-      async execute(args) {
-        const cliArgs = ["check"];
-        if (args.base) cliArgs.push("--base", args.base);
-        if (args.tools) cliArgs.push("--tools", args.tools);
-        if (args.strict) cliArgs.push("--strict");
-        const res = await runPeer(cliArgs, directory);
-        if (res.exitCode >= 2) {
-          throw new Error(
-            res.stderr.trim() || res.stdout.trim() || `peer check failed (exit ${res.exitCode})`,
-          );
-        }
-        return res.stdout.trim() || res.stderr.trim();
-      },
-    }),
+      editor.add({
+        name: "peer_next",
+        description:
+          "Inspect saved .peer/<pr>/<sha>/ artifacts, check whether git HEAD has changed, and print the current review stage + exact recommended next command.",
+        input: {
+          type: "object",
+          properties: {
+            pr: {
+              type: "string",
+              description: "Optional PR number",
+            },
+          },
+          additionalProperties: false,
+        },
+        async execute(args) {
+          const cliArgs = ["next"];
+          if (typeof args.pr === "string" && args.pr) cliArgs.push(args.pr);
+          const res = await runPeer(cliArgs, directory);
+          return { content: res.stdout.trim() || res.stderr.trim() };
+        },
+      });
 
-    peer_analyze: tool({
-      description:
-        "Run Stage 1 deterministic Rust PR analysis (git diff, clippy, cargo-audit CVE delta, Cargo.lock diff, Tree-sitter AST symbol/unsafe/panic graph, and optional tools). Writes .peer/<pr>/<sha>/01-analyze/prompt-context.md.",
-      args: {
-        pr: tool.schema.string().describe("PR number or full GitHub PR URL"),
-        tools: tool.schema
-          .string()
-          .optional()
-          .describe("Optional Cargo analyzers: deny,geiger,semver,coverage,miri or all"),
-        profile: tool.schema
-          .enum(["quiet", "chill", "assertive"])
-          .optional()
-          .describe("Strictness profile (default: assertive)"),
-        fresh: tool.schema.boolean().optional().describe("Force re-run ignoring cached stage"),
-      },
-      async execute(args) {
-        const cliArgs = ["analyze", args.pr];
-        if (args.tools) cliArgs.push("--tools", args.tools);
-        if (args.profile) cliArgs.push("--profile", args.profile);
-        if (args.fresh) cliArgs.push("--fresh");
-        const res = await runPeer(cliArgs, directory);
-        if (res.exitCode !== 0) {
-          throw new Error(res.stderr.trim() || res.stdout.trim() || `peer analyze exited ${res.exitCode}`);
-        }
-        return res.stdout.trim();
-      },
-    }),
+      editor.add({
+        name: "peer_prompt",
+        description:
+          "Retrieve a built-in Rust review lens prompt directly from the peer binary (single source of truth).",
+        input: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              enum: ["walkthrough", "soundness", "idioms", "skeptic", "format", "list"],
+              description: "Lens prompt name",
+            },
+          },
+          required: ["name"],
+          additionalProperties: false,
+        },
+        async execute(args) {
+          const name = typeof args.name === "string" ? args.name : "list";
+          const res = await runPeer(["prompt", name], directory);
+          if (res.exitCode !== 0) {
+            throw new Error(res.stderr.trim() || `peer prompt exited ${res.exitCode}`);
+          }
+          return { content: res.stdout.trim() };
+        },
+      });
 
-    peer_finalize: tool({
-      description:
-        "Run Judge merge + crate-scoped `cargo check` suggestion verification on an agent review file (--from), or apply deterministic skeptic verdicts (--verdicts).",
-      args: {
-        pr: tool.schema.string().describe("PR number or full GitHub PR URL"),
-        from: tool.schema.string().optional().describe("Path to the agent review Markdown or JSON file"),
-        verdicts: tool.schema.string().optional().describe("Path to skeptic KEEP/DROP verdicts file"),
-        stage: tool.schema
-          .enum(["review", "verify"])
-          .optional()
-          .describe("Target stage folder (default: review)"),
-        strict: tool.schema.boolean().optional().describe("Fail if any finding blocks are malformed"),
-        profile: tool.schema.enum(["quiet", "chill", "assertive"]).optional(),
-      },
-      async execute(args) {
-        const cliArgs = ["finalize", args.pr];
-        if (args.from) cliArgs.push("--from", args.from);
-        if (args.verdicts) cliArgs.push("--verdicts", args.verdicts);
-        if (args.stage) cliArgs.push("--stage", args.stage);
-        if (args.strict) cliArgs.push("--strict");
-        if (args.profile) cliArgs.push("--profile", args.profile);
-        const res = await runPeer(cliArgs, directory);
-        if (res.exitCode !== 0) {
-          throw new Error(res.stderr.trim() || res.stdout.trim() || `peer finalize exited ${res.exitCode}`);
-        }
-        return res.stdout.trim();
-      },
-    }),
+      editor.add({
+        name: "peer_check",
+        description:
+          "Run peer's local deterministic Rust gate (0 GitHub token, 0 LLM): clippy, cargo-audit delta, AST unsafe/panic detectors, sensitive-file checks, baseline ratchet, and optional SARIF.",
+        input: {
+          type: "object",
+          properties: {
+            base: {
+              type: "string",
+              description: "Base git ref (default: main -> master -> HEAD~1)",
+            },
+            tools: {
+              type: "string",
+              description: "Optional Cargo analyzers: deny,geiger,semver,coverage,miri or all",
+            },
+            strict: {
+              type: "boolean",
+              description: "Fail on Minor/Info findings too",
+            },
+            allFiles: {
+              type: "boolean",
+              description: "Scan entire repository (diff against empty tree)",
+            },
+            staged: {
+              type: "boolean",
+              description: "Scan staged changes only (pre-commit mode)",
+            },
+          },
+          additionalProperties: false,
+        },
+        async execute(args) {
+          const cliArgs = ["check"];
+          if (typeof args.base === "string" && args.base) cliArgs.push("--base", args.base);
+          if (typeof args.tools === "string" && args.tools) cliArgs.push("--tools", args.tools);
+          if (args.strict === true) cliArgs.push("--strict");
+          if (args.allFiles === true) cliArgs.push("--all-files");
+          if (args.staged === true) cliArgs.push("--staged");
+          const res = await runPeer(cliArgs, directory);
+          if (res.exitCode >= 2) {
+            throw new Error(
+              res.stderr.trim() || res.stdout.trim() || `peer check failed (exit ${res.exitCode})`,
+            );
+          }
+          return { content: res.stdout.trim() || res.stderr.trim() };
+        },
+      });
 
-    peer_publish: tool({
-      description:
-        "Upload the latest saved local review stage (01-analyze, 02-review, or 03-verify) to the GitHub PR as a PENDING draft (or submitted COMMENT with submit=true).",
-      args: {
-        pr: tool.schema.string().describe("PR number or full GitHub PR URL"),
-        submit: tool.schema
-          .boolean()
-          .optional()
-          .describe("Submit immediately as COMMENT instead of PENDING draft"),
-      },
-      async execute(args) {
-        const cliArgs = ["publish", args.pr];
-        if (args.submit) cliArgs.push("--submit");
-        const res = await runPeer(cliArgs, directory);
-        if (res.exitCode !== 0) {
-          throw new Error(res.stderr.trim() || res.stdout.trim() || `peer publish exited ${res.exitCode}`);
-        }
-        return res.stdout.trim();
-      },
-    }),
+      editor.add({
+        name: "peer_analyze",
+        description:
+          "Run Stage 1 deterministic Rust PR analysis (git diff, clippy, cargo-audit CVE delta, Cargo.lock diff, Tree-sitter AST symbol/unsafe/panic graph, and optional tools). Writes .peer/<pr>/<sha>/01-analyze/prompt-context.md and cohorts/.",
+        input: {
+          type: "object",
+          properties: {
+            pr: {
+              type: "string",
+              description: "PR number or full GitHub PR URL",
+            },
+            tools: {
+              type: "string",
+              description: "Optional Cargo analyzers: deny,geiger,semver,coverage,miri or all",
+            },
+            profile: {
+              type: "string",
+              enum: ["quiet", "chill", "assertive"],
+              description: "Strictness profile (default: assertive)",
+            },
+            fresh: {
+              type: "boolean",
+              description: "Force re-run ignoring cached stage",
+            },
+          },
+          required: ["pr"],
+          additionalProperties: false,
+        },
+        async execute(args) {
+          const cliArgs = ["analyze", String(args.pr)];
+          if (typeof args.tools === "string" && args.tools) cliArgs.push("--tools", args.tools);
+          if (typeof args.profile === "string" && args.profile)
+            cliArgs.push("--profile", args.profile);
+          if (args.fresh === true) cliArgs.push("--fresh");
+          const res = await runPeer(cliArgs, directory);
+          if (res.exitCode !== 0) {
+            throw new Error(
+              res.stderr.trim() || res.stdout.trim() || `peer analyze exited ${res.exitCode}`,
+            );
+          }
+          return { content: res.stdout.trim() };
+        },
+      });
+
+      editor.add({
+        name: "peer_finalize",
+        description:
+          "Run Judge merge + crate-scoped `cargo check` suggestion verification on an agent review file or directory (--from), or apply deterministic skeptic verdicts (--verdicts).",
+        input: {
+          type: "object",
+          properties: {
+            pr: {
+              type: "string",
+              description: "PR number or full GitHub PR URL",
+            },
+            from: {
+              type: "string",
+              description: "Path to agent review Markdown/JSON file or directory of cohort .md files",
+            },
+            verdicts: {
+              type: "string",
+              description: "Path to skeptic KEEP/DROP verdicts file",
+            },
+            stage: {
+              type: "string",
+              enum: ["review", "verify"],
+              description: "Target stage folder (default: review)",
+            },
+            strict: {
+              type: "boolean",
+              description: "Fail if any finding blocks are malformed",
+            },
+            profile: {
+              type: "string",
+              enum: ["quiet", "chill", "assertive"],
+            },
+          },
+          required: ["pr"],
+          additionalProperties: false,
+        },
+        async execute(args) {
+          const cliArgs = ["finalize", String(args.pr)];
+          if (typeof args.from === "string" && args.from) cliArgs.push("--from", args.from);
+          if (typeof args.verdicts === "string" && args.verdicts)
+            cliArgs.push("--verdicts", args.verdicts);
+          if (typeof args.stage === "string" && args.stage) cliArgs.push("--stage", args.stage);
+          if (args.strict === true) cliArgs.push("--strict");
+          if (typeof args.profile === "string" && args.profile)
+            cliArgs.push("--profile", args.profile);
+          const res = await runPeer(cliArgs, directory);
+          if (res.exitCode !== 0) {
+            throw new Error(
+              res.stderr.trim() || res.stdout.trim() || `peer finalize exited ${res.exitCode}`,
+            );
+          }
+          return { content: res.stdout.trim() };
+        },
+      });
+
+      editor.add({
+        name: "peer_publish",
+        description:
+          "Upload the latest saved local review stage (01-analyze, 02-review, or 03-verify) to the GitHub PR as a PENDING draft (or submitted COMMENT with submit=true).",
+        input: {
+          type: "object",
+          properties: {
+            pr: {
+              type: "string",
+              description: "PR number or full GitHub PR URL",
+            },
+            submit: {
+              type: "boolean",
+              description: "Submit immediately as COMMENT instead of PENDING draft",
+            },
+          },
+          required: ["pr"],
+          additionalProperties: false,
+        },
+        async execute(args) {
+          const cliArgs = ["publish", String(args.pr)];
+          if (args.submit === true) cliArgs.push("--submit");
+          const res = await runPeer(cliArgs, directory);
+          if (res.exitCode !== 0) {
+            throw new Error(
+              res.stderr.trim() || res.stdout.trim() || `peer publish exited ${res.exitCode}`,
+            );
+          }
+          return { content: res.stdout.trim() };
+        },
+      });
+    });
   },
-});
-
-export default PeerRustReviewerPlugin;
+};

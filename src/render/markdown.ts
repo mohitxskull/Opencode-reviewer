@@ -207,17 +207,23 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
     allActionable.length > 0
       ? [
           `### 1. Root-Cause Index Table`,
-          `| # | Severity | State | Mechanism | Confidence | Root Cause | Location | Blast Radius | Reversible? | Depends on |`,
-          `| :---: | :--- | :--- | :--- | :---: | :--- | :--- | :--- | :---: | :--- |`,
+          `| # | Severity | State | Mechanism | Confidence | Patch | Root Cause | Location | Blast Radius | Reversible? | Depends on |`,
+          `| :---: | :--- | :--- | :--- | :---: | :---: | :--- | :--- | :--- | :---: | :--- |`,
           ...allActionable.map((f, i) => {
             const sevIcon = SEVERITY_EMOJI[f.severity];
             const confPct = `${Math.round(f.confidence * 100)}%`;
+            const patchBadge =
+              f.suggestion !== null && f.suggestionVerified
+                ? "`✓ cargo check`"
+                : f.suggestion !== null
+                  ? "`unverified`"
+                  : "—";
             const rootCauseText = escapeTableCell(f.rootCause || f.title);
             const locText = `\`${f.filePath}:${f.startLine}-${f.endLine}\``;
             const blastText = escapeTableCell(f.blastRadius || "Local module");
             const revText = f.reversible ? "Yes" : "No";
             const depText = escapeTableCell(f.dependsOn ?? "—");
-            return `| \`F${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState ?? "VERIFIED-DEFECT"}\` | \`${f.evidenceMechanism ?? "Correctness"}\` | ${confPct} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`;
+            return `| \`F${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState ?? "VERIFIED-DEFECT"}\` | \`${f.evidenceMechanism ?? "Correctness"}\` | ${confPct} | ${patchBadge} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`;
           }),
         ].join("\n")
       : "";

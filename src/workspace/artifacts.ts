@@ -139,7 +139,8 @@ export async function writeReviewStageArtifacts(
   await ensurePeerWorkspaceExcluded(repoRoot);
   const commitDir = resolvePeerCommitDir(repoRoot, bundle.pr.number, bundle.headSha);
   const stageDir = join(commitDir, "02-review");
-  await mkdir(stageDir, { recursive: true });
+  const skepticDir = join(stageDir, "skeptic");
+  await mkdir(skepticDir, { recursive: true });
 
   const walkthroughMd = renderWalkthroughComment(bundle);
   const reportMd = renderCombinedLocalReviewMarkdown(bundle);
@@ -150,6 +151,86 @@ export async function writeReviewStageArtifacts(
     latestStage: "review",
   });
 
+  // Slice Stage 2 candidate findings into per-subsystem skeptic packets so agents can fan out
+  // parallel skeptic subagents without writing custom JSON-slicing scripts.
+  const allCandidates = [...bundle.findings, ...(bundle.outsideDiffFindings ?? [])].filter(
+    (f) => f.source !== "clippy" && (f.source !== "audit" || f.id.startsWith("audit-ast-")),
+  );
+  const bySubsystem = new Map<string, typeof allCandidates>();
+  for (const f of allCandidates) {
+    const parts = f.filePath.split("/").filter(Boolean);
+    const key =
+      parts.length >= 3
+        ? parts.slice(0, 3).join("/")
+        : parts.slice(0, Math.max(1, parts.length - 1)).join("/") || "root";
+    const list = bySubsystem.get(key) ?? [];
+    list.push(f);
+    bySubsystem.set(key, list);
+  }
+
+  const sortedSubsystems = Array.from(bySubsystem.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const skepticIndex: Array<{
+    id: string;
+    subsystem: string;
+    file: string;
+    findingCount: number;
+    findingIds: string[];
+  }> = [];
+  const skepticWrites: Promise<unknown>[] = [];
+
+  for (let i = 0; i < sortedSubsystems.length; i++) {
+    const entry = sortedSubsystems[i];
+    if (!entry) continue;
+    const [subsystem, groupFindings] = entry;
+    const slug =
+      subsystem
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "root";
+    const packetId = `skeptic-${String(i + 1).padStart(2, "0")}-${slug}`;
+    const packetFile = `${packetId}.md`;
+    skepticIndex.push({
+      id: packetId,
+      subsystem,
+      file: packetFile,
+      findingCount: groupFindings.length,
+      findingIds: groupFindings.map((f) => f.id),
+    });
+
+    const packetLines = [
+      `# Skeptic Verification Packet: \`${packetId}\` (${subsystem})`,
+      "",
+      `- **PR:** #${bundle.pr.number} (\`${bundle.headSha.slice(0, 7)}\`)`,
+      `- **Candidate Findings:** ${groupFindings.length}`,
+      "",
+      "For each finding below, independently verify the claim against the repository source code and emit one verdict line:",
+      "`- <finding-id> | KEEP|DROP | <concise technical proof>`",
+      "",
+    ];
+    for (const f of groupFindings) {
+      const range = f.startLine === f.endLine ? `L${f.startLine}` : `L${f.startLine}-L${f.endLine}`;
+      packetLines.push(`## \`${f.id}\` — [${f.severity}] (${f.type}) ${f.title}`);
+      packetLines.push(`- **File:** \`${f.filePath}:${range}\``);
+      packetLines.push(`- **Root Cause:** ${f.rootCause}`);
+      packetLines.push(
+        `- **Patch Verification:** ${f.suggestion ? (f.suggestionVerified ? "cargo check OK" : "unverified") : "none"}`,
+      );
+      packetLines.push("");
+      packetLines.push(f.body);
+      if (f.suggestion) {
+        packetLines.push("");
+        packetLines.push("```rust");
+        packetLines.push(f.suggestion);
+        packetLines.push("```");
+      }
+      packetLines.push("");
+    }
+    skepticWrites.push(Bun.write(join(skepticDir, packetFile), packetLines.join("\n")));
+  }
+  skepticWrites.push(
+    Bun.write(join(skepticDir, "index.json"), JSON.stringify(skepticIndex, null, 2)),
+  );
+
   await Promise.all([
     Bun.write(join(stageDir, "report.md"), reportMd),
     Bun.write(join(stageDir, "walkthrough.md"), walkthroughMd),
@@ -157,6 +238,7 @@ export async function writeReviewStageArtifacts(
     Bun.write(join(commitDir, "review.md"), reportMd),
     Bun.write(join(commitDir, "todo.md"), todoMd),
     Bun.write(join(commitDir, "run.json"), JSON.stringify(manifest, null, 2)),
+    ...skepticWrites,
   ]);
 
   return commitDir;

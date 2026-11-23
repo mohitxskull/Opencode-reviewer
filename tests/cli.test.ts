@@ -187,6 +187,14 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     expect(secondOut.join("\n")).toContain("Already analyzed PR #42");
 
     // ─── STAGE 2: peer finalize 42 --from <agent-findings.md> ───
+    const nextAfterAnalyze: string[] = [];
+    const nextCode1 = await runCli(["next", "42", "--repo", repoDir], {
+      stdout: (t) => nextAfterAnalyze.push(t),
+    });
+    expect(nextCode1).toBe(0);
+    expect(nextAfterAnalyze.join("\n")).toContain("Current Stage: 01-analyze");
+    expect(nextAfterAnalyze.join("\n")).toContain("peer finalize 42 --from");
+
     const agentOutputPath = join(commitDir, "agent-findings.md");
     await writeFile(
       agentOutputPath,
@@ -234,6 +242,16 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     expect(finalizeCode).toBe(0);
     expect(await Bun.file(join(commitDir, "02-review", "report.md")).exists()).toBe(true);
     expect(await Bun.file(join(commitDir, "02-review", "bundle.json")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "02-review", "skeptic", "index.json")).exists()).toBe(
+      true,
+    );
+
+    const nextAfterReview: string[] = [];
+    await runCli(["next", "42", "--repo", repoDir], {
+      stdout: (t) => nextAfterReview.push(t),
+    });
+    expect(nextAfterReview.join("\n")).toContain("Current Stage: 02-review");
+    expect(nextAfterReview.join("\n")).toContain("peer finalize 42 --verdicts");
 
     // ─── STAGE 3: peer finalize --verdicts (deterministic skeptic filtering) ───
     const stage2Bundle = (await Bun.file(join(commitDir, "02-review", "bundle.json")).json()) as {
@@ -249,14 +267,17 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
         "\n",
       ),
     );
+    const verifyOut: string[] = [];
     const verifyCode = await runCli(
       ["finalize", "42", "--verdicts", verdictsPath, "--repo", repoDir],
       {
         githubClient,
-        stdout: () => {},
+        stdout: (t) => verifyOut.push(t),
       },
     );
     expect(verifyCode).toBe(0);
+    expect(verifyOut.join("\n")).toContain("--- Skeptic Verdict Ledger ---");
+    expect(verifyOut.join("\n")).toContain("Before: 2 -> Kept: 2 | Dropped: 0");
     expect(await Bun.file(join(commitDir, "03-verify", "report.md")).exists()).toBe(true);
     expect(await Bun.file(join(commitDir, "03-verify", "skeptic.json")).exists()).toBe(true);
 

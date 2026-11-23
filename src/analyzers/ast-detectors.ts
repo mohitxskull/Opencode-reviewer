@@ -51,6 +51,41 @@ function hasInlineAllowSuppression(
   return false;
 }
 
+function hasPanicInvariantDocOrWhyAbove(
+  lines: readonly string[],
+  callLine: number,
+  fnStartLine?: number,
+): boolean {
+  // Check up to 3 lines above the call (staying inside the enclosing function) for `// Why` or `// INVARIANT:`,
+  // and up to 8 doc-comment lines immediately above the enclosing fn for `/// # Panics`.
+  const minCallIdx = fnStartLine !== undefined ? Math.max(0, fnStartLine - 1) : 0;
+  const callFrom = Math.max(minCallIdx, callLine - 4);
+  const callTo = Math.min(lines.length - 1, callLine - 1);
+  for (let i = callFrom; i <= callTo; i++) {
+    if (/\/\/[/!]?\s*(?:Why\b|INVARIANT\s*:|#\s*Panics\b)/i.test(lines[i] ?? "")) {
+      return true;
+    }
+  }
+  if (fnStartLine !== undefined) {
+    // Walk backwards from fnStartLine - 2 while lines are doc comments or attributes
+    for (let i = fnStartLine - 2; i >= Math.max(0, fnStartLine - 12); i--) {
+      const trimmed = (lines[i] ?? "").trim();
+      if (
+        !trimmed.startsWith("///") &&
+        !trimmed.startsWith("//!") &&
+        !trimmed.startsWith("#[") &&
+        trimmed.length > 0
+      ) {
+        break;
+      }
+      if (/\/\/[/!]\s*#\s*Panics\b/i.test(trimmed)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export interface AstDetectorOptions {
   readonly unsafe?: "error" | "warn" | "off";
   readonly panic?: "error" | "warn" | "off";
@@ -207,6 +242,14 @@ export async function collectAstDeterministicFindings(
             enclosingFn = sym;
           }
         }
+      }
+
+      // Skip documented invariant `.expect()` calls preceded by `/// # Panics` or `// Why:`
+      if (
+        call.op === ".expect()" &&
+        hasPanicInvariantDocOrWhyAbove(lines, call.line, enclosingFn?.startLine)
+      ) {
+        continue;
       }
 
       const groupKey = enclosingFn

@@ -14,11 +14,13 @@ license: MIT
 
 Use `peer` as the deterministic Rust ground-truth & verification engine while using your own LLM capabilities and parallel subagents for deep code reasoning.
 
-## Step 0: Preflight Check
-Verify `peer` is installed in `PATH`:
+## Step 0: Preflight & Stage Discovery
+Verify `peer` is installed in `PATH` and check current review state:
 ```bash
 peer doctor
+peer next [PR_NUMBER]
 ```
+`peer next` inspects `.peer/<pr>/<short-sha>/`, warns if local git `HEAD` drifted from the cached analysis, and prints the exact next command for your current stage.
 If `peer` is not installed, tell the user to install it with:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mohitxskull/Opencode-reviewer/main/install.sh | sh
@@ -62,13 +64,14 @@ This writes `.peer/<pr>/<short-sha>/01-analyze/`:
 
 ## Step 3: Optional Adversarial Skeptic Pass
 When the user asks for skeptic verification (or the PR is high-risk):
-1. Load the skeptic prompt with `peer prompt skeptic` and read `.peer/<pr>/<short-sha>/02-review/bundle.json`.
-2. Independently try to disprove each LLM finding (`fp-...`) against the codebase.
-3. Write `KEEP` / `DROP` verdicts (`- fp-<id> | KEEP|DROP | <reason>`) to `.peer/<pr>/<short-sha>/verdicts.md` and apply them deterministically:
+1. Load the skeptic prompt with `peer prompt skeptic`.
+2. Read `.peer/<pr>/<short-sha>/02-review/skeptic/index.json` — `peer finalize` automatically slices all candidate findings (`fp-*` and `audit-ast-*`) into self-contained per-subsystem skeptic packets (`02-review/skeptic/skeptic-<NN>-<slug>.md`).
+3. Fan out parallel read-only skeptic subagents (one per packet in `02-review/skeptic/`) to independently verify or disprove each finding against the codebase.
+4. Combine their `- <finding-id> | KEEP|DROP | <reason>` lines into `.peer/<pr>/<short-sha>/verdicts.md` and apply them deterministically:
    ```bash
    peer finalize <PR_NUMBER_OR_URL> --verdicts .peer/<pr>/<short-sha>/verdicts.md --strict
    ```
-   This updates `.peer/<pr>/<short-sha>/03-verify/report.md`, `review.md`, and `todo.md`.
+   This prints a **Skeptic Verdict Ledger** (exact before/after counts and dropped IDs) and updates `.peer/<pr>/<short-sha>/03-verify/report.md`, `review.md`, and `todo.md`.
 
 ## Step 4: Optional GitHub PR Publish
 Only when the user explicitly asks to post to GitHub:
