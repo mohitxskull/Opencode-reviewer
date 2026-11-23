@@ -12,7 +12,7 @@ import type {
   OpenQuestionItem,
   WalkthroughReport,
 } from "./models.ts";
-import { FindingSchema, LensFindingsOutputSchema, WalkthroughReportSchema } from "./models.ts";
+import { FindingSchema, WalkthroughReportSchema } from "./models.ts";
 import {
   createDefaultOpenCodeClient,
   type ModelSpec,
@@ -30,6 +30,7 @@ import {
   buildWalkthroughContextPrompt,
   type ReviewContext,
 } from "./prompts/context.ts";
+import { parseLensFindingsOutput, parseWalkthroughOutput } from "./prompts/parser.ts";
 import {
   COHORT_DEEP_AUDIT_PROMPT,
   IDIOMS_LOGIC_LENS_PROMPT,
@@ -67,68 +68,17 @@ export {
   type ReviewContext,
 } from "./prompts/context.ts";
 export {
+  extractJsonObject,
+  LensOutputParseError,
+  parseLensFindingsOutput,
+  parseWalkthroughOutput,
+} from "./prompts/parser.ts";
+export {
   COHORT_DEEP_AUDIT_PROMPT,
   IDIOMS_LOGIC_LENS_PROMPT,
   SOUNDNESS_CONCURRENCY_LENS_PROMPT,
   WALKTHROUGH_LENS_PROMPT,
 } from "./prompts/templates.ts";
-
-export class LensOutputParseError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "LensOutputParseError";
-  }
-}
-
-export function extractJsonObject(rawText: string): unknown {
-  const trimmed = rawText.trim();
-
-  // 1. Try direct JSON parse first
-  try {
-    const direct: unknown = JSON.parse(trimmed);
-    if (typeof direct === "object" && direct !== null) {
-      return direct;
-    }
-  } catch {
-    // Continue to fenced block extraction
-  }
-
-  // 2. Try ```json ... ``` or ``` ... ``` fenced code block
-  const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
-  for (const match of trimmed.matchAll(fenceRegex)) {
-    const candidate = match[1]?.trim();
-    if (!candidate) {
-      continue;
-    }
-    try {
-      const parsed: unknown = JSON.parse(candidate);
-      if (typeof parsed === "object" && parsed !== null) {
-        return parsed;
-      }
-    } catch {
-      // Continue searching
-    }
-  }
-
-  // 3. Try outermost { ... } substring
-  const firstBrace = trimmed.indexOf("{");
-  const lastBrace = trimmed.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    const slice = trimmed.slice(firstBrace, lastBrace + 1);
-    try {
-      const parsed: unknown = JSON.parse(slice);
-      if (typeof parsed === "object" && parsed !== null) {
-        return parsed;
-      }
-    } catch {
-      // Fall through
-    }
-  }
-
-  throw new LensOutputParseError(
-    `Failed to extract valid JSON object from lens response: ${trimmed.slice(0, 200)}`,
-  );
-}
 
 export const DEFAULT_SESSION_WAIT_TIMEOUT_MS = 300_000;
 
@@ -532,8 +482,7 @@ export class OpenCodeMultiLensOrchestrator {
       );
 
       try {
-        const jsonObj = extractJsonObject(replyText);
-        const parsed = WalkthroughReportSchema.parse(jsonObj);
+        const parsed = parseWalkthroughOutput(replyText);
         await this.writeCacheFileAtomically(cachePath, parsed);
 
         await audit?.logEvent(
@@ -629,8 +578,7 @@ export class OpenCodeMultiLensOrchestrator {
       );
 
       try {
-        const jsonObj = extractJsonObject(replyText);
-        const parsed = LensFindingsOutputSchema.parse(jsonObj);
+        const parsed = parseLensFindingsOutput(replyText);
 
         const results: Finding[] = [];
         for (let i = 0; i < parsed.findings.length; i++) {
