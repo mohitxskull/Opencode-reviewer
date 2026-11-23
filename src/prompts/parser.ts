@@ -168,7 +168,7 @@ function splitTopLevelSections(markdown: string): Map<string, string> {
       continue;
     }
     if (!inFence) {
-      const headingMatch = /^#{1,2}\s+([A-Za-z0-9 _&/-]+?)\s*$/.exec(line);
+      const headingMatch = /^#{1,2}\s+(?:\d+\.\s*)?([A-Za-z0-9 _&/-]+?)\s*$/.exec(line);
       if (headingMatch?.[1]) {
         const normalizedKey = headingMatch[1]
           .trim()
@@ -189,9 +189,13 @@ function splitTopLevelSections(markdown: string): Map<string, string> {
 function parseKeyValueLines(text: string): Map<string, string> {
   const fields = new Map<string, string>();
   for (const line of text.split("\n")) {
-    const match = /^\s*(?:[-*]\s+)?(?:\*\*)?([a-zA-Z0-9_-]+)(?:\*\*)?\s*:\s*(.+?)\s*$/.exec(line);
+    const match =
+      /^\s*(?:[-*]\s+)?(?:\*\*)?([a-zA-Z0-9_ -]+?)(?::\*\*|\*\*\s*:|\s*:)\s*(.+?)\s*$/.exec(line);
     if (match?.[1] && match[2] !== undefined) {
-      const key = match[1].toLowerCase().replace(/-/g, "_");
+      const key = match[1]
+        .trim()
+        .toLowerCase()
+        .replace(/[\s-]+/g, "_");
       fields.set(key, match[2].trim());
     }
   }
@@ -318,7 +322,17 @@ function parseSingleFindingBlock(blockText: string): LensFindingsOutput["finding
   flush();
 
   const meta = parseKeyValueLines(subSections.get("__HEADER__") ?? "");
-  const rawFile = meta.get("file") ?? meta.get("filepath") ?? meta.get("file_path");
+  const rawLocation = meta.get("location");
+  let rawFile = meta.get("file") ?? meta.get("filepath") ?? meta.get("file_path");
+  let rawLines = meta.get("lines") ?? meta.get("line");
+  if (!rawFile && rawLocation) {
+    const locClean = stripBackticksAndQuotes(rawLocation);
+    const locMatch = /^(.+?):L?(\d+(?:\s*(?:-|\.\.)\s*L?\d+)?)$/.exec(locClean);
+    if (locMatch?.[1] && locMatch[2]) {
+      rawFile = locMatch[1];
+      rawLines = rawLines ?? locMatch[2];
+    }
+  }
   if (!rawFile) {
     return null;
   }
@@ -331,7 +345,7 @@ function parseSingleFindingBlock(blockText: string): LensFindingsOutput["finding
   }
 
   const lineRange = parseLineRange(
-    meta.get("lines") ?? meta.get("line"),
+    rawLines,
     meta.get("start_line") ?? meta.get("startline"),
     meta.get("end_line") ?? meta.get("endline"),
   );
@@ -475,6 +489,15 @@ export function parseLensFindingsOutput(rawText: string): LensFindingsOutput {
     if (parsedFinding !== null) {
       findings.push(parsedFinding);
     }
+  }
+
+  // Why: If the LLM emitted one or more `### FINDING` blocks and EVERY single one
+  // failed to parse (e.g. truncated output or unrecognized format), throwing
+  // LensOutputParseError triggers a retry instead of silently returning 0 findings.
+  if (findingBlocks.length > 0 && findings.length === 0) {
+    throw new LensOutputParseError(
+      `Found ${findingBlocks.length} FINDING block(s) in lens output, but none could be parsed.`,
+    );
   }
 
   const consideredAndRejected: ConsideredAndRejectedItem[] = parsePipeBulletTriples(

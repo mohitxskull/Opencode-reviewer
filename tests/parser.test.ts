@@ -226,5 +226,11 @@ None.
     expect(() => parseWalkthroughOutput("not json and no markdown sections")).toThrow(
       LensOutputParseError,
     );
+    // When FINDING blocks exist but ALL fail to parse, throw LensOutputParseError instead of silently returning []
+    expect(() =>
+      parseLensFindingsOutput(
+        `## FINDINGS\n\n### FINDING\n- severity: Major\n- title: Missing file and lines\n`,
+      ),
+    ).toThrow(LensOutputParseError);
   });
 });

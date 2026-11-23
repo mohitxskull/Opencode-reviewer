@@ -193,13 +193,31 @@ interface CargoJsonLine {
   message?: RustcCompilerMessage;
 }
 
-function spliceSingleNodeSpans(node: RustcCompilerMessage): string | null {
-  const validSpans = (node.spans ?? []).filter(
-    (span) =>
-      typeof span.suggested_replacement === "string" &&
-      span.line_start === span.line_end &&
-      (!span.suggestion_applicability || span.suggestion_applicability === "MachineApplicable"),
-  );
+function spliceSingleNodeSpans(
+  node: RustcCompilerMessage,
+  primarySpan?: Pick<RustcSpan, "file_name" | "line_start" | "line_end">,
+): string | null {
+  const normalizedPrimaryFile = primarySpan?.file_name.replace(/\\/g, "/").replace(/^\.\//, "");
+  const validSpans = (node.spans ?? []).filter((span) => {
+    if (
+      typeof span.suggested_replacement !== "string" ||
+      span.line_start !== span.line_end ||
+      (span.suggestion_applicability && span.suggestion_applicability !== "MachineApplicable")
+    ) {
+      return false;
+    }
+    if (primarySpan) {
+      const normalizedSpanFile = span.file_name.replace(/\\/g, "/").replace(/^\.\//, "");
+      if (
+        normalizedSpanFile !== normalizedPrimaryFile ||
+        primarySpan.line_start !== primarySpan.line_end ||
+        span.line_start !== primarySpan.line_start
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
 
   if (validSpans.length === 0) {
     return null;
@@ -258,13 +276,17 @@ function spliceSingleNodeSpans(node: RustcCompilerMessage): string | null {
   return raw.trim().length > 0 ? raw : null;
 }
 
-export function findSuggestedReplacementForMessage(msg: RustcCompilerMessage): string | null {
-  const direct = spliceSingleNodeSpans(msg);
+export function findSuggestedReplacementForMessage(
+  msg: RustcCompilerMessage,
+  primarySpan?: Pick<RustcSpan, "file_name" | "line_start" | "line_end">,
+): string | null {
+  const effectivePrimary = primarySpan ?? msg.spans?.find((s) => s.is_primary) ?? msg.spans?.[0];
+  const direct = spliceSingleNodeSpans(msg, effectivePrimary);
   if (direct !== null) {
     return direct;
   }
   for (const child of msg.children ?? []) {
-    const childResult = findSuggestedReplacementForMessage(child);
+    const childResult = findSuggestedReplacementForMessage(child, effectivePrimary);
     if (childResult !== null) {
       return childResult;
     }
@@ -289,7 +311,7 @@ export async function collectClippyDiagnostics(
     },
   );
 
-  const [stdoutText] = await Promise.all([
+  const [stdoutText, stderrText, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
@@ -298,6 +320,7 @@ export async function collectClippyDiagnostics(
   const lines = stdoutText.split("\n");
   const diagnostics: ClippyDiagnostic[] = [];
   const seenKeys = new Set<string>();
+  let sawAnyJsonMessage = false;
 
   for (const rawLine of lines) {
     const trimmed = rawLine.trim();
@@ -310,6 +333,7 @@ export async function collectClippyDiagnostics(
     } catch {
       continue;
     }
+    sawAnyJsonMessage = true;
     if (parsed.reason !== "compiler-message" || !parsed.message) {
       continue;
     }
@@ -349,9 +373,13 @@ export async function collectClippyDiagnostics(
         code,
         message: msg.message,
         rendered: msg.rendered ?? msg.message,
-        suggestedReplacement: findSuggestedReplacementForMessage(msg),
+        suggestedReplacement: findSuggestedReplacementForMessage(msg, primarySpan),
       }),
     );
+  }
+
+  if (exitCode !== 0 && !sawAnyJsonMessage && stderrText.trim().length > 0) {
+    throw new Error(`cargo clippy failed (exit ${exitCode}): ${stderrText.trim().slice(0, 300)}`);
   }
 
   return diagnostics;

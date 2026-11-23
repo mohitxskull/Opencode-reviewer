@@ -2,19 +2,22 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { OpenCodeMultiLensOrchestrator } from "../src/lenses.ts";
+import {
+  type OpenCodeClientLike,
+  OpenCodeProviderQuotaError,
+  parseModelSpec,
+} from "../src/opencode/client.ts";
+import {
+  evaluatePermissionRule,
+  READONLY_SESSION_PERMISSIONS,
+} from "../src/opencode/permissions.ts";
 import {
   buildReviewContextPrompt,
   buildWalkthroughContextPrompt,
-  evaluatePermissionRule,
-  extractJsonObject,
-  LensOutputParseError,
-  type OpenCodeClientLike,
-  OpenCodeMultiLensOrchestrator,
-  OpenCodeProviderQuotaError,
-  parseModelSpec,
-  READONLY_SESSION_PERMISSIONS,
   type ReviewContext,
-} from "../src/lenses.ts";
+} from "../src/prompts/context.ts";
+import { extractJsonObject, LensOutputParseError } from "../src/prompts/parser.ts";
 
 const tempDirs: string[] = [];
 

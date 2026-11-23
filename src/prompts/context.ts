@@ -28,6 +28,7 @@ export interface ReviewContext {
   readonly diffBaseSha: string;
   readonly headSha: string;
   readonly isIncremental: boolean;
+  readonly fresh?: boolean;
   readonly crateGraph: CrateGraph;
   readonly diffMap: Readonly<Record<string, DiffFileMap>>;
   readonly clippyDiagnostics: readonly ClippyDiagnostic[];

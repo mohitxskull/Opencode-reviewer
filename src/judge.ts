@@ -3,6 +3,7 @@ import { snapRangeToHunk } from "./diff.ts";
 import {
   allowsFindingForProfile,
   type ClippyDiagnostic,
+  type CrateGraph,
   type DiffFileMap,
   type Finding,
   FindingSchema,
@@ -14,26 +15,40 @@ import {
 export async function advisoriesToFindings(
   advisories: readonly SecurityAdvisory[],
   repoRoot: string,
+  crateGraph?: CrateGraph,
 ): Promise<Finding[]> {
   if (advisories.length === 0) {
     return [];
   }
 
-  let cargoTomlLines: string[] = [];
-  const cargoTomlFile = Bun.file(join(repoRoot, "Cargo.toml"));
-  if (await cargoTomlFile.exists()) {
-    cargoTomlLines = (await cargoTomlFile.text()).replace(/\r\n/g, "\n").split("\n");
-  }
-
-  const findCrateLineInCargoToml = (crateName: string): number => {
-    const escaped = crateName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(`^\\s*${escaped}\\s*=`);
-    for (let i = 0; i < cargoTomlLines.length; i++) {
-      if (regex.test(cargoTomlLines[i] ?? "")) {
-        return i + 1;
+  const candidateManifests = new Set<string>(["Cargo.toml"]);
+  if (crateGraph) {
+    for (const info of Object.values(crateGraph.crates)) {
+      if (info.manifestDir) {
+        candidateManifests.add(`${info.manifestDir.replace(/\/+$/, "")}/Cargo.toml`);
       }
     }
-    return 1;
+  }
+
+  const manifestLines = new Map<string, string[]>();
+  for (const relManifest of candidateManifests) {
+    const file = Bun.file(join(repoRoot, relManifest));
+    if (await file.exists()) {
+      manifestLines.set(relManifest, (await file.text()).replace(/\r\n/g, "\n").split("\n"));
+    }
+  }
+
+  const locateCrateInManifests = (crateName: string): { filePath: string; line: number } => {
+    const escaped = crateName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`^\\s*${escaped}\\s*=`);
+    for (const [relManifest, lines] of manifestLines.entries()) {
+      for (let i = 0; i < lines.length; i++) {
+        if (regex.test(lines[i] ?? "")) {
+          return { filePath: relManifest, line: i + 1 };
+        }
+      }
+    }
+    return { filePath: "Cargo.toml", line: 1 };
   };
 
   const results: Finding[] = [];
@@ -43,7 +58,7 @@ export async function advisoriesToFindings(
       continue;
     }
 
-    const line = findCrateLineInCargoToml(adv.packageName);
+    const { filePath, line } = locateCrateInManifests(adv.packageName);
     const aliasText = adv.aliases.length > 0 ? ` (${adv.aliases.join(", ")})` : "";
     const patchedText =
       adv.patchedVersions.length > 0
@@ -57,8 +72,8 @@ export async function advisoriesToFindings(
 
     results.push(
       FindingSchema.parse({
-        id: `audit-${adv.id}-${i + 1}`,
-        filePath: "Cargo.toml",
+        id: `audit-${adv.id}-${adv.packageName}`,
+        filePath,
         startLine: line,
         endLine: line,
         severity: adv.kind === "vulnerability" ? "Critical" : "Major",
@@ -105,6 +120,7 @@ export function clippyToFindings(
     const snapped = snapRangeToHunk(fileMap, diag.startLine, diag.endLine);
     const startLine = snapped ? snapped.startLine : diag.startLine;
     const endLine = snapped ? snapped.endLine : diag.endLine;
+    const rangeShifted = startLine !== diag.startLine || endLine !== diag.endLine;
 
     const severity = diag.level === "error" ? "Critical" : "Minor";
     const type = diag.level === "error" ? "Bug" : "Idioms";
@@ -120,7 +136,7 @@ export function clippyToFindings(
         type,
         title: `Compiler/Clippy ${diag.level}${codeLabel}: ${diag.message}`,
         body: diag.rendered.trim() || diag.message,
-        suggestion: diag.suggestedReplacement,
+        suggestion: rangeShifted ? null : diag.suggestedReplacement,
         suggestionVerified: false,
         agentPrompt: `Resolve Cargo Clippy/rustc diagnostic${codeLabel} in \`${diag.filePath}\` lines ${startLine}-${endLine}: ${diag.message}`,
         confidence: 1.0,
@@ -144,7 +160,12 @@ function mergeTwoFindings(a: Finding, b: Finding): Finding {
   const primary = aRank < bRank ? a : bRank < aRank ? b : a.source !== "clippy" ? a : b;
   const secondary = primary === a ? b : a;
 
-  const combinedSuggestion = primary.suggestion ?? secondary.suggestion;
+  // Why: Only inherit `secondary.suggestion` when both findings target the exact same
+  // line interval; otherwise a 1-line Clippy suggestion attached to a 3-line lens range
+  // would replace 3 lines with 1 line and silently delete adjacent code.
+  const sameExactRange =
+    primary.startLine === secondary.startLine && primary.endLine === secondary.endLine;
+  const combinedSuggestion = primary.suggestion ?? (sameExactRange ? secondary.suggestion : null);
   const combinedPrompt =
     primary.agentPrompt.includes(secondary.agentPrompt) ||
     secondary.agentPrompt.includes(primary.agentPrompt)
@@ -167,9 +188,22 @@ function mergeTwoFindings(a: Finding, b: Finding): Finding {
 
 function clusterOverlappingFindings(candidates: readonly Finding[]): Finding[] {
   const merged: Finding[] = [];
+  const seenAuditIds = new Set<string>();
+
   for (const candidate of candidates) {
+    // Why: Multiple transitive CVE advisories can share Cargo.toml:1-1. Never merge
+    // distinct `audit` advisories by line overlap; deduplicate them strictly by id.
+    if (candidate.source === "audit") {
+      if (!seenAuditIds.has(candidate.id)) {
+        seenAuditIds.add(candidate.id);
+        merged.push(candidate);
+      }
+      continue;
+    }
+
     const overlapIdx = merged.findIndex(
       (existing) =>
+        existing.source !== "audit" &&
         existing.filePath === candidate.filePath &&
         rangesOverlap(existing.startLine, existing.endLine, candidate.startLine, candidate.endLine),
     );
@@ -227,11 +261,15 @@ export function partitionAndFilterFindings(
     const fileMap = diffMap[finding.filePath];
     const snapped = fileMap ? snapRangeToHunk(fileMap, finding.startLine, finding.endLine) : null;
     if (snapped) {
+      const rangeShifted =
+        snapped.startLine !== finding.startLine || snapped.endLine !== finding.endLine;
       rawInline.push(
         FindingSchema.parse({
           ...finding,
           startLine: snapped.startLine,
           endLine: snapped.endLine,
+          suggestion: rangeShifted ? null : finding.suggestion,
+          suggestionVerified: rangeShifted ? false : finding.suggestionVerified,
         }),
       );
     } else {

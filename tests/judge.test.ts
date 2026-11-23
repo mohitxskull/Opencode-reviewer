@@ -61,9 +61,51 @@ describe("Task 06: Judge deduplication and profile filtering", () => {
 
     expect(merged.length).toBe(1);
     expect(merged[0]?.severity).toBe("Major");
-    expect(merged[0]?.suggestion).toBe("    x + 1");
+    // Clippy suggestion targets line 12-12 while lens finding targets 11-13:
+    // suggestion MUST NOT be inherited across mismatched ranges (would delete lines 11 & 13)
+    expect(merged[0]?.suggestion).toBeNull();
     expect(merged[0]?.agentPrompt).toContain("checked_add");
     expect(merged[0]?.agentPrompt).toContain("clippy::needless_return");
+
+    // Distinct audit CVEs anchored at Cargo.toml:1-1 must NOT collapse into one finding
+    const auditFindings: Finding[] = [
+      {
+        id: "audit-RUSTSEC-2024-0001-foo",
+        filePath: "Cargo.toml",
+        startLine: 1,
+        endLine: 1,
+        severity: "Critical",
+        type: "Security",
+        title: "RUSTSEC-2024-0001: foo",
+        body: "Vuln 1",
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: "Upgrade foo",
+        confidence: 1.0,
+        source: "audit",
+      },
+      {
+        id: "audit-RUSTSEC-2024-0002-bar",
+        filePath: "Cargo.toml",
+        startLine: 1,
+        endLine: 1,
+        severity: "Critical",
+        type: "Security",
+        title: "RUSTSEC-2024-0002: bar",
+        body: "Vuln 2",
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: "Upgrade bar",
+        confidence: 1.0,
+        source: "audit",
+      },
+    ];
+    const partitionedAudit = partitionAndFilterFindings(
+      auditFindings,
+      SAMPLE_DIFF_MAP,
+      "assertive",
+    );
+    expect(partitionedAudit.outsideDiffFindings.length).toBe(2);
   });
 
   test("deduplicateAndFilterFindings drops findings outside diff hunks and applies profile gate", () => {

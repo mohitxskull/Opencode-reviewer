@@ -20,18 +20,15 @@ import {
 import { buildRustSymbolGraph } from "./graph.ts";
 import { advisoriesToFindings, clippyToFindings, partitionAndFilterFindings } from "./judge.ts";
 import { LearningStore } from "./learnings.ts";
-import {
-  type MultiLensRunResult,
-  OpenCodeMultiLensOrchestrator,
-  parseModelSpec,
-  type ReviewContext,
-} from "./lenses.ts";
+import { type MultiLensRunResult, OpenCodeMultiLensOrchestrator } from "./lenses.ts";
 import {
   type DeletionProposedItem,
   ReviewBundleSchema,
   type ReviewProfile,
   ReviewProfileSchema,
 } from "./models.ts";
+import { parseModelSpec } from "./opencode/client.ts";
+import type { ReviewContext } from "./prompts/context.ts";
 import {
   renderInlineFindingComment,
   renderPrReviewSummaryBody,
@@ -414,6 +411,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           diffBaseSha,
           headSha: pr.headSha,
           isIncremental,
+          fresh,
           crateGraph,
           diffMap,
           clippyDiagnostics,
@@ -450,7 +448,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
         // Step 3: Judge Pass (merge Clippy + CVE/audit + lens findings, partition into inline / outside-diff / nitpicks)
         const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
-        const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot);
+        const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
         const partitioned = partitionAndFilterFindings(
           [...clippyFindings, ...auditFindings, ...rawLensFindings],
           diffMap,
