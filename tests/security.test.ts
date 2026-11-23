@@ -166,11 +166,17 @@ describe("Deterministic CVE & RustSec advisory collector", () => {
     expect(findings[0]?.title).toContain("CVE-2023-5678");
   });
 
-  test("buildScrubbedCargoEnv strips secrets and SSH sockets while keeping Cargo/Rust toolchain vars", () => {
+  test("buildScrubbedCargoEnv strips secrets and SSH sockets while keeping Cargo/Rust/proxy/sccache vars", () => {
     const scrubbed = buildScrubbedCargoEnv({
       PATH: "/usr/bin:/home/user/.cargo/bin",
       HOME: "/home/user",
       CARGO_HOME: "/home/user/.cargo",
+      HTTPS_PROXY: "http://proxy.corp:8080",
+      SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt",
+      RUSTC_WRAPPER: "sccache",
+      SCCACHE_DIR: "/tmp/sccache",
+      CARGO_NET_OFFLINE: "true",
+      CARGO_HTTP_MULTIPLEXING: "false",
       PEER_GITHUB_TOKEN: "ghp_super_secret",
       GITHUB_TOKEN: "gho_secret",
       SSH_AUTH_SOCK: "/tmp/ssh-agent.sock",
@@ -180,6 +186,12 @@ describe("Deterministic CVE & RustSec advisory collector", () => {
 
     expect(scrubbed.PATH).toBe("/usr/bin:/home/user/.cargo/bin");
     expect(scrubbed.CARGO_HOME).toBe("/home/user/.cargo");
+    expect(scrubbed.HTTPS_PROXY).toBe("http://proxy.corp:8080");
+    expect(scrubbed.SSL_CERT_FILE).toBe("/etc/ssl/certs/ca-certificates.crt");
+    expect(scrubbed.RUSTC_WRAPPER).toBe("sccache");
+    expect(scrubbed.SCCACHE_DIR).toBe("/tmp/sccache");
+    expect(scrubbed.CARGO_NET_OFFLINE).toBe("true");
+    expect(scrubbed.CARGO_HTTP_MULTIPLEXING).toBe("false");
     expect(scrubbed.PEER_GITHUB_TOKEN).toBeUndefined();
     expect(scrubbed.GITHUB_TOKEN).toBeUndefined();
     expect(scrubbed.SSH_AUTH_SOCK).toBeUndefined();

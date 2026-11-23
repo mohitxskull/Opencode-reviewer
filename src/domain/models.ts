@@ -262,6 +262,8 @@ export const ReviewCheckpointSchema = z.object({
 });
 export type ReviewCheckpoint = z.infer<typeof ReviewCheckpointSchema>;
 
+export const PEER_VERSION = "0.2.0";
+
 export const PipelineStageSchema = z.enum(["analyze", "review", "verify", "publish"]);
 export type PipelineStage = z.infer<typeof PipelineStageSchema>;
 
@@ -273,10 +275,13 @@ export const RunManifestSchema = z.object({
   isIncremental: z.boolean(),
   profile: ReviewProfileSchema,
   model: z.string().min(1),
+  peerVersion: z.string().default(PEER_VERSION),
+  configHash: z.string().default("default"),
   status: z.enum(["completed", "partial", "failed"]),
   completedStages: z.array(PipelineStageSchema).default([]),
   latestStage: PipelineStageSchema.default("review"),
   enabledTools: z.array(z.string()).default([]),
+  skippedTools: z.array(z.string()).default([]),
   failedCohorts: z.array(z.string()).default([]),
   inlineFindingsCount: z.number().int().min(0),
   outsideDiffFindingsCount: z.number().int().min(0),

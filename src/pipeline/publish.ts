@@ -24,7 +24,6 @@ export interface PublishStageInput {
   readonly repo: string;
   readonly pr: PullRequestMetadata;
   readonly submitReview: boolean;
-  readonly allowPartial: boolean;
   readonly modelLabel: string;
   readonly enabledToolsList: readonly string[];
   readonly runStartMs: number;
@@ -43,7 +42,6 @@ export async function runPublishStage(input: PublishStageInput): Promise<number>
     repo,
     pr,
     submitReview,
-    allowPartial,
     modelLabel,
     enabledToolsList,
     runStartMs,
@@ -86,17 +84,9 @@ export async function runPublishStage(input: PublishStageInput): Promise<number>
 
   if (!bundleToPublish || !sourceStage || !analyzeContext) {
     writeErr(
-      `No local review artifacts found for PR #${pr.number} @ ${pr.headSha.slice(0, 7)}. Run \`peer analyze ${pr.number}\`, \`peer review ${pr.number}\`, or \`peer verify ${pr.number}\` first.`,
+      `No local review artifacts found for PR #${pr.number} @ ${pr.headSha.slice(0, 7)}. Run \`peer analyze ${pr.number}\` (and optionally \`peer finalize ${pr.number} --from <file>\`) first.`,
     );
     return 1;
-  }
-
-  const failedCohorts = bundleToPublish.failedCohorts ?? [];
-  if (failedCohorts.length > 0 && !allowPartial) {
-    writeErr(
-      `Error: ${failedCohorts.length} review cohort(s) failed (${failedCohorts.join(", ")}). Refusing to publish partial review. Pass --allow-partial to override.`,
-    );
-    return 2;
   }
 
   const walkthroughCommentBody = renderWalkthroughComment(bundleToPublish);

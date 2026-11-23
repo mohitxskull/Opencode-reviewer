@@ -634,9 +634,9 @@ export function parseSkepticVerdicts(rawText: string): Map<string, SkepticVerdic
 
   for (const [id, decision, reason] of parsePipeBulletTriples(verdictSection)) {
     const norm = decision.trim().toUpperCase();
-    if (norm === "KEEP" || norm === "DROP") {
+    if (norm === "KEEP" || norm === "CONFIRM" || norm === "DROP" || norm === "REFUTE") {
       verdicts.set(id, {
-        keep: norm === "KEEP",
+        keep: norm === "KEEP" || norm === "CONFIRM",
         reason: reason.trim(),
       });
     }

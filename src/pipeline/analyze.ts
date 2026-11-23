@@ -5,7 +5,11 @@ import {
   type CoverageReport,
   coverageReportToFindings,
 } from "../analyzers/coverage.ts";
-import { collectCargoDenyDiagnostics, denyDiagnosticsToFindings } from "../analyzers/deny.ts";
+import {
+  CargoDenyMissingError,
+  collectCargoDenyDiagnostics,
+  denyDiagnosticsToFindings,
+} from "../analyzers/deny.ts";
 import {
   collectCargoGeigerReport,
   type GeigerReport,
@@ -19,6 +23,7 @@ import {
   resolveFileArchitecturalLayer,
 } from "../analyzers/rust.ts";
 import {
+  CargoAuditMissingError,
   type CargoLockDiff,
   collectCargoLockDiff,
   collectSecurityAdvisories,
@@ -67,7 +72,9 @@ export interface AnalyzeStageInput {
   readonly fresh: boolean;
   readonly enabledTools: ReadonlySet<OptionalTool>;
   readonly enabledToolsList: readonly string[];
+  readonly explicitTools?: ReadonlySet<string>;
   readonly peerConfig?: PeerConfig;
+  readonly configHash?: string;
   readonly runStartMs: number;
   readonly githubClient: GitHubClient;
   readonly checkpointStore: CheckpointStore;
@@ -96,7 +103,9 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     fresh,
     enabledTools,
     enabledToolsList,
+    explicitTools = enabledTools,
     peerConfig = DEFAULT_PEER_CONFIG,
+    configHash = "default",
     runStartMs,
     githubClient,
     checkpointStore,
@@ -213,6 +222,40 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       `▶ Stage 1 (analyze): Running deterministic Rust analyzers on ${modifiedFiles.size} file(s)...`,
     );
 
+    const skippedTools: string[] = [];
+
+    const runAuditWithPolicy = async () => {
+      if (modifiedFiles.size === 0 || !peerConfig.tools.audit) {
+        return [];
+      }
+      try {
+        return await collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha });
+      } catch (err) {
+        if (err instanceof CargoAuditMissingError && !explicitTools.has("audit")) {
+          skippedTools.push(
+            "cargo-audit (not installed — install with: cargo install cargo-audit)",
+          );
+          return [];
+        }
+        throw err;
+      }
+    };
+
+    const runDenyWithPolicy = async () => {
+      if (modifiedFiles.size === 0) {
+        return [];
+      }
+      try {
+        return await collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") });
+      } catch (err) {
+        if (err instanceof CargoDenyMissingError && !explicitTools.has("deny")) {
+          skippedTools.push("cargo-deny (not installed — install with: cargo install cargo-deny)");
+          return [];
+        }
+        throw err;
+      }
+    };
+
     const [
       crateGraph,
       clippyDiagnostics,
@@ -225,13 +268,9 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       modifiedFiles.size > 0 && peerConfig.tools.clippy
         ? collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap)
         : Promise.resolve([]),
-      modifiedFiles.size > 0 && peerConfig.tools.audit
-        ? collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha })
-        : Promise.resolve([]),
+      runAuditWithPolicy(),
       collectCargoLockDiff(repoRoot, pr.baseSha),
-      modifiedFiles.size > 0
-        ? collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") })
-        : Promise.resolve([]),
+      runDenyWithPolicy(),
       modifiedFiles.size > 0
         ? buildRustSymbolGraph(repoRoot, diffMap)
         : Promise.resolve({ nodes: [] }),
@@ -351,7 +390,10 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
           replacement: "Remove dead symbol or wire into production caller",
         })),
       openQuestions: [],
-      notReviewed: excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
+      notReviewed: [
+        ...skippedTools.map((t) => `Tool skipped: ${t}`),
+        ...excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
+      ],
       failedCohorts: [],
       clippyDiagnostics,
       securityAdvisories,
@@ -396,6 +438,8 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       model: "deterministic",
       durationMs: Date.now() - runStartMs,
       enabledTools: enabledToolsList,
+      skippedTools,
+      configHash,
       symbolGraph,
       promptContextMd,
       extraToolOutputs,

@@ -1,17 +1,21 @@
 import { type Plugin, tool } from "@opencode-ai/plugin";
 
-function runPeer(args: string[], cwd?: string): { stdout: string; stderr: string; exitCode: number } {
+async function runPeer(
+  args: string[],
+  cwd?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const peerBin = process.env.PEER_BIN || "peer";
-  const proc = Bun.spawnSync([peerBin, ...args], {
+  const proc = Bun.spawn([peerBin, ...args], {
     cwd: cwd || process.cwd(),
     stdout: "pipe",
     stderr: "pipe",
   });
-  return {
-    stdout: proc.stdout.toString(),
-    stderr: proc.stderr.toString(),
-    exitCode: proc.exitCode,
-  };
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout, stderr, exitCode };
 }
 
 export const PeerRustReviewerPlugin: Plugin = async ({ directory }) => ({
@@ -36,7 +40,7 @@ export const PeerRustReviewerPlugin: Plugin = async ({ directory }) => ({
         if (args.tools) cliArgs.push("--tools", args.tools);
         if (args.profile) cliArgs.push("--profile", args.profile);
         if (args.fresh) cliArgs.push("--fresh");
-        const res = runPeer(cliArgs, directory);
+        const res = await runPeer(cliArgs, directory);
         if (res.exitCode !== 0) {
           throw new Error(res.stderr.trim() || res.stdout.trim() || `peer analyze exited ${res.exitCode}`);
         }
@@ -60,7 +64,7 @@ export const PeerRustReviewerPlugin: Plugin = async ({ directory }) => ({
         const cliArgs = ["finalize", args.pr, "--from", args.from];
         if (args.stage) cliArgs.push("--stage", args.stage);
         if (args.profile) cliArgs.push("--profile", args.profile);
-        const res = runPeer(cliArgs, directory);
+        const res = await runPeer(cliArgs, directory);
         if (res.exitCode !== 0) {
           throw new Error(res.stderr.trim() || res.stdout.trim() || `peer finalize exited ${res.exitCode}`);
         }
@@ -81,7 +85,7 @@ export const PeerRustReviewerPlugin: Plugin = async ({ directory }) => ({
       async execute(args) {
         const cliArgs = ["publish", args.pr];
         if (args.submit) cliArgs.push("--submit");
-        const res = runPeer(cliArgs, directory);
+        const res = await runPeer(cliArgs, directory);
         if (res.exitCode !== 0) {
           throw new Error(res.stderr.trim() || res.stdout.trim() || `peer publish exited ${res.exitCode}`);
         }

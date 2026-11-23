@@ -15,7 +15,11 @@ import {
 } from "../domain/models.ts";
 import { partitionAndFilterFindings } from "../judge/partition.ts";
 import { SuggestionCompilerVerifier } from "../judge/verifier.ts";
-import { parseLensFindingsOutput, parseWalkthroughOutput } from "../llm/parser.ts";
+import {
+  parseLensFindingsOutput,
+  parseSkepticVerdicts,
+  parseWalkthroughOutput,
+} from "../llm/parser.ts";
 import {
   loadJsonIfExists,
   writeReviewStageArtifacts,
@@ -27,11 +31,38 @@ import { withInPlaceCheckout } from "../workspace/git.ts";
 export interface FinalizeStageInput {
   readonly repoRoot: string;
   readonly commitDir: string;
-  readonly fromPath: string;
+  readonly fromPath?: string;
+  readonly verdictsPath?: string;
   readonly stage: "review" | "verify";
+  readonly strict?: boolean;
   readonly profile: ReviewProfile;
+  readonly configHash?: string;
   readonly runStartMs: number;
   readonly auditLogger: AuditLogger;
+}
+
+export interface FinalizeStageResult {
+  readonly bundle: ReviewBundle;
+  readonly warnings: string[];
+}
+
+function collectMarkdownParseWarnings(rawText: string, parsedCount: number): string[] {
+  const warnings: string[] = [];
+  const blockMatches = rawText.match(/^###\s+FINDING\b/gim) ?? [];
+  if (blockMatches.length > parsedCount) {
+    warnings.push(
+      `Dropped ${blockMatches.length - parsedCount} malformed ### FINDING block(s) out of ${blockMatches.length} (check required File/Lines/Title/Body fields).`,
+    );
+  }
+  const sevLines = rawText.match(/^-\s*Severity\s*:\s*(.+)$/gim) ?? [];
+  const validSevs = new Set(["critical", "major", "minor", "trivial", "info", "none"]);
+  for (const line of sevLines) {
+    const rawSev = line.split(":").slice(1).join(":").trim().toLowerCase();
+    if (rawSev && !validSevs.has(rawSev)) {
+      warnings.push(`Unknown severity "${rawSev}" coerced to Minor.`);
+    }
+  }
+  return warnings;
 }
 
 function parseAgentReviewInput(
@@ -43,6 +74,7 @@ function parseAgentReviewInput(
   consideredAndRejected: ConsideredAndRejectedItem[];
   deletionsProposed: DeletionProposedItem[];
   openQuestions: OpenQuestionItem[];
+  warnings: string[];
 } {
   let walkthrough = fallbackWalkthrough;
   try {
@@ -60,17 +92,104 @@ function parseAgentReviewInput(
       source: "soundness",
     }),
   );
+  const warnings = collectMarkdownParseWarnings(rawText, findings.length);
   return {
     walkthrough,
     findings,
     consideredAndRejected: parsedFindings.consideredAndRejected,
     deletionsProposed: parsedFindings.deletionsProposed,
     openQuestions: parsedFindings.openQuestions,
+    warnings,
   };
 }
 
-export async function runFinalizeStage(input: FinalizeStageInput): Promise<ReviewBundle> {
-  const { repoRoot, commitDir, fromPath, stage, profile, runStartMs, auditLogger } = input;
+export async function runFinalizeStage(input: FinalizeStageInput): Promise<FinalizeStageResult> {
+  const {
+    repoRoot,
+    commitDir,
+    fromPath,
+    verdictsPath,
+    stage,
+    strict = false,
+    profile,
+    configHash = "default",
+    runStartMs,
+    auditLogger,
+  } = input;
+
+  // Deterministic Stage 3 skeptic verdicts mode (`peer finalize --verdicts <file>`)
+  if (verdictsPath) {
+    const reviewBundle = await loadJsonIfExists(
+      join(commitDir, "02-review", "bundle.json"),
+      ReviewBundleSchema,
+    );
+    if (!reviewBundle) {
+      throw new Error(
+        `No Stage 2 (review) bundle found in ${join(commitDir, "02-review", "bundle.json")}. Run \`peer finalize --from <file>\` first.`,
+      );
+    }
+    const verdictsFile = Bun.file(verdictsPath);
+    if (!(await verdictsFile.exists())) {
+      throw new Error(`Verdicts file not found: ${verdictsPath}`);
+    }
+    const rawVerdicts = await verdictsFile.text();
+    const verdictMap = parseSkepticVerdicts(rawVerdicts);
+    const warnings: string[] = [];
+
+    if (verdictMap.size === 0) {
+      warnings.push("No valid skeptic verdicts were parsed from the verdicts file.");
+      if (strict) {
+        throw new Error(`Strict mode failed: ${warnings.join(" ")}`);
+      }
+    }
+
+    const refutedItems: ConsideredAndRejectedItem[] = [];
+    const filterList = (list: readonly Finding[]): Finding[] => {
+      const kept: Finding[] = [];
+      for (const f of list) {
+        // Deterministic compiler/audit findings are ground truth and never refuted by LLM skeptic
+        if (f.source === "clippy" || f.source === "audit") {
+          kept.push(f);
+          continue;
+        }
+        const v = verdictMap.get(f.id);
+        if (v && !v.keep) {
+          refutedItems.push({
+            location: `${f.filePath}:${f.startLine}`,
+            hypothesis: f.title,
+            reasonDismissed: v.reason || "Refuted by skeptic pass",
+          });
+        } else {
+          kept.push(f);
+        }
+      }
+      return kept;
+    };
+
+    const updatedBundle = ReviewBundleSchema.parse({
+      ...reviewBundle,
+      findings: filterList(reviewBundle.findings),
+      outsideDiffFindings: filterList(reviewBundle.outsideDiffFindings ?? []),
+      consideredAndRejected: [...(reviewBundle.consideredAndRejected ?? []), ...refutedItems],
+      generatedAt: new Date().toISOString(),
+    });
+
+    await writeVerifyStageArtifacts(
+      repoRoot,
+      updatedBundle,
+      {
+        keptCount: updatedBundle.findings.length + (updatedBundle.outsideDiffFindings?.length ?? 0),
+        refutedItems,
+      },
+      {
+        model: "external-agent",
+        configHash,
+        durationMs: Date.now() - runStartMs,
+      },
+    );
+
+    return { bundle: updatedBundle, warnings };
+  }
 
   const analyzeContext: AnalyzeStageContext | null = await loadJsonIfExists(
     join(commitDir, "01-analyze", "context.json"),
@@ -87,12 +206,20 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Revie
     );
   }
 
+  if (!fromPath) {
+    throw new Error("`peer finalize` requires `--from <file>` or `--verdicts <file>`.");
+  }
+
   const inputFile = Bun.file(fromPath);
   if (!(await inputFile.exists())) {
     throw new Error(`Input review file not found: ${fromPath}`);
   }
   const rawAgentOutput = await inputFile.text();
   const agentReview = parseAgentReviewInput(rawAgentOutput, analyzeBundle.walkthrough);
+
+  if (strict && agentReview.warnings.length > 0) {
+    throw new Error(`Strict mode failed:\n- ${agentReview.warnings.join("\n- ")}`);
+  }
 
   const bundle = await withInPlaceCheckout(
     {
@@ -146,9 +273,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Revie
         consideredAndRejected: agentReview.consideredAndRejected,
         deletionsProposed: [...agentReview.deletionsProposed, ...rustcDeadCodeDeletions],
         openQuestions: agentReview.openQuestions,
-        notReviewed: analyzeContext.excludedFiles.map(
-          (f) => `${f} (non-Rust or documentation file skipped)`,
-        ),
+        notReviewed: analyzeBundle.notReviewed ?? [],
         failedCohorts: [],
         clippyDiagnostics: analyzeContext.clippyDiagnostics,
         securityAdvisories: analyzeContext.securityAdvisories,
@@ -167,6 +292,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Revie
       },
       {
         model: "external-agent",
+        configHash,
         durationMs: Date.now() - runStartMs,
         enabledTools: analyzeContext.enabledTools,
       },
@@ -174,10 +300,11 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Revie
   } else {
     await writeReviewStageArtifacts(repoRoot, bundle, {
       model: "external-agent",
+      configHash,
       durationMs: Date.now() - runStartMs,
       enabledTools: analyzeContext.enabledTools,
     });
   }
 
-  return bundle;
+  return { bundle, warnings: agentReview.warnings };
 }

@@ -235,6 +235,27 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     expect(await Bun.file(join(commitDir, "02-review", "report.md")).exists()).toBe(true);
     expect(await Bun.file(join(commitDir, "02-review", "bundle.json")).exists()).toBe(true);
 
+    // ─── STAGE 3: peer finalize --verdicts (deterministic skeptic filtering) ───
+    const verdictsPath = join(commitDir, "skeptic-verdicts.md");
+    await writeFile(
+      verdictsPath,
+      [
+        "## VERDICTS",
+        "- agent-1 | KEEP | Verified overflow on i32::MAX",
+        "- agent-2 | KEEP | Kept for compiler-verification assertion below",
+      ].join("\n"),
+    );
+    const verifyCode = await runCli(
+      ["finalize", "42", "--verdicts", verdictsPath, "--repo", repoDir],
+      {
+        githubClient,
+        stdout: () => {},
+      },
+    );
+    expect(verifyCode).toBe(0);
+    expect(await Bun.file(join(commitDir, "03-verify", "report.md")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "03-verify", "skeptic.json")).exists()).toBe(true);
+
     // ─── STAGE 4: peer publish 42 ───
     const publishCode = await runCli(["publish", "42", "--repo", repoDir], {
       githubClient,
@@ -349,5 +370,14 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     });
     expect(rmCode).toBe(0);
     expect(out.join("\n")).toContain(`Removed learning [${id}]`);
+
+    // peer doctor runs cleanly and prints toolchain table
+    out.length = 0;
+    const doctorCode = await runCli(["doctor"], {
+      stdout: (t) => out.push(t),
+    });
+    expect(doctorCode).toBe(0);
+    expect(out.join("\n")).toContain("peer doctor");
+    expect(out.join("\n")).toContain("cargo-audit");
   });
 });

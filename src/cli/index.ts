@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import {
+  PEER_VERSION,
   type ReviewProfile,
   ReviewProfileSchema,
   type RunManifest,
@@ -15,7 +16,7 @@ import { runPublishStage } from "../pipeline/publish.ts";
 import { formatTerminalReport } from "../render/terminal.ts";
 import { loadJsonIfExists } from "../workspace/artifacts.ts";
 import { AuditLogger } from "../workspace/audit-log.ts";
-import { loadPeerConfig } from "../workspace/config.ts";
+import { computePeerConfigHash, loadPeerConfig } from "../workspace/config.ts";
 import {
   CheckpointStore,
   detectRepoOwnerAndName,
@@ -24,6 +25,7 @@ import {
   resolvePeerCommitDir,
 } from "../workspace/git.ts";
 import { LearningStore } from "../workspace/learnings.ts";
+import { runDoctorCommand } from "./doctor.ts";
 import { runInitCommand } from "./init.ts";
 import { runLearnCommand } from "./learn.ts";
 
@@ -47,7 +49,9 @@ const HELP_TEXT = `peer — Agent-Agnostic Rust PR Ground-Truth & Verification E
 Commands:
   peer analyze  [PR]               Stage 1: Deterministic Rust analysis -> .peer/<pr>/<sha>/01-analyze/ (default)
   peer finalize [PR] --from <file> Stage 2/3: Judge merge + cargo check suggestion verifier -> review.md
+  peer finalize [PR] --verdicts <f> Stage 3: Apply skeptic verdicts deterministically -> 03-verify/
   peer publish  [PR]               Stage 4: Upload latest saved stage (01, 02, or 03) to GitHub PR
+  peer doctor                      Check local Rust toolchain & analyzer readiness
   peer init [--fresh]              Scaffold a peer.toml repository configuration file
   peer learn add "<rule>" [--scope "<glob>"] [--repo <path>]
   peer learn list [--repo <path>]
@@ -58,7 +62,9 @@ Options:
   --profile <profile>        Strictness profile: quiet | chill | assertive (default: assertive)
   --tools <list|all>         Optional Cargo analyzers: deny,geiger,semver,coverage,miri or all
   --from <file>              For 'finalize': agent review output file (Structured Markdown or JSON)
+  --verdicts <file>          For 'finalize': skeptic verdicts file to filter Stage 2 findings
   --stage <review|verify>    For 'finalize': target stage folder (default: review)
+  --strict                   For 'finalize': fail if any finding blocks are malformed or coerced
   --fresh                    Ignore saved stage artifacts & checkpoint; re-run from scratch
   --submit                   For 'publish': submit as COMMENT instead of PENDING draft
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
@@ -92,6 +98,15 @@ export function parseToolsOption(raw?: string): Set<OptionalTool> {
   return selected;
 }
 
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((val, i) => val === sb[i]);
+}
+
 export async function runCli(argv: readonly string[], deps: CliDependencies = {}): Promise<number> {
   const writeOut = deps.stdout ?? ((text: string) => console.log(text));
   const writeErr = deps.stderr ?? ((text: string) => console.error(text));
@@ -104,7 +119,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         profile: { type: "string" },
         tools: { type: "string" },
         from: { type: "string" },
+        verdicts: { type: "string" },
         stage: { type: "string" },
+        strict: { type: "boolean", default: false },
         fresh: { type: "boolean", default: false },
         submit: { type: "boolean", default: false },
         scope: { type: "string" },
@@ -116,6 +133,10 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     if (parsed.values.help) {
       writeOut(HELP_TEXT);
       return 0;
+    }
+
+    if (parsed.positionals[0] === "doctor") {
+      return await runDoctorCommand(writeOut);
     }
 
     const repoRoot = resolveGitTopLevel(resolve(parsed.values.repo ?? process.cwd()));
@@ -148,6 +169,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     const profile: ReviewProfile = ReviewProfileSchema.parse(parsed.values.profile ?? "assertive");
     const fresh = parsed.values.fresh ?? false;
+    const strict = parsed.values.strict ?? false;
     const submitReview = parsed.values.submit ?? false;
     const enabledTools = parseToolsOption(parsed.values.tools);
 
@@ -158,8 +180,10 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     const finalizeStage = (parsed.values.stage ?? "review") as "review" | "verify";
     if (command === "finalize") {
-      if (!parsed.values.from) {
-        writeErr("Error: `peer finalize` requires `--from <file>` with the agent's review output.");
+      if (!parsed.values.from && !parsed.values.verdicts) {
+        writeErr(
+          "Error: `peer finalize` requires `--from <file>` or `--verdicts <file>` with the agent's review output.",
+        );
         return 1;
       }
       if (finalizeStage !== "review" && finalizeStage !== "verify") {
@@ -225,6 +249,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const pr = await githubClient.getPullRequest(owner, repo, prNumber);
     // Load peer.toml strictly from pr.baseSha (never untrusted pr.headSha)
     const peerConfig = await loadPeerConfig(repoRoot, pr.baseSha);
+    const configHash = computePeerConfigHash(peerConfig);
     const effectiveProfile: ReviewProfile = parsed.values.profile ? profile : peerConfig.profile;
     const effectiveSubmit = submitReview || peerConfig.publish.mode === "comment";
     const effectiveTools = new Set<OptionalTool>(enabledTools);
@@ -250,7 +275,6 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         repo,
         pr,
         submitReview: effectiveSubmit,
-        allowPartial: false,
         modelLabel: "external-agent",
         enabledToolsList: effectiveToolsList,
         runStartMs,
@@ -269,10 +293,13 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       existingManifest.status === "completed" &&
       existingManifest.headSha === pr.headSha &&
       existingManifest.profile === effectiveProfile &&
+      existingManifest.peerVersion === PEER_VERSION &&
+      existingManifest.configHash === configHash &&
+      sameStringArray(existingManifest.enabledTools, effectiveToolsList) &&
       existingManifest.completedStages.includes("analyze")
     ) {
       writeOut(
-        `Already analyzed PR #${pr.number} @ ${pr.headSha.slice(0, 7)} (profile=${effectiveProfile}).\nContext: file://${resolve(commitDir, "01-analyze", "prompt-context.md")}\nReport:  file://${resolve(commitDir, "01-analyze", "report.md")}\nPass --fresh to force a re-run.`,
+        `Already analyzed PR #${pr.number} @ ${pr.headSha.slice(0, 7)} (profile=${effectiveProfile}, tools=${effectiveToolsList.join(",") || "core"}).\nContext: file://${resolve(commitDir, "01-analyze", "prompt-context.md")}\nReport:  file://${resolve(commitDir, "01-analyze", "report.md")}\nPass --fresh to force a re-run.`,
       );
       return 0;
     }
@@ -295,6 +322,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           headSha: pr.headSha,
           baseSha: pr.baseSha,
           enabledTools: effectiveToolsList,
+          configHash,
           fresh,
         },
       );
@@ -309,7 +337,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         fresh,
         enabledTools: effectiveTools,
         enabledToolsList: effectiveToolsList,
+        explicitTools: effectiveTools,
         peerConfig,
+        configHash,
         runStartMs,
         githubClient,
         checkpointStore,
@@ -326,19 +356,27 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
 
     // command === "finalize"
-    const fromPath = resolve(parsed.values.from ?? "");
-    const bundle = await runFinalizeStage({
+    const fromPath = parsed.values.from ? resolve(parsed.values.from) : undefined;
+    const verdictsPath = parsed.values.verdicts ? resolve(parsed.values.verdicts) : undefined;
+    const result = await runFinalizeStage({
       repoRoot,
       commitDir,
       fromPath,
-      stage: finalizeStage,
+      verdictsPath,
+      stage: verdictsPath ? "verify" : finalizeStage,
+      strict,
       profile: effectiveProfile,
+      configHash,
       runStartMs,
       auditLogger,
     });
 
-    const stageFolder = finalizeStage === "verify" ? "03-verify" : "02-review";
-    writeOut(formatTerminalReport(bundle, repoRoot, join(commitDir, stageFolder)));
+    for (const warning of result.warnings) {
+      writeErr(`Warning: ${warning}`);
+    }
+
+    const stageFolder = verdictsPath || finalizeStage === "verify" ? "03-verify" : "02-review";
+    writeOut(formatTerminalReport(result.bundle, repoRoot, join(commitDir, stageFolder)));
     return 0;
   } catch (err) {
     writeErr(`Error: ${err instanceof Error ? err.message : String(err)}`);

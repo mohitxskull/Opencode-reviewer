@@ -118,6 +118,10 @@ export function parsePeerConfigToml(rawToml: string, sourceLabel = "peer.toml"):
   return result.data;
 }
 
+export function computePeerConfigHash(config: PeerConfig): string {
+  return new Bun.CryptoHasher("sha256").update(JSON.stringify(config)).digest("hex").slice(0, 16);
+}
+
 // Why: A PR head commit is untrusted and could weaken `peer.toml` (e.g., disabling
 // `audit`/`miri` or adding security-critical files to `diff.ignore`). Always read
 // `peer.toml` from `gitRef` (pr.baseSha) via `git show` when reviewing a PR.

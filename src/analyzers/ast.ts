@@ -1,6 +1,6 @@
-import { createRequire } from "node:module";
-
+import treeSitterRustWasm from "tree-sitter-rust/tree-sitter-rust.wasm" with { type: "file" };
 import { Language, type Node as SyntaxNode, Parser } from "web-tree-sitter";
+import webTreeSitterWasm from "web-tree-sitter/web-tree-sitter.wasm" with { type: "file" };
 
 export type RustAstSymbolKind = "fn" | "struct" | "enum" | "trait";
 
@@ -30,14 +30,13 @@ let parserPromise: Promise<Parser> | null = null;
 async function getRustParser(): Promise<Parser> {
   if (!parserPromise) {
     parserPromise = (async () => {
-      const require = createRequire(import.meta.url);
-      const wasmRuntimePath = require.resolve("web-tree-sitter/web-tree-sitter.wasm");
-      const rustWasmPath = require.resolve("tree-sitter-rust/tree-sitter-rust.wasm");
-
+      // Why: Using Bun static `with { type: "file" }` asset imports embeds both
+      // WASM binaries inside `bun build --compile` executables so `peer` works
+      // standalone without `node_modules/` at runtime.
       await Parser.init({
-        locateFile: () => wasmRuntimePath,
+        locateFile: () => webTreeSitterWasm,
       });
-      const rustLang = await Language.load(rustWasmPath);
+      const rustLang = await Language.load(treeSitterRustWasm);
       const parser = new Parser();
       parser.setLanguage(rustLang);
       return parser;

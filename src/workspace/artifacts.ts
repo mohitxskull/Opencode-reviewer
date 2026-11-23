@@ -5,6 +5,7 @@ import type { RustSymbolGraph } from "../analyzers/symbol-graph.ts";
 import {
   type AnalyzeStageContext,
   type ConsideredAndRejectedItem,
+  PEER_VERSION,
   type PipelineStage,
   type ReviewBundle,
   type RunManifest,
@@ -19,6 +20,8 @@ export interface WriteArtifactsMeta {
   readonly completedStages?: readonly PipelineStage[];
   readonly latestStage?: PipelineStage;
   readonly enabledTools?: readonly string[];
+  readonly skippedTools?: readonly string[];
+  readonly configHash?: string;
   readonly symbolGraph?: RustSymbolGraph;
   readonly promptContextMd?: string;
   readonly extraToolOutputs?: Readonly<Record<string, unknown>>;
@@ -34,10 +37,13 @@ function buildRunManifest(bundle: ReviewBundle, meta: WriteArtifactsMeta): RunMa
     isIncremental: bundle.isIncremental,
     profile: bundle.profile,
     model: meta.model ?? "deterministic",
+    peerVersion: PEER_VERSION,
+    configHash: meta.configHash ?? "default",
     status: failedCohorts.length > 0 ? "partial" : "completed",
     completedStages: meta.completedStages ?? ["analyze", "review"],
     latestStage: meta.latestStage ?? "review",
     enabledTools: meta.enabledTools ?? [],
+    skippedTools: meta.skippedTools ?? [],
     failedCohorts,
     inlineFindingsCount: bundle.findings.length,
     outsideDiffFindingsCount: bundle.outsideDiffFindings?.length ?? 0,
