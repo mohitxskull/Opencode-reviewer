@@ -19,6 +19,7 @@ import { partitionAndFilterFindings } from "../judge/partition.ts";
 import { SuggestionCompilerVerifier } from "../judge/verifier.ts";
 import {
   LensOutputParseError,
+  type MalformedFindingDiagnostic,
   parseLensFindingsWithWarnings,
   parseSkepticVerdicts,
   parseWalkthroughOutput,
@@ -63,9 +64,14 @@ export interface CohortCoverageReport {
   readonly extraFiles: readonly string[];
 }
 
+export interface FileMalformedFindingDiagnostic extends MalformedFindingDiagnostic {
+  readonly file: string;
+}
+
 export interface FinalizeStageResult {
   readonly bundle: ReviewBundle;
   readonly warnings: string[];
+  readonly malformedBlocks?: readonly FileMalformedFindingDiagnostic[];
   readonly verdictSummary?: string;
   readonly reconciliation?: VerdictReconciliation;
   readonly cohortCoverage?: CohortCoverageReport;
@@ -81,6 +87,7 @@ function parseAgentReviewInput(
   deletionsProposed: DeletionProposedItem[];
   openQuestions: OpenQuestionItem[];
   warnings: string[];
+  malformedBlocks: MalformedFindingDiagnostic[];
 } {
   let walkthrough = fallbackWalkthrough;
   let parsedWalkthrough = false;
@@ -104,6 +111,7 @@ function parseAgentReviewInput(
         deletionsProposed: [],
         openQuestions: [],
         warnings: [],
+        malformedBlocks: [],
       };
     }
     throw err;
@@ -126,6 +134,7 @@ function parseAgentReviewInput(
     deletionsProposed: parsedFindings.output.deletionsProposed,
     openQuestions: parsedFindings.output.openQuestions,
     warnings: parsedFindings.warnings,
+    malformedBlocks: parsedFindings.malformedBlocks,
   };
 }
 
@@ -188,11 +197,12 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
         `No Stage 2 (review) bundle found in ${join(commitDir, "02-review", "bundle.json")}. Run \`peer finalize --from <file>\` first.`,
       );
     }
-    const verdictsFile = Bun.file(verdictsPath);
-    if (!(await verdictsFile.exists())) {
-      throw new Error(`Verdicts file not found: ${verdictsPath}`);
+    const verdictFiles = await resolveAgentInputFiles(verdictsPath);
+    const rawVerdictChunks: string[] = [];
+    for (const vf of verdictFiles) {
+      rawVerdictChunks.push(await Bun.file(vf).text());
     }
-    const rawVerdicts = await verdictsFile.text();
+    const rawVerdicts = rawVerdictChunks.join("\n\n");
     const verdictMap = parseSkepticVerdicts(rawVerdicts);
     const warnings: string[] = [];
 
@@ -357,8 +367,9 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
   const mergedDeletions: DeletionProposedItem[] = [];
   const mergedQuestions: OpenQuestionItem[] = [];
   const mergedWarnings: string[] = [];
+  const mergedMalformed: FileMalformedFindingDiagnostic[] = [];
 
-  // When cohort-named files (`peer-cohort-*`) are submitted and some cohorts from `01-analyze/cohorts/index.json`
+  // When cohort-named files (`peer-cohort-*` or `cohort-*`) are submitted and some cohorts from `01-analyze/cohorts/index.json`
   // are missing, warn (and fail in --strict mode) so the orchestrator agent self-heals instead of silently dropping cohorts.
   if (matchedCohortIds.length > 0 && missingCohortIds.length > 0) {
     mergedWarnings.push(
@@ -377,6 +388,9 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     mergedConsidered.push(...parsed.consideredAndRejected);
     mergedDeletions.push(...parsed.deletionsProposed);
     mergedQuestions.push(...parsed.openQuestions);
+    for (const m of parsed.malformedBlocks) {
+      mergedMalformed.push({ ...m, file: filePath });
+    }
     for (const w of parsed.warnings) {
       mergedWarnings.push(inputPaths.length > 1 ? `[${filePath}] ${w}` : w);
     }
@@ -487,5 +501,10 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     });
   }
 
-  return { bundle, warnings: agentReview.warnings, cohortCoverage };
+  return {
+    bundle,
+    warnings: agentReview.warnings,
+    malformedBlocks: mergedMalformed,
+    cohortCoverage,
+  };
 }

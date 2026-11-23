@@ -1,6 +1,6 @@
 import { registerSignalCleanup } from "./lifecycle.ts";
 
-export const DEFAULT_ANALYZER_TIMEOUT_MS = 5 * 60 * 1000;
+export const DEFAULT_ANALYZER_TIMEOUT_MS = 10 * 60 * 1000;
 export const DEFAULT_VERIFIER_TIMEOUT_MS = 2 * 60 * 1000;
 
 export interface TrackedCommandOptions {

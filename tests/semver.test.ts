@@ -25,12 +25,13 @@ A publicly-visible struct has at least one public field that is no longer availa
 
 Failed in:
   field Config.timeout in file src/config.rs:15
+  type OrderIntentStore is no longer UnwindSafe, in /workspace/repo/src/exchange/orders.rs:315
 `;
 
 describe("cargo-semver-checks integration", () => {
   test("parses failure blocks and file:line locations into SemVer findings", () => {
-    const violations = parseCargoSemverOutput(SAMPLE_SEMVER_OUTPUT);
-    expect(violations.length).toBe(3);
+    const violations = parseCargoSemverOutput(SAMPLE_SEMVER_OUTPUT, "/workspace/repo");
+    expect(violations.length).toBe(4);
     expect(violations[0]?.lint).toBe("function_missing");
     expect(violations[0]?.filePath).toBe("src/api.rs");
     expect(violations[0]?.line).toBe(42);
@@ -40,12 +41,16 @@ describe("cargo-semver-checks integration", () => {
     expect(violations[2]?.filePath).toBe("src/config.rs");
     expect(violations[2]?.line).toBe(15);
 
+    expect(violations[3]?.filePath).toBe("src/exchange/orders.rs");
+    expect(violations[3]?.line).toBe(315);
+    expect(violations[3]?.symbol).toContain("OrderIntentStore");
+
     const prompt = formatSemverPromptSection(violations);
     expect(prompt).toContain("function_missing");
     expect(prompt).toContain("src/api.rs:42");
 
     const findings = semverViolationsToFindings(violations);
-    expect(findings.length).toBe(3);
+    expect(findings.length).toBe(4);
     expect(findings[0]?.severity).toBe("Major");
     expect(findings[0]?.source).toBe("audit");
   });

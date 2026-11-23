@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import {
   CargoDenyMissingError,
   collectCargoDenyDiagnostics,
   denyDiagnosticsToFindings,
+  hasCargoDenyConfig,
   parseCargoDenyJsonLines,
 } from "../src/analyzers/deny.ts";
 
@@ -75,7 +76,13 @@ describe("Tool #2: cargo-deny supply-chain & policy checker", () => {
     expect(invoked).toBe(false);
 
     // With deny.toml present and cargo-deny missing -> throws CargoDenyMissingError
+    expect(await hasCargoDenyConfig(dir)).toBe(false);
+    await mkdir(join(dir, ".cargo"), { recursive: true });
+    await writeFile(join(dir, ".cargo", "deny.toml"), "[bans]\nmultiple-versions = 'warn'\n");
+    expect(await hasCargoDenyConfig(dir)).toBe(true);
+    await rm(join(dir, ".cargo"), { recursive: true, force: true });
     await writeFile(join(dir, "deny.toml"), "[bans]\nmultiple-versions = 'warn'\n");
+    expect(await hasCargoDenyConfig(dir)).toBe(true);
     await expect(
       collectCargoDenyDiagnostics(dir, {
         runner: async () => ({

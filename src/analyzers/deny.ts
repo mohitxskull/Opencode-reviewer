@@ -82,18 +82,28 @@ async function defaultCargoDenyRunner(
   if (!Bun.which("cargo-deny")) {
     throw new CargoDenyMissingError();
   }
-  return await runTrackedCommand(["cargo", "deny", "check", "--format", "json"], {
+  // Why: In cargo-deny 0.22+, `--format json` is a top-level global option before `check`,
+  // not a flag on the `check` subcommand.
+  return await runTrackedCommand(["cargo", "deny", "--format", "json", "check"], {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),
   });
+}
+
+export async function hasCargoDenyConfig(repoRoot: string): Promise<boolean> {
+  const [rootDeny, dotCargoDeny] = await Promise.all([
+    Bun.file(join(repoRoot, "deny.toml")).exists(),
+    Bun.file(join(repoRoot, ".cargo", "deny.toml")).exists(),
+  ]);
+  return rootDeny || dotCargoDeny;
 }
 
 export async function collectCargoDenyDiagnostics(
   repoRoot: string,
   options: { force?: boolean; runner?: CargoDenyRunner } = {},
 ): Promise<CargoDenyDiagnostic[]> {
-  const hasDenyToml = await Bun.file(join(repoRoot, "deny.toml")).exists();
-  if (!hasDenyToml && !options.force) {
+  const hasConfig = await hasCargoDenyConfig(repoRoot);
+  if (!hasConfig && !options.force) {
     return [];
   }
 

@@ -1,3 +1,5 @@
+import { isAbsolute, relative } from "node:path";
+
 import { z } from "zod";
 
 import { AnalyzerExecutionError, type Finding, FindingSchema } from "../domain/models.ts";
@@ -24,7 +26,7 @@ export const SemverViolationSchema = z.object({
 });
 export type SemverViolation = z.infer<typeof SemverViolationSchema>;
 
-export function parseCargoSemverOutput(rawOutput: string): SemverViolation[] {
+export function parseCargoSemverOutput(rawOutput: string, repoRoot?: string): SemverViolation[] {
   const violations: SemverViolation[] = [];
   const seen = new Set<string>();
   const normalized = rawOutput.replace(/\r\n/g, "\n");
@@ -89,10 +91,14 @@ export function parseCargoSemverOutput(rawOutput: string): SemverViolation[] {
     }
 
     for (const lineText of failedLines) {
-      const fileLineMatch = lineText.match(/in file\s+([^\s:]+):(\d+)/);
-      const filePath = fileLineMatch?.[1]?.replace(/^\.\//, "") ?? "Cargo.toml";
+      const fileLineMatch = lineText.match(/\bin\s+(?:file\s+)?([^\s:]+):(\d+)/);
+      let filePath = fileLineMatch?.[1]?.replace(/\\/g, "/") ?? "Cargo.toml";
+      if (repoRoot && isAbsolute(filePath)) {
+        filePath = relative(repoRoot, filePath).replace(/\\/g, "/");
+      }
+      filePath = filePath.replace(/^\.\//, "") || "Cargo.toml";
       const lineNum = Math.max(1, Number.parseInt(fileLineMatch?.[2] ?? "1", 10) || 1);
-      const symbolMatch = lineText.match(/^([^,]+?)(?:,\s*(?:previously\s+)?in file|$)/);
+      const symbolMatch = lineText.match(/^([^,]+?)(?:,\s*(?:previously\s+)?in\s+(?:file\s+)?|$)/);
       const symbol = symbolMatch?.[1]?.trim() || null;
 
       const key = `${current.lint}:${filePath}:${lineNum}:${symbol ?? ""}`;
@@ -159,7 +165,7 @@ export async function collectCargoSemverViolations(
     throw new CargoSemverChecksMissingError();
   }
 
-  const parsed = parseCargoSemverOutput(combined);
+  const parsed = parseCargoSemverOutput(combined, repoRoot);
   if (exitCode !== 0 && parsed.length === 0) {
     throw new AnalyzerExecutionError("cargo semver-checks", exitCode, stderr || stdout);
   }

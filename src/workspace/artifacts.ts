@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import type { RustSymbolGraph } from "../analyzers/symbol-graph.ts";
 import {
@@ -10,7 +10,7 @@ import {
   type ReviewBundle,
   type RunManifest,
   RunManifestSchema,
-  type ToolOutcome,
+  type ToolOutcomeDetail,
 } from "../domain/models.ts";
 import { renderCombinedLocalReviewMarkdown, renderWalkthroughComment } from "../render/markdown.ts";
 import { buildReviewTodoQueue, renderReviewTodoMarkdown } from "../render/todo.ts";
@@ -23,7 +23,7 @@ export interface WriteArtifactsMeta {
   readonly latestStage?: PipelineStage;
   readonly enabledTools?: readonly string[];
   readonly skippedTools?: readonly string[];
-  readonly toolOutcomes?: Readonly<Record<string, ToolOutcome>>;
+  readonly toolOutcomes?: Readonly<Record<string, ToolOutcomeDetail>>;
   readonly configHash?: string;
   readonly symbolGraph?: RustSymbolGraph;
   readonly promptContextMd?: string;
@@ -103,14 +103,23 @@ export async function writeAnalyzeStageArtifacts(
   }
   if (meta.cohortPrompts && meta.cohortPrompts.length > 0) {
     const cohortsDir = join(stageDir, "cohorts");
+    const reviewsDir = join(commitDir, "reviews");
     await mkdir(cohortsDir, { recursive: true });
-    const indexPayload = meta.cohortPrompts.map((c) => ({
-      id: c.id,
-      label: c.label,
-      file: `${c.id}.md`,
-      fileCount: c.filePaths.length,
-      filePaths: c.filePaths,
-    }));
+    await mkdir(reviewsDir, { recursive: true });
+    const indexPayload = meta.cohortPrompts.map((c) => {
+      const packetPath = resolve(cohortsDir, `${c.id}.md`);
+      const outputPath = resolve(reviewsDir, `${c.id}.md`);
+      return {
+        id: c.id,
+        label: c.label,
+        file: `${c.id}.md`,
+        packetPath,
+        outputPath,
+        fileCount: c.filePaths.length,
+        filePaths: c.filePaths,
+        subagentBrief: `Read ${packetPath}, audit every diff hunk for Rust soundness/concurrency/idiom defects, write Structured Markdown findings to ${outputPath}, and return ONLY the output file path + finding count.`,
+      };
+    });
     writes.push(Bun.write(join(cohortsDir, "index.json"), JSON.stringify(indexPayload, null, 2)));
     for (const cohort of meta.cohortPrompts) {
       writes.push(Bun.write(join(cohortsDir, `${cohort.id}.md`), cohort.markdown));
@@ -170,12 +179,17 @@ export async function writeReviewStageArtifacts(
   }
 
   const sortedSubsystems = Array.from(bySubsystem.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const verdictsDir = join(commitDir, "verdicts");
+  await mkdir(verdictsDir, { recursive: true });
   const skepticIndex: Array<{
     id: string;
     subsystem: string;
     file: string;
+    packetPath: string;
+    outputPath: string;
     findingCount: number;
     findingIds: string[];
+    subagentBrief: string;
   }> = [];
   const skepticWrites: Promise<unknown>[] = [];
 
@@ -190,12 +204,17 @@ export async function writeReviewStageArtifacts(
         .replace(/^-+|-+$/g, "") || "root";
     const packetId = `skeptic-${String(i + 1).padStart(2, "0")}-${slug}`;
     const packetFile = `${packetId}.md`;
+    const packetPath = resolve(skepticDir, packetFile);
+    const outputPath = resolve(verdictsDir, packetFile);
     skepticIndex.push({
       id: packetId,
       subsystem,
       file: packetFile,
+      packetPath,
+      outputPath,
       findingCount: groupFindings.length,
       findingIds: groupFindings.map((f) => f.id),
+      subagentBrief: `Read ${packetPath}, independently verify or refute each finding against the repository source code, write KEEP/DROP verdict lines to ${outputPath}, and return ONLY the output file path + KEEP/DROP counts.`,
     });
 
     const packetLines = [
@@ -203,9 +222,11 @@ export async function writeReviewStageArtifacts(
       "",
       `- **PR:** #${bundle.pr.number} (\`${bundle.headSha.slice(0, 7)}\`)`,
       `- **Candidate Findings:** ${groupFindings.length}`,
+      `- **Target Output File:** \`${outputPath}\``,
       "",
-      "For each finding below, independently verify the claim against the repository source code and emit one verdict line:",
+      "For each finding below, independently verify the claim against the repository source code and write one verdict line per finding to the Target Output File above:",
       "`- <finding-id> | KEEP|DROP | <concise technical proof>`",
+      "Return **ONLY** the Target Output File path + KEEP/DROP counts.",
       "",
     ];
     for (const f of groupFindings) {

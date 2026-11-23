@@ -10,6 +10,7 @@ import {
   CargoDenyMissingError,
   collectCargoDenyDiagnostics,
   denyDiagnosticsToFindings,
+  hasCargoDenyConfig,
 } from "../analyzers/deny.ts";
 import {
   collectCargoGeigerReport,
@@ -45,6 +46,7 @@ import {
   type ReviewBundle,
   ReviewBundleSchema,
   type ReviewProfile,
+  type ToolOutcomeDetail,
 } from "../domain/models.ts";
 import type { GitHubClient } from "../github/client.ts";
 import {
@@ -91,6 +93,7 @@ export interface AnalyzeStageOutput {
   readonly analyzeContext: AnalyzeStageContext;
   readonly analyzeBundle: ReviewBundle;
   readonly skippedTools: readonly string[];
+  readonly toolOutcomes: Readonly<Record<string, ToolOutcomeDetail>>;
   readonly symbolGraph?: RustSymbolGraph;
   readonly cargoLockDiff: CargoLockDiff | null;
   readonly geigerReport: GeigerReport | null;
@@ -157,6 +160,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
   let coverageReport: CoverageReport | null = null;
   let miriReport: MiriReport | null = null;
   const skippedTools: string[] = [];
+  const toolOutcomes: Record<string, ToolOutcomeDetail> = {};
 
   if (analyzeContext && analyzeBundle) {
     const toolsDir = join(commitDir, "01-analyze", "tools");
@@ -179,6 +183,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       analyzeContext,
       analyzeBundle,
       skippedTools,
+      toolOutcomes,
       symbolGraph,
       cargoLockDiff,
       geigerReport,
@@ -249,11 +254,22 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       for (const optTool of ["deny", "geiger", "semver", "coverage", "miri"] as const) {
         if (!enabledTools.has(optTool)) {
           skippedTools.push(`${optTool} (not enabled; pass --tools ${optTool} or --tools all)`);
+          toolOutcomes[optTool] = {
+            status: "skipped",
+            findingsCount: 0,
+            reason: "not_enabled",
+            remediationCommand: `peer analyze ${pr.number} --tools ${optTool}`,
+          };
         }
       }
 
       const runAuditWithPolicy = async () => {
         if (modifiedFiles.size === 0 || !peerConfig.tools.audit) {
+          toolOutcomes.audit = {
+            status: "skipped",
+            findingsCount: 0,
+            reason: modifiedFiles.size === 0 ? "no_modified_files" : "not_enabled",
+          };
           return [];
         }
         try {
@@ -263,6 +279,12 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
             skippedTools.push(
               "cargo-audit (not installed — install with: cargo install cargo-audit)",
             );
+            toolOutcomes.audit = {
+              status: "skipped",
+              findingsCount: 0,
+              reason: "missing_binary",
+              remediationCommand: "cargo install cargo-audit",
+            };
             return [];
           }
           throw err;
@@ -273,13 +295,34 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         if (modifiedFiles.size === 0) {
           return [];
         }
+        const hasConfig = await hasCargoDenyConfig(repoRoot);
+        if (!hasConfig) {
+          if (enabledTools.has("deny")) {
+            skippedTools.push(
+              "deny (skipped: no deny.toml or .cargo/deny.toml in repository; run 'cargo deny init' to configure)",
+            );
+            toolOutcomes.deny = {
+              status: "skipped",
+              findingsCount: 0,
+              reason: "missing_config",
+              remediationCommand: "cargo deny init",
+            };
+          }
+          return [];
+        }
         try {
-          return await collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") });
+          return await collectCargoDenyDiagnostics(repoRoot, { force: true });
         } catch (err) {
           if (err instanceof CargoDenyMissingError && !explicitTools.has("deny")) {
             skippedTools.push(
               "cargo-deny (not installed — install with: cargo install cargo-deny)",
             );
+            toolOutcomes.deny = {
+              status: "skipped",
+              findingsCount: 0,
+              reason: "missing_binary",
+              remediationCommand: "cargo install cargo-deny",
+            };
             return [];
           }
           throw err;
@@ -319,29 +362,29 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
           .filter((name) => Boolean(crateGraph.crates[name])),
       );
 
-      const [geigerRes, semverRes, coverageRes, miriRes] = await Promise.all([
-        collectCargoGeigerReport(repoRoot, {
-          enabled: enabledTools.has("geiger"),
-          crateGraph,
-        }),
-        collectCargoSemverViolations(repoRoot, {
-          enabled: enabledTools.has("semver"),
-          baseSha: pr.baseSha,
-        }),
-        collectCargoLlvmCovReport(repoRoot, diffMap, {
-          enabled: enabledTools.has("coverage"),
-          packages: Array.from(modifiedCrates),
-        }),
-        collectMiriReport(repoRoot, diffMap, {
-          enabled: enabledTools.has("miri"),
-          crateGraph,
-        }),
-      ]);
-
-      geigerReport = geigerRes;
-      semverViolations = semverRes;
-      coverageReport = coverageRes;
-      miriReport = miriRes;
+      // Why: Heavy optional Cargo analyzers (`geiger`, `semver-checks`, `llvm-cov`, `miri`) all
+      // acquire the workspace Cargo build lock (`target/`) and compile rustdoc/instrumented binaries.
+      // Running them sequentially prevents lock contention and ensures each tool gets its own full
+      // timeout window instead of starving while waiting for another Cargo invocation.
+      geigerReport = await collectCargoGeigerReport(repoRoot, {
+        enabled: enabledTools.has("geiger"),
+        crateGraph,
+      });
+      semverViolations = await collectCargoSemverViolations(repoRoot, {
+        enabled: enabledTools.has("semver"),
+        baseSha: pr.baseSha,
+      });
+      coverageReport = await collectCargoLlvmCovReport(repoRoot, diffMap, {
+        enabled: enabledTools.has("coverage"),
+        packages: Array.from(modifiedCrates),
+      });
+      miriReport = await collectMiriReport(repoRoot, diffMap, {
+        enabled: enabledTools.has("miri"),
+        crateGraph,
+      });
+      if (miriReport?.skippedReason) {
+        skippedTools.push(`miri (skipped: ${miriReport.skippedReason})`);
+      }
 
       const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
       const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
@@ -352,6 +395,26 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       const semverFindings = semverViolationsToFindings(semverViolations);
       const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
       const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
+
+      toolOutcomes.clippy ??= { status: "ok", findingsCount: clippyFindings.length };
+      toolOutcomes.audit ??= { status: "ok", findingsCount: auditFindings.length };
+      if (enabledTools.has("deny") && !toolOutcomes.deny) {
+        toolOutcomes.deny = { status: "ok", findingsCount: denyFindings.length };
+      }
+      if (enabledTools.has("geiger") && !toolOutcomes.geiger) {
+        toolOutcomes.geiger = { status: "ok", findingsCount: geigerFindings.length };
+      }
+      if (enabledTools.has("semver") && !toolOutcomes.semver) {
+        toolOutcomes.semver = { status: "ok", findingsCount: semverFindings.length };
+      }
+      if (enabledTools.has("coverage") && !toolOutcomes.coverage) {
+        toolOutcomes.coverage = { status: "ok", findingsCount: coverageFindings.length };
+      }
+      if (enabledTools.has("miri")) {
+        toolOutcomes.miri = miriReport?.skippedReason
+          ? { status: "skipped", findingsCount: 0, reason: "no_unsafe_in_diff" }
+          : { status: "ok", findingsCount: miriFindings.length };
+      }
       const sensitiveFileFindings = findSensitiveFiles(Object.keys(rawDiffMap)).map((filePath) =>
         FindingSchema.parse({
           id: `audit-sensitive-file-${filePath.replace(/[^a-z0-9]+/gi, "-")}`,
@@ -515,6 +578,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         durationMs: Date.now() - runStartMs,
         enabledTools: enabledToolsList,
         skippedTools,
+        toolOutcomes,
         configHash,
         symbolGraph,
         promptContextMd,
@@ -532,6 +596,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     analyzeContext,
     analyzeBundle,
     skippedTools,
+    toolOutcomes,
     symbolGraph,
     cargoLockDiff,
     geigerReport,

@@ -52,27 +52,28 @@ This returns structured JSON (`counts`, `countsBySeverity`, `enabledTools`, `ski
    peer prompt soundness
    peer prompt idioms
    ```
-3. **Review 100% of production diff hunks with strict file-path handoff:**
-   - For small PRs (1 cohort), review `01-analyze/cohorts/<cohort-id>.md` directly and write `.peer/<pr>/<short-sha>/reviews/<cohort-id>.md`.
-   - For multi-cohort PRs, **fan out parallel read-only subagents** (one per cohort file in `01-analyze/cohorts/`).
-   - **Context discipline:** Instruct each subagent to write its Structured Markdown findings directly to `.peer/<pr>/<short-sha>/reviews/<cohort-id>.md` and return **ONLY the file path + a 1-line finding count** (never paste full findings back into the main session).
+3. **Review 100% of production diff hunks with zero-assembly subagent dispatch:**
+   - Each entry in `01-analyze/cohorts/index.json` provides `packetPath`, `outputPath` (`.peer/<pr>/<short-sha>/reviews/<cohort-id>.md`), and a ready-to-pass `subagentBrief`.
+   - For small PRs (1 cohort), read `packetPath` and write `outputPath` directly.
+   - For multi-cohort PRs, **fan out parallel read-only subagents** (one per entry in `cohorts/index.json`, passing its `subagentBrief`).
+   - **Context discipline:** Each subagent writes its Structured Markdown findings directly to `outputPath` and returns **ONLY the file path + a 1-line finding count** (never paste full findings back into the main session).
    - Write the walkthrough to `.peer/<pr>/<short-sha>/reviews/walkthrough.md`.
 4. Finalize all cohort review files in one command:
    ```bash
    peer finalize <PR_NUMBER_OR_URL> --from .peer/<pr>/<short-sha>/reviews --strict --json
    ```
-   `peer finalize` validates `cohortCoverage` against `01-analyze/cohorts/index.json` (failing under `--strict` if any expected `<cohort-id>.md` file is missing so you can self-heal), deduplicates against Stage 1 ground truth, snaps line ranges, verifies every inline ```` ```rust ```` suggestion with crate-scoped `cargo check -p <crate>`, and writes:
+   `peer finalize` validates `cohortCoverage` against `01-analyze/cohorts/index.json` (returning structured `missingCohortIds` and `malformedBlocks` if any subagent failed or wrote a malformed block), deduplicates against Stage 1 ground truth, snaps line ranges, verifies every inline ```` ```rust ```` suggestion with crate-scoped `cargo check -p <crate>`, and writes:
    - `.peer/<pr>/<short-sha>/02-review/report.md` & `.peer/<pr>/<short-sha>/review.md`
    - `.peer/<pr>/<short-sha>/todo.json` & `.peer/<pr>/<short-sha>/todo.md` — Machine-readable (`todo.json`) and human-readable (`todo.md`) dependency-ordered `P0`–`P3` fix queue with `dependsOn`, `verificationCommand`, `suggestion`, and `suggestionVerified`.
-   - `.peer/<pr>/<short-sha>/02-review/skeptic/index.json` + `skeptic-<NN>-<slug>.md` — Lossless per-subsystem skeptic packets.
+   - `.peer/<pr>/<short-sha>/02-review/skeptic/index.json` + `skeptic-<NN>-<slug>.md` — Lossless per-subsystem skeptic packets with `packetPath`, `outputPath`, and `subagentBrief`.
 
 ## Step 3: Optional Adversarial Skeptic Pass
 When the user asks for skeptic verification (or the PR is high-risk):
 1. Load the skeptic prompt with `peer prompt skeptic`.
-2. Read `.peer/<pr>/<short-sha>/02-review/skeptic/index.json` and fan out parallel read-only skeptic subagents (one per `02-review/skeptic/skeptic-<NN>-<slug>.md` packet) to independently verify or disprove each candidate finding (`fp-*` and `audit-ast-*`) against the codebase.
-3. Combine their `- <finding-id> | KEEP|DROP | <reason>` lines into `.peer/<pr>/<short-sha>/verdicts.md` and apply them deterministically:
+2. Read `.peer/<pr>/<short-sha>/02-review/skeptic/index.json` and fan out parallel read-only skeptic subagents (passing each entry's `subagentBrief` so each subagent reads `packetPath` and writes its `- <finding-id> | KEEP|DROP | <reason>` lines directly to `outputPath` in `.peer/<pr>/<short-sha>/verdicts/`).
+3. Apply all verdict files deterministically in one command (passing either the `verdicts/` directory or a single `verdicts.md` file):
    ```bash
-   peer finalize <PR_NUMBER_OR_URL> --verdicts .peer/<pr>/<short-sha>/verdicts.md --strict --json
+   peer finalize <PR_NUMBER_OR_URL> --verdicts .peer/<pr>/<short-sha>/verdicts --strict --json
    ```
    This returns structured `reconciliation` JSON (`beforeCount`, `verdictsApplied`, `keptCount`, `droppedCount`, `droppedIds`, `lockedRetainedIds`, `unmatchedVerdictIds`) and updates `03-verify/report.md`, `review.md`, `todo.json`, and `todo.md`.
 

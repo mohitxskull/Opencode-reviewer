@@ -7,6 +7,7 @@ import {
   CargoDenyMissingError,
   collectCargoDenyDiagnostics,
   denyDiagnosticsToFindings,
+  hasCargoDenyConfig,
 } from "../analyzers/deny.ts";
 import { collectCargoGeigerReport, geigerReportToFindings } from "../analyzers/geiger.ts";
 import { collectMiriReport, miriReportToFindings } from "../analyzers/miri.ts";
@@ -18,7 +19,12 @@ import {
 import { CargoAuditMissingError, collectSecurityAdvisories } from "../analyzers/security.ts";
 import { collectCargoSemverViolations, semverViolationsToFindings } from "../analyzers/semver.ts";
 import { filterCodeOnlyDiffMap, findSensitiveFiles, parseUnifiedDiff } from "../domain/diff.ts";
-import { type Finding, FindingSchema, type ReviewProfile } from "../domain/models.ts";
+import {
+  type Finding,
+  FindingSchema,
+  type ReviewProfile,
+  type ToolOutcomeDetail,
+} from "../domain/models.ts";
 import {
   advisoriesToFindings,
   clippyToFindings,
@@ -114,9 +120,26 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
   const diffMap = filterCodeOnlyDiffMap(rawDiffMap, peerConfig.diff.ignore);
   const modifiedFiles = new Set(Object.keys(diffMap));
   const skippedTools: string[] = [];
+  const toolOutcomes: Record<string, ToolOutcomeDetail> = {};
+
+  for (const optTool of ["deny", "geiger", "semver", "coverage", "miri"] as const) {
+    if (!enabledTools.has(optTool)) {
+      toolOutcomes[optTool] = {
+        status: "skipped",
+        findingsCount: 0,
+        reason: "not_enabled",
+        remediationCommand: `peer check --tools ${optTool}`,
+      };
+    }
+  }
 
   const runAuditWithPolicy = async () => {
     if (modifiedFiles.size === 0 || !peerConfig.tools.audit) {
+      toolOutcomes.audit = {
+        status: "skipped",
+        findingsCount: 0,
+        reason: modifiedFiles.size === 0 ? "no_modified_files" : "not_enabled",
+      };
       return [];
     }
     try {
@@ -124,6 +147,12 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     } catch (err) {
       if (err instanceof CargoAuditMissingError) {
         skippedTools.push("cargo-audit (not installed — cargo install cargo-audit)");
+        toolOutcomes.audit = {
+          status: "skipped",
+          findingsCount: 0,
+          reason: "missing_binary",
+          remediationCommand: "cargo install cargo-audit",
+        };
         return [];
       }
       throw err;
@@ -134,11 +163,32 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     if (modifiedFiles.size === 0) {
       return [];
     }
+    const hasConfig = await hasCargoDenyConfig(repoRoot);
+    if (!hasConfig) {
+      if (enabledTools.has("deny")) {
+        skippedTools.push(
+          "deny (skipped: no deny.toml or .cargo/deny.toml in repository; run 'cargo deny init' to configure)",
+        );
+        toolOutcomes.deny = {
+          status: "skipped",
+          findingsCount: 0,
+          reason: "missing_config",
+          remediationCommand: "cargo deny init",
+        };
+      }
+      return [];
+    }
     try {
-      return await collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") });
+      return await collectCargoDenyDiagnostics(repoRoot, { force: true });
     } catch (err) {
       if (err instanceof CargoDenyMissingError && !enabledTools.has("deny")) {
         skippedTools.push("cargo-deny (not installed — cargo install cargo-deny)");
+        toolOutcomes.deny = {
+          status: "skipped",
+          findingsCount: 0,
+          reason: "missing_binary",
+          remediationCommand: "cargo install cargo-deny",
+        };
         return [];
       }
       throw err;
@@ -164,15 +214,26 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
       .filter((name) => Boolean(crateGraph.crates[name])),
   );
 
-  const [geigerReport, semverViolations, coverageReport, miriReport] = await Promise.all([
-    collectCargoGeigerReport(repoRoot, { enabled: enabledTools.has("geiger"), crateGraph }),
-    collectCargoSemverViolations(repoRoot, { enabled: enabledTools.has("semver"), baseSha }),
-    collectCargoLlvmCovReport(repoRoot, diffMap, {
-      enabled: enabledTools.has("coverage"),
-      packages: Array.from(modifiedCrates),
-    }),
-    collectMiriReport(repoRoot, diffMap, { enabled: enabledTools.has("miri"), crateGraph }),
-  ]);
+  // Run heavy optional Cargo analyzers sequentially to avoid workspace target/ lock contention
+  const geigerReport = await collectCargoGeigerReport(repoRoot, {
+    enabled: enabledTools.has("geiger"),
+    crateGraph,
+  });
+  const semverViolations = await collectCargoSemverViolations(repoRoot, {
+    enabled: enabledTools.has("semver"),
+    baseSha,
+  });
+  const coverageReport = await collectCargoLlvmCovReport(repoRoot, diffMap, {
+    enabled: enabledTools.has("coverage"),
+    packages: Array.from(modifiedCrates),
+  });
+  const miriReport = await collectMiriReport(repoRoot, diffMap, {
+    enabled: enabledTools.has("miri"),
+    crateGraph,
+  });
+  if (miriReport?.skippedReason) {
+    skippedTools.push(`miri (skipped: ${miriReport.skippedReason})`);
+  }
 
   const sensitiveFileFindings = findSensitiveFiles(Object.keys(rawDiffMap)).map((filePath) =>
     FindingSchema.parse({
@@ -200,14 +261,44 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     }),
   );
 
+  const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
+  const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
+  const denyFindings = denyDiagnosticsToFindings(denyDiagnostics);
+  const geigerFindings = geigerReport
+    ? geigerReportToFindings(geigerReport, modifiedCrates, crateGraph)
+    : [];
+  const semverFindings = semverViolationsToFindings(semverViolations);
+  const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
+  const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
+
+  toolOutcomes.clippy ??= { status: "ok", findingsCount: clippyFindings.length };
+  toolOutcomes.audit ??= { status: "ok", findingsCount: auditFindings.length };
+  if (enabledTools.has("deny") && !toolOutcomes.deny) {
+    toolOutcomes.deny = { status: "ok", findingsCount: denyFindings.length };
+  }
+  if (enabledTools.has("geiger") && !toolOutcomes.geiger) {
+    toolOutcomes.geiger = { status: "ok", findingsCount: geigerFindings.length };
+  }
+  if (enabledTools.has("semver") && !toolOutcomes.semver) {
+    toolOutcomes.semver = { status: "ok", findingsCount: semverFindings.length };
+  }
+  if (enabledTools.has("coverage") && !toolOutcomes.coverage) {
+    toolOutcomes.coverage = { status: "ok", findingsCount: coverageFindings.length };
+  }
+  if (enabledTools.has("miri")) {
+    toolOutcomes.miri = miriReport?.skippedReason
+      ? { status: "skipped", findingsCount: 0, reason: "no_unsafe_in_diff" }
+      : { status: "ok", findingsCount: miriFindings.length };
+  }
+
   const rawFindings: Finding[] = [
-    ...clippyToFindings(clippyDiagnostics, diffMap),
-    ...(await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph)),
-    ...denyDiagnosticsToFindings(denyDiagnostics),
-    ...(geigerReport ? geigerReportToFindings(geigerReport, modifiedCrates, crateGraph) : []),
-    ...semverViolationsToFindings(semverViolations),
-    ...(coverageReport ? coverageReportToFindings(coverageReport) : []),
-    ...(miriReport ? miriReportToFindings(miriReport) : []),
+    ...clippyFindings,
+    ...auditFindings,
+    ...denyFindings,
+    ...geigerFindings,
+    ...semverFindings,
+    ...coverageFindings,
+    ...miriFindings,
     ...astFindings,
     ...sensitiveFileFindings,
   ];
@@ -295,6 +386,7 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
           countsBySeverity,
           enabledTools: Array.from(enabledTools).sort(),
           skippedTools,
+          toolOutcomes,
           reportMd: resolve(localDir, "report.md"),
           sarifPath: sarifPath ? resolve(sarifPath) : null,
           findings: newFindings.map((f) => ({

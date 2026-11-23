@@ -297,7 +297,15 @@ function parsePipeBulletTriples(sectionText: string | undefined): Array<[string,
 function parseSingleFindingBlock(
   blockText: string,
   warnings?: string[],
-): LensFindingsOutput["findings"][number] | null {
+):
+  | { ok: true; finding: LensFindingsOutput["findings"][number] }
+  | { ok: false; reason: string; snippet: string } {
+  const firstLine =
+    blockText
+      .split("\n")
+      .map((l) => l.trim())
+      .find(Boolean)
+      ?.slice(0, 120) ?? "(empty block)";
   // Split block into header metadata and #### sub-sections (respecting code fences)
   const lines = blockText.replace(/\r\n/g, "\n").split("\n");
   const subSections = new Map<string, string>();
@@ -344,14 +352,14 @@ function parseSingleFindingBlock(
     }
   }
   if (!rawFile) {
-    return null;
+    return { ok: false, reason: "Missing '- File: <path>' field", snippet: firstLine };
   }
   const filePath = stripBackticksAndQuotes(rawFile)
     .replace(/\\/g, "/")
     .replace(/^\.\//, "")
     .replace(/:\d+(?:-\d+)?$/, "");
   if (!filePath) {
-    return null;
+    return { ok: false, reason: "Empty file path in '- File:' field", snippet: firstLine };
   }
 
   const lineRange = parseLineRange(
@@ -360,7 +368,11 @@ function parseSingleFindingBlock(
     meta.get("end_line") ?? meta.get("endline"),
   );
   if (!lineRange) {
-    return null;
+    return {
+      ok: false,
+      reason: `Missing or invalid '- Lines: <start>-<end>' field for ${filePath}`,
+      snippet: firstLine,
+    };
   }
 
   const title = stripBackticksAndQuotes(meta.get("title") ?? "");
@@ -373,7 +385,11 @@ function parseSingleFindingBlock(
   ).trim();
 
   if (!title && !explanation) {
-    return null;
+    return {
+      ok: false,
+      reason: `Missing '- Title:' and '#### Explanation' for ${filePath}:${lineRange.startLine}`,
+      snippet: firstLine,
+    };
   }
 
   const suggestionSection = subSections.get("SUGGESTION") ?? "";
@@ -401,32 +417,35 @@ function parseSingleFindingBlock(
   const reversible = rawRev !== "false" && rawRev !== "no";
 
   return {
-    filePath,
-    startLine: lineRange.startLine,
-    endLine: lineRange.endLine,
-    severity: normalizeSeverity(meta.get("severity"), warnings),
-    type: normalizeFindingType(meta.get("type")),
-    epistemicState: normalizeEpistemicState(meta.get("state") ?? meta.get("epistemic_state")),
-    evidenceMechanism: normalizeEvidenceMechanism(
-      meta.get("mechanism") ?? meta.get("evidence_mechanism"),
-    ),
-    title: title || explanation.split("\n")[0]?.slice(0, 100) || "Rust review finding",
-    body: explanation || title,
-    rootCause: stripBackticksAndQuotes(meta.get("root_cause") ?? meta.get("rootcause") ?? title),
-    blastRadius: stripBackticksAndQuotes(
-      meta.get("blast_radius") ?? meta.get("blastradius") ?? "Local module",
-    ),
-    reversible,
-    dependsOn,
-    verificationCommand: stripBackticksAndQuotes(
-      meta.get("verification") ??
-        meta.get("verification_command") ??
-        "cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
-    ),
-    traceability: stripBackticksAndQuotes(meta.get("traceability") ?? ""),
-    suggestion,
-    agentPrompt,
-    confidence,
+    ok: true,
+    finding: {
+      filePath,
+      startLine: lineRange.startLine,
+      endLine: lineRange.endLine,
+      severity: normalizeSeverity(meta.get("severity"), warnings),
+      type: normalizeFindingType(meta.get("type")),
+      epistemicState: normalizeEpistemicState(meta.get("state") ?? meta.get("epistemic_state")),
+      evidenceMechanism: normalizeEvidenceMechanism(
+        meta.get("mechanism") ?? meta.get("evidence_mechanism"),
+      ),
+      title: title || explanation.split("\n")[0]?.slice(0, 100) || "Rust review finding",
+      body: explanation || title,
+      rootCause: stripBackticksAndQuotes(meta.get("root_cause") ?? meta.get("rootcause") ?? title),
+      blastRadius: stripBackticksAndQuotes(
+        meta.get("blast_radius") ?? meta.get("blastradius") ?? "Local module",
+      ),
+      reversible,
+      dependsOn,
+      verificationCommand: stripBackticksAndQuotes(
+        meta.get("verification") ??
+          meta.get("verification_command") ??
+          "cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
+      ),
+      traceability: stripBackticksAndQuotes(meta.get("traceability") ?? ""),
+      suggestion,
+      agentPrompt,
+      confidence,
+    },
   };
 }
 
@@ -435,6 +454,12 @@ function parseSingleFindingBlock(
 // We instruct lenses to emit Structured Markdown (with verbatim ```rust fences) and
 // parse deterministically into Zod-validated models, while keeping a seamless JSON
 // fallback for any model or test fixture that returns JSON.
+export interface MalformedFindingDiagnostic {
+  readonly blockIndex: number;
+  readonly reason: string;
+  readonly snippet: string;
+}
+
 export function parseLensFindingsOutput(rawText: string): LensFindingsOutput {
   return parseLensFindingsWithWarnings(rawText).output;
 }
@@ -442,6 +467,7 @@ export function parseLensFindingsOutput(rawText: string): LensFindingsOutput {
 export function parseLensFindingsWithWarnings(rawText: string): {
   output: LensFindingsOutput;
   warnings: string[];
+  malformedBlocks: MalformedFindingDiagnostic[];
 } {
   const trimmed = rawText.trim();
   if (!trimmed) {
@@ -453,7 +479,7 @@ export function parseLensFindingsWithWarnings(rawText: string): {
   if (jsonObj !== null) {
     const validated = LensFindingsOutputSchema.safeParse(jsonObj);
     if (validated.success) {
-      return { output: validated.data, warnings: [] };
+      return { output: validated.data, warnings: [], malformedBlocks: [] };
     }
   }
 
@@ -501,17 +527,26 @@ export function parseLensFindingsWithWarnings(rawText: string): {
   }
 
   const warnings: string[] = [];
+  const malformedBlocks: MalformedFindingDiagnostic[] = [];
   const findings: LensFindingsOutput["findings"] = [];
-  for (const block of findingBlocks) {
+  for (let i = 0; i < findingBlocks.length; i++) {
+    const block = findingBlocks[i];
+    if (!block) continue;
     const parsedFinding = parseSingleFindingBlock(block, warnings);
-    if (parsedFinding !== null) {
-      findings.push(parsedFinding);
+    if (parsedFinding.ok) {
+      findings.push(parsedFinding.finding);
+    } else {
+      malformedBlocks.push({
+        blockIndex: i + 1,
+        reason: parsedFinding.reason,
+        snippet: parsedFinding.snippet,
+      });
     }
   }
 
-  if (findingBlocks.length > findings.length) {
+  if (malformedBlocks.length > 0) {
     warnings.push(
-      `Dropped ${findingBlocks.length - findings.length} malformed ### FINDING block(s) out of ${findingBlocks.length} (check required File/Lines/Title/Body fields).`,
+      `Dropped ${malformedBlocks.length} malformed ### FINDING block(s) out of ${findingBlocks.length}: ${malformedBlocks.map((m) => `block #${m.blockIndex} (${m.reason})`).join("; ")}`,
     );
   }
 
@@ -556,6 +591,7 @@ export function parseLensFindingsWithWarnings(rawText: string): {
       openQuestions,
     }),
     warnings,
+    malformedBlocks,
   };
 }
 

@@ -298,6 +298,23 @@ export type PipelineStage = z.infer<typeof PipelineStageSchema>;
 export const ToolOutcomeSchema = z.enum(["ok", "skipped", "failed", "timed_out"]);
 export type ToolOutcome = z.infer<typeof ToolOutcomeSchema>;
 
+export const ToolSkipReasonSchema = z.enum([
+  "not_enabled",
+  "missing_binary",
+  "missing_config",
+  "no_unsafe_in_diff",
+  "no_modified_files",
+]);
+export type ToolSkipReason = z.infer<typeof ToolSkipReasonSchema>;
+
+export const ToolOutcomeDetailSchema = z.object({
+  status: ToolOutcomeSchema,
+  findingsCount: z.number().int().min(0).default(0),
+  reason: ToolSkipReasonSchema.optional(),
+  remediationCommand: z.string().optional(),
+});
+export type ToolOutcomeDetail = z.infer<typeof ToolOutcomeDetailSchema>;
+
 export const RunManifestSchema = z.object({
   prNumber: z.number().int().min(1),
   headSha: z.string().min(7),
@@ -313,7 +330,7 @@ export const RunManifestSchema = z.object({
   latestStage: PipelineStageSchema.default("review"),
   enabledTools: z.array(z.string()).default([]),
   skippedTools: z.array(z.string()).default([]),
-  toolOutcomes: z.record(z.string(), ToolOutcomeSchema).default({}),
+  toolOutcomes: z.record(z.string(), ToolOutcomeDetailSchema).default({}),
   failedCohorts: z.array(z.string()).default([]),
   inlineFindingsCount: z.number().int().min(0),
   outsideDiffFindingsCount: z.number().int().min(0),

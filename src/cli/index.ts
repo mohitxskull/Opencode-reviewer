@@ -394,6 +394,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
               profile: effectiveProfile,
               enabledTools: effectiveToolsList,
               skippedTools: existingManifest.skippedTools,
+              toolOutcomes: existingManifest.toolOutcomes,
               counts: {
                 inline: existingManifest.inlineFindingsCount,
                 outsideDiff: existingManifest.outsideDiffFindingsCount,
@@ -489,6 +490,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
               profile: effectiveProfile,
               enabledTools: effectiveToolsList,
               skippedTools: analyzeOut.skippedTools,
+              toolOutcomes: analyzeOut.toolOutcomes,
               counts: {
                 totalActionable: allActionable.length,
                 inline: analyzeOut.analyzeBundle.findings.length,
@@ -594,6 +596,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             countsBySeverity,
             ...(result.cohortCoverage ? { cohortCoverage: result.cohortCoverage } : {}),
             ...(result.reconciliation ? { reconciliation: result.reconciliation } : {}),
+            ...(result.malformedBlocks && result.malformedBlocks.length > 0
+              ? { malformedBlocks: result.malformedBlocks }
+              : {}),
             warnings: result.warnings,
             artifacts: {
               stageReportMd: resolve(commitDir, stageFolder, "report.md"),
@@ -630,7 +635,35 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     );
     return 0;
   } catch (err) {
-    writeErr(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = err instanceof Error ? err.message : String(err);
+    writeErr(`Error: ${msg}`);
+    if (argv.includes("--json") || argv.includes("--quiet") || argv.includes("-q")) {
+      const isQuietErr = argv.includes("--quiet") || argv.includes("-q");
+      const errorCode =
+        msg.includes("Missing ") && msg.includes("expected cohort")
+          ? "MISSING_COHORTS"
+          : msg.includes("Strict mode failed") || msg.includes("malformed")
+            ? "MALFORMED_FINDINGS"
+            : msg.includes("Working tree has uncommitted")
+              ? "DIRTY_WORKTREE"
+              : msg.includes("timed out")
+                ? "ANALYZER_TIMED_OUT"
+                : msg.includes("exited with code")
+                  ? "ANALYZER_FAILED"
+                  : "RUNTIME_ERROR";
+      writeOut(
+        JSON.stringify(
+          {
+            status: "error",
+            exitCode: 2,
+            errorCode,
+            message: msg,
+          },
+          null,
+          isQuietErr ? undefined : 2,
+        ),
+      );
+    }
     return 2;
   }
 }
