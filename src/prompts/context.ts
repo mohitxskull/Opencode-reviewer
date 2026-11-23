@@ -14,6 +14,7 @@ import type {
 } from "../models.ts";
 import { resolveFileArchitecturalLayer } from "../rust.ts";
 import { formatSecurityAdvisoriesPromptSection } from "../security.ts";
+import { formatGeigerPromptSection, type GeigerReport } from "../tools/geiger.ts";
 import {
   compactAnnotatedLines,
   DEFAULT_MAX_INLINE_DIFF_CHARS,
@@ -33,6 +34,7 @@ export interface ReviewContext {
   readonly diffMap: Readonly<Record<string, DiffFileMap>>;
   readonly clippyDiagnostics: readonly ClippyDiagnostic[];
   readonly securityAdvisories?: readonly SecurityAdvisory[];
+  readonly geigerReport?: GeigerReport | null;
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
   readonly auditLogger?: AuditLogger;
@@ -163,6 +165,10 @@ export function buildReviewContextPrompt(
 
   if (context.securityAdvisories && context.securityAdvisories.length > 0) {
     sections.push(formatSecurityAdvisoriesPromptSection(context.securityAdvisories));
+  }
+
+  if (context.geigerReport) {
+    sections.push(formatGeigerPromptSection(context.geigerReport));
   }
 
   if (context.clippyDiagnostics.length > 0) {

@@ -43,6 +43,7 @@ import {
   collectClippyDiagnostics,
   collectCrateGraph,
   collectRustToolchainBaseline,
+  resolveFileArchitecturalLayer,
 } from "./rust.ts";
 import { collectSecurityAdvisories } from "./security.ts";
 import {
@@ -50,6 +51,11 @@ import {
   collectCargoDenyDiagnostics,
   denyDiagnosticsToFindings,
 } from "./tools/deny.ts";
+import {
+  collectCargoGeigerReport,
+  type GeigerReport,
+  geigerReportToFindings,
+} from "./tools/geiger.ts";
 import { SuggestionCompilerVerifier } from "./verifier.ts";
 
 export type LensRunnerFn = (context: ReviewContext) => Promise<MultiLensRunResult>;
@@ -82,6 +88,7 @@ Options:
   --allow-partial            Exit 0 and allow posting even if one or more review cohorts fail
   --skeptic                  Run an adversarial skeptic pass to disprove false positives (uses extra LLM calls)
   --deny                     Run cargo-deny supply-chain/license/ban checks (auto-runs if deny.toml exists)
+  --geiger                   Run cargo-geiger unsafe-code surface audit on workspace crates
   --concurrency <n>          Max parallel OpenCode lens sessions (default: 4; use 1 for single-GPU local models)
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
@@ -105,6 +112,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         "allow-partial": { type: "boolean", default: false },
         skeptic: { type: "boolean", default: false },
         deny: { type: "boolean", default: false },
+        geiger: { type: "boolean", default: false },
         concurrency: { type: "string" },
         model: { type: "string" },
         scope: { type: "string" },
@@ -176,6 +184,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const allowPartial = parsed.values["allow-partial"] ?? false;
     const skeptic = parsed.values.skeptic ?? false;
     const forceDeny = parsed.values.deny ?? false;
+    const enableGeiger = parsed.values.geiger ?? false;
     const rawConcurrency = parsed.values.concurrency;
     let concurrencyLimit = 4;
     if (rawConcurrency !== undefined) {
@@ -314,6 +323,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     let activeDiffMap: Record<string, import("./models.ts").DiffFileMap> = {};
     let capturedSymbolGraph: RustSymbolGraph | undefined;
     let capturedDenyDiagnostics: CargoDenyDiagnostic[] = [];
+    let capturedGeigerReport: GeigerReport | null = null;
     const bundle = await withInPlaceCheckout(
       {
         repoRoot,
@@ -447,8 +457,13 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           buildRustSymbolGraph(repoRoot, diffMap),
           learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha),
         ]);
+        const geigerReport = await collectCargoGeigerReport(repoRoot, {
+          enabled: enableGeiger,
+          crateGraph,
+        });
         capturedSymbolGraph = symbolGraph;
         capturedDenyDiagnostics = denyDiagnostics;
+        capturedGeigerReport = geigerReport;
 
         await auditLogger.logEvent(
           "stage.rust_ground_truth.completed",
@@ -483,6 +498,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           diffMap,
           clippyDiagnostics,
           securityAdvisories,
+          geigerReport,
           symbolGraph,
           learnings,
           auditLogger,
@@ -518,8 +534,22 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
         const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
         const denyFindings = denyDiagnosticsToFindings(denyDiagnostics);
+        const modifiedCrates = new Set(
+          Array.from(modifiedFiles).map(
+            (fp) => resolveFileArchitecturalLayer(crateGraph, fp).crateName,
+          ),
+        );
+        const geigerFindings = geigerReport
+          ? geigerReportToFindings(geigerReport, modifiedCrates, crateGraph)
+          : [];
         const partitioned = partitionAndFilterFindings(
-          [...clippyFindings, ...auditFindings, ...denyFindings, ...rawLensFindings],
+          [
+            ...clippyFindings,
+            ...auditFindings,
+            ...denyFindings,
+            ...geigerFindings,
+            ...rawLensFindings,
+          ],
           diffMap,
           profile,
         );
@@ -594,12 +624,20 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       },
     );
 
+    const extraToolOutputs: Record<string, unknown> = {};
+    if (capturedDenyDiagnostics.length > 0) {
+      extraToolOutputs.deny = capturedDenyDiagnostics;
+    }
+    if (capturedGeigerReport) {
+      extraToolOutputs.geiger = capturedGeigerReport;
+    }
+
     // Step 5: Persist per-commit artifacts & tool diagnostics inside .peer/<pr>/<short-sha>/
     const artifactDir = await writeLocalReviewArtifacts(repoRoot, bundle, {
       model: `${modelSpec.providerID}/${modelSpec.id}`,
       durationMs: Date.now() - runStartMs,
       symbolGraph: capturedSymbolGraph,
-      extraToolOutputs: capturedDenyDiagnostics.length > 0 ? { deny: capturedDenyDiagnostics } : {},
+      extraToolOutputs,
     });
 
     await auditLogger.logEvent(
