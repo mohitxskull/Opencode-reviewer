@@ -9,6 +9,11 @@ import {
   type Severity,
   WALKTHROUGH_MARKER,
 } from "../models.ts";
+import { fillTemplate } from "./template.ts";
+import combinedReviewTemplate from "./templates/combined-review.md" with { type: "text" };
+import inlineFindingTemplate from "./templates/inline-finding.md" with { type: "text" };
+import reviewSummaryTemplate from "./templates/review-summary.md" with { type: "text" };
+import walkthroughTemplate from "./templates/walkthrough.md" with { type: "text" };
 
 const TYPE_EMOJI: Readonly<Record<FindingType, string>> = {
   Bug: "🐛",
@@ -29,11 +34,6 @@ const SEVERITY_EMOJI: Readonly<Record<Severity, string>> = {
   None: "⚪",
 };
 
-// Why: AI-generated "Prompt for Coding Agents" blocks posted to GitHub PR threads
-// are consumed by downstream coding agents (such as autofix). Sanitizing shell
-// execution directives, secret env var names, and non-GitHub URLs at render time
-// enforces the untrusted-input defense-in-depth boundary documented in
-// docs/reports/research/coderabbit/2026-11-22-coderabbit-review-architecture.md §3.1.2.
 function computeSafeFence(content: string): string {
   let maxRun = 2;
   for (const match of content.matchAll(/`+/g)) {
@@ -47,6 +47,10 @@ function computeSafeFence(content: string): string {
 const SHELL_COMMAND_IN_BACKTICKS_REGEX =
   /\b(?:cat|curl|wget|bash|sh|zsh|nc|ncat|python|python3|perl|ruby|node|bun|rm|chmod|chown|sudo|env|printenv|export|eval|exec|ssh|scp|base64|whoami|id|uname)\b|[;$|><&]|\/etc\/|\/proc\/|\/var\//i;
 
+// Why: AI-generated "Prompt for Coding Agents" blocks posted to GitHub PR threads
+// are consumed by downstream coding agents (such as autofix). Sanitizing shell
+// execution directives, secret env var names, and non-GitHub URLs at render time
+// enforces the untrusted-input defense-in-depth boundary.
 export function sanitizeAgentPrompt(prompt: string): string {
   let sanitized = prompt;
 
@@ -119,6 +123,54 @@ function escapeTableCell(value: string): string {
   return sanitizeMarkdownText(value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
 }
 
+function renderGroupedCollapsibleSection(
+  summaryTitle: string,
+  findings: readonly Finding[],
+  cautionPrefix?: string,
+): string {
+  if (findings.length === 0) {
+    return "";
+  }
+
+  const byFile = new Map<string, Finding[]>();
+  for (const f of findings) {
+    const list = byFile.get(f.filePath) ?? [];
+    list.push(f);
+    byFile.set(f.filePath, list);
+  }
+
+  const lines: string[] = [];
+  if (cautionPrefix) {
+    lines.push(cautionPrefix, "");
+  }
+  lines.push("<details>", `<summary>${summaryTitle}</summary>`, "<blockquote>");
+
+  for (const [filePath, fileFindings] of byFile.entries()) {
+    lines.push(
+      "",
+      "<details>",
+      `<summary><code>${filePath}</code> (${fileFindings.length})</summary>`,
+      "<blockquote>",
+    );
+    for (const f of fileFindings) {
+      const rangeLabel =
+        f.startLine === f.endLine ? `${f.startLine}` : `${f.startLine}-${f.endLine}`;
+      lines.push(
+        "",
+        `\`${filePath}\` (${rangeLabel}):`,
+        "",
+        renderInlineFindingComment(f, { allowCommitSuggestion: false }),
+        "",
+        "---",
+      );
+    }
+    lines.push("</blockquote>", "</details>");
+  }
+
+  lines.push("</blockquote>", "</details>");
+  return lines.join("\n");
+}
+
 export function renderWalkthroughComment(bundle: ReviewBundle): string {
   const baseShort = bundle.diffBaseSha.slice(0, 7);
   const headShort = bundle.headSha.slice(0, 7);
@@ -129,101 +181,61 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
   const allActionable = [...bundle.findings, ...outside];
   const totalFindingsCount = allActionable.length + nitpicks.length;
 
-  const bySeverity = (items: readonly Finding[]) => {
-    const counts: Record<string, number> = {};
-    for (const item of items) {
-      counts[item.severity] = (counts[item.severity] ?? 0) + 1;
-    }
-    return Object.entries(counts)
-      .map(([sev, cnt]) => `${SEVERITY_EMOJI[sev as Severity] ?? ""} ${sev}: ${cnt}`)
-      .join(" | ");
-  };
-
-  const breakdown = bySeverity(allActionable);
-
-  const lines: string[] = [
-    WALKTHROUGH_MARKER,
-    `## 🦀 Peer Rust PR Walkthrough & Architecture Audit`,
-    "",
-    `**Review Effort:** \`${walkthrough.triage.reviewEffort}/5\` | **Merge Risk:** \`${walkthrough.triage.mergeRisk}\` | **Profile:** \`${bundle.profile}\` | **Range:** \`${baseShort}..${headShort}\` (${modeLabel})`,
-    `> **Triage Rationale:** ${sanitizeMarkdownText(walkthrough.triage.rationale).trim()}`,
-    "",
-  ];
-
-  if (bundle.failedCohorts && bundle.failedCohorts.length > 0) {
-    lines.push(
-      `> [!WARNING]`,
-      `> **Partial Review (${bundle.failedCohorts.length} cohort(s) failed):** ${bundle.failedCohorts.map((c) => `\`${sanitizeMarkdownText(c)}\``).join(", ")}. Re-run \`peer\` to complete coverage.`,
-      "",
-    );
+  const counts: Record<string, number> = {};
+  for (const item of allActionable) {
+    counts[item.severity] = (counts[item.severity] ?? 0) + 1;
   }
+  const breakdown = Object.entries(counts)
+    .map(([sev, cnt]) => `${SEVERITY_EMOJI[sev as Severity] ?? ""} ${sev}: ${cnt}`)
+    .join(" | ");
 
-  if (bundle.baseline) {
-    lines.push(
-      `### Review Baseline`,
-      `- **Mode:** \`${bundle.baseline.mode}\` | **Commit Range:** \`${baseShort}..${headShort}\` | **Date:** \`${bundle.generatedAt}\``,
-      `- **Toolchain:** \`${bundle.baseline.rustcVersion}\` | \`${bundle.baseline.cargoVersion}\``,
-      `- **Verification Commands:** ${bundle.baseline.verificationCommands.map((c) => `\`${c}\``).join(" · ")}`,
-      "",
-    );
-  }
+  const failedCohortsBanner =
+    bundle.failedCohorts && bundle.failedCohorts.length > 0
+      ? [
+          `> [!WARNING]`,
+          `> **Partial Review (${bundle.failedCohorts.length} cohort(s) failed):** ${bundle.failedCohorts.map((c) => `\`${sanitizeMarkdownText(c)}\``).join(", ")}. Re-run \`peer\` to complete coverage.`,
+        ].join("\n")
+      : "";
 
-  lines.push(
-    `### 0. Executive Summary`,
-    sanitizeMarkdownText(walkthrough.summary).trim(),
-    "",
-    `- **Total Findings:** ${totalFindingsCount} (Actionable: ${allActionable.length}${breakdown ? ` — ${breakdown}` : ""} | Nitpicks: ${nitpicks.length})`,
-    `- **Actionable Inline Comments:** ${bundle.findings.length}`,
-    `- **Outside Diff Range Comments:** ${outside.length}`,
-    `- **Nitpick Comments:** ${nitpicks.length}`,
-    `- **Cargo Clippy / Compiler Diagnostics Checked:** ${bundle.clippyDiagnostics.length}`,
-    `- **CVE / RustSec Advisories Found:** ${bundle.securityAdvisories?.length ?? 0}`,
-    "",
-  );
+  const baselineSection = bundle.baseline
+    ? [
+        `### Review Baseline`,
+        `- **Mode:** \`${bundle.baseline.mode}\` | **Commit Range:** \`${baseShort}..${headShort}\` | **Date:** \`${bundle.generatedAt}\``,
+        `- **Toolchain:** \`${bundle.baseline.rustcVersion}\` | \`${bundle.baseline.cargoVersion}\``,
+        `- **Verification Commands:** ${bundle.baseline.verificationCommands.map((c) => `\`${c}\``).join(" · ")}`,
+      ].join("\n")
+    : "";
 
-  if (allActionable.length > 0) {
-    lines.push(
-      `### 1. Root-Cause Index Table`,
-      `| # | Severity | State | Mechanism | Confidence | Root Cause | Location | Blast Radius | Reversible? | Depends on |`,
-      `| :---: | :--- | :--- | :--- | :---: | :--- | :--- | :--- | :---: | :--- |`,
-    );
-    for (let i = 0; i < allActionable.length; i++) {
-      const f = allActionable[i];
-      if (!f) {
-        continue;
-      }
-      const sevIcon = SEVERITY_EMOJI[f.severity];
-      const confPct = `${Math.round(f.confidence * 100)}%`;
-      const rootCauseText = escapeTableCell(f.rootCause || f.title);
-      const locText = `\`${f.filePath}:${f.startLine}-${f.endLine}\``;
-      const blastText = escapeTableCell(f.blastRadius || "Local module");
-      const revText = f.reversible ? "Yes" : "No";
-      const depText = escapeTableCell(f.dependsOn ?? "—");
-      lines.push(
-        `| \`F${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState}\` | \`${f.evidenceMechanism}\` | ${confPct} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`,
-      );
-    }
-    lines.push("");
-  }
+  const rootCauseTable =
+    allActionable.length > 0
+      ? [
+          `### 1. Root-Cause Index Table`,
+          `| # | Severity | State | Mechanism | Confidence | Root Cause | Location | Blast Radius | Reversible? | Depends on |`,
+          `| :---: | :--- | :--- | :--- | :---: | :--- | :--- | :--- | :---: | :--- |`,
+          ...allActionable.map((f, i) => {
+            const sevIcon = SEVERITY_EMOJI[f.severity];
+            const confPct = `${Math.round(f.confidence * 100)}%`;
+            const rootCauseText = escapeTableCell(f.rootCause || f.title);
+            const locText = `\`${f.filePath}:${f.startLine}-${f.endLine}\``;
+            const blastText = escapeTableCell(f.blastRadius || "Local module");
+            const revText = f.reversible ? "Yes" : "No";
+            const depText = escapeTableCell(f.dependsOn ?? "—");
+            return `| \`F${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState}\` | \`${f.evidenceMechanism}\` | ${confPct} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`;
+          }),
+        ].join("\n")
+      : "";
 
   const sortedChanges = [...walkthrough.changes].sort(
     (a, b) => a.layer - b.layer || a.filePath.localeCompare(b.filePath),
   );
+  const changesRows = sortedChanges
+    .map(
+      (entry) =>
+        `| \`L${entry.layer}\` | \`${entry.crateName}\` | \`${entry.filePath}\` | ${escapeTableCell(entry.summary)} |`,
+    )
+    .join("\n");
 
-  lines.push(
-    `### Architectural Layer Walkthrough`,
-    `| Layer | Crate | File | Summary |`,
-    `| :---: | :--- | :--- | :--- |`,
-  );
-
-  for (const entry of sortedChanges) {
-    const safeSummary = escapeTableCell(entry.summary);
-    lines.push(
-      `| \`L${entry.layer}\` | \`${entry.crateName}\` | \`${entry.filePath}\` | ${safeSummary} |`,
-    );
-  }
-  lines.push("");
-
+  let sequenceDiagramSection = "";
   if (walkthrough.sequenceDiagram && walkthrough.sequenceDiagram.trim().length > 0) {
     const rawDiagram = walkthrough.sequenceDiagram
       .trim()
@@ -231,70 +243,98 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
       .replace(/```$/i, "")
       .trim();
     const fence = computeSafeFence(rawDiagram);
-    lines.push(`### Sequence Diagram`, `${fence}mermaid`, rawDiagram, fence, "");
+    sequenceDiagramSection = [`### Sequence Diagram`, `${fence}mermaid`, rawDiagram, fence].join(
+      "\n",
+    );
   }
 
   const deletions = bundle.deletionsProposed ?? [];
-  if (deletions.length > 0) {
-    lines.push(
-      `### 3. Deletions Proposed`,
-      `| Symbol / Path | Reachability Evidence | Replacement |`,
-      `| :--- | :--- | :--- |`,
-    );
-    for (const d of deletions) {
-      lines.push(
-        `| \`${escapeTableCell(d.pathOrSymbol)}\` | ${escapeTableCell(d.reachabilityEvidence)} | ${escapeTableCell(d.replacement)} |`,
-      );
-    }
-    lines.push("");
-  }
+  const deletionsSection =
+    deletions.length > 0
+      ? [
+          `### 3. Deletions Proposed`,
+          `| Symbol / Path | Reachability Evidence | Replacement |`,
+          `| :--- | :--- | :--- |`,
+          ...deletions.map(
+            (d) =>
+              `| \`${escapeTableCell(d.pathOrSymbol)}\` | ${escapeTableCell(d.reachabilityEvidence)} | ${escapeTableCell(d.replacement)} |`,
+          ),
+        ].join("\n")
+      : "";
 
   const rejected = bundle.consideredAndRejected ?? [];
-  if (rejected.length > 0) {
-    lines.push(
-      `<details>`,
-      `<summary><strong>5. Considered & Rejected (${rejected.length})</strong> — Examined hypotheses dismissed with code evidence</summary>`,
-      "",
-      `| Location | Hypothesis Examined | Reason Dismissed |`,
-      `| :--- | :--- | :--- |`,
-    );
-    for (const r of rejected) {
-      lines.push(
-        `| \`${escapeTableCell(r.location)}\` | ${escapeTableCell(r.hypothesis)} | ${escapeTableCell(r.reasonDismissed)} |`,
-      );
-    }
-    lines.push("", `</details>`, "");
-  }
+  const consideredAndRejectedSection =
+    rejected.length > 0
+      ? [
+          `<details>`,
+          `<summary><strong>5. Considered & Rejected (${rejected.length})</strong> — Examined hypotheses dismissed with code evidence</summary>`,
+          "",
+          `| Location | Hypothesis Examined | Reason Dismissed |`,
+          `| :--- | :--- | :--- |`,
+          ...rejected.map(
+            (r) =>
+              `| \`${escapeTableCell(r.location)}\` | ${escapeTableCell(r.hypothesis)} | ${escapeTableCell(r.reasonDismissed)} |`,
+          ),
+          "",
+          `</details>`,
+        ].join("\n")
+      : "";
 
   const openQuestions = bundle.openQuestions ?? [];
-  if (openQuestions.length > 0) {
-    lines.push(
-      `### 6. Open Questions / Blockers`,
-      `| Location | Question / Unverified Assumption | Impact |`,
-      `| :--- | :--- | :--- |`,
-    );
-    for (const q of openQuestions) {
-      lines.push(
-        `| \`${escapeTableCell(q.location)}\` | ${escapeTableCell(q.question)} | ${escapeTableCell(q.impact)} |`,
-      );
-    }
-    lines.push("");
-  }
+  const openQuestionsSection =
+    openQuestions.length > 0
+      ? [
+          `### 6. Open Questions / Blockers`,
+          `| Location | Question / Unverified Assumption | Impact |`,
+          `| :--- | :--- | :--- |`,
+          ...openQuestions.map(
+            (q) =>
+              `| \`${escapeTableCell(q.location)}\` | ${escapeTableCell(q.question)} | ${escapeTableCell(q.impact)} |`,
+          ),
+        ].join("\n")
+      : "";
 
   const notReviewed = bundle.notReviewed ?? [];
-  if (notReviewed.length > 0) {
-    lines.push(
-      `<details>`,
-      `<summary><strong>7. Not Reviewed (${notReviewed.length})</strong> — Non-code or out-of-scope paths</summary>`,
-      "",
-      ...notReviewed.map((item) => `- \`${item}\``),
-      "",
-      `</details>`,
-      "",
-    );
-  }
+  const notReviewedSection =
+    notReviewed.length > 0
+      ? [
+          `<details>`,
+          `<summary><strong>7. Not Reviewed (${notReviewed.length})</strong> — Non-code or out-of-scope paths</summary>`,
+          "",
+          ...notReviewed.map((item) => `- \`${item}\``),
+          "",
+          `</details>`,
+        ].join("\n")
+      : "";
 
-  return lines.join("\n").trimEnd();
+  return fillTemplate(walkthroughTemplate, {
+    WALKTHROUGH_MARKER,
+    REVIEW_EFFORT: String(walkthrough.triage.reviewEffort),
+    MERGE_RISK: walkthrough.triage.mergeRisk,
+    PROFILE: bundle.profile,
+    BASE_SHORT: baseShort,
+    HEAD_SHORT: headShort,
+    MODE_LABEL: modeLabel,
+    TRIAGE_RATIONALE: sanitizeMarkdownText(walkthrough.triage.rationale).trim(),
+    FAILED_COHORTS_BANNER: failedCohortsBanner,
+    BASELINE_SECTION: baselineSection,
+    SUMMARY: sanitizeMarkdownText(walkthrough.summary).trim(),
+    TOTAL_FINDINGS_COUNT: String(totalFindingsCount),
+    ACTIONABLE_COUNT: String(allActionable.length),
+    BREAKDOWN_SUFFIX: breakdown ? ` — ${breakdown}` : "",
+    NITPICK_COUNT: String(nitpicks.length),
+    INLINE_COUNT: String(bundle.findings.length),
+    OUTSIDE_COUNT: String(outside.length),
+    CLIPPY_COUNT: String(bundle.clippyDiagnostics.length),
+    SECURITY_ADVISORIES_COUNT: String(bundle.securityAdvisories?.length ?? 0),
+    ROOT_CAUSE_TABLE: rootCauseTable,
+    CHANGES_ROWS: changesRows,
+    SEQUENCE_DIAGRAM_SECTION: sequenceDiagramSection,
+    DELETIONS_SECTION: deletionsSection,
+    CONSIDERED_AND_REJECTED_SECTION: consideredAndRejectedSection,
+    OPEN_QUESTIONS_SECTION: openQuestionsSection,
+    NOT_REVIEWED_SECTION: notReviewedSection,
+  });
 }
 
 export interface RenderFindingOptions {
@@ -306,21 +346,6 @@ export function renderInlineFindingComment(
   options: RenderFindingOptions = {},
 ): string {
   const allowCommitSuggestion = options.allowCommitSuggestion ?? true;
-  const typeIcon = TYPE_EMOJI[finding.type];
-  const sevIcon = SEVERITY_EMOJI[finding.severity];
-  const stateLabel = finding.epistemicState ?? "VERIFIED-DEFECT";
-  const mechanismLabel = finding.evidenceMechanism ?? "Correctness";
-  const safeTitle = sanitizeMarkdownText(finding.title).trim();
-  const safeBody = sanitizeMarkdownText(finding.body).trim();
-
-  const lines: string[] = [
-    `_${typeIcon} ${finding.type}_ | _${sevIcon} ${finding.severity}_ | \`${stateLabel}\` | **Mechanism:** \`${mechanismLabel}\``,
-    "",
-    `**${safeTitle}**`,
-    "",
-    safeBody,
-  ];
-
   const metaBullets: string[] = [];
   if (finding.rootCause && finding.rootCause.trim().length > 0) {
     metaBullets.push(`- **Root Cause:** ${sanitizeMarkdownText(finding.rootCause).trim()}`);
@@ -338,46 +363,46 @@ export function renderInlineFindingComment(
       `- **Verification:** \`${sanitizeMarkdownText(finding.verificationCommand).trim()}\``,
     );
   }
-  if (metaBullets.length > 0) {
-    lines.push("", ...metaBullets);
-  }
 
+  let suggestionBlock = "";
   if (finding.suggestion !== null && finding.suggestion.trim().length > 0) {
     const cleanSuggestion = finding.suggestion.replace(/\r\n/g, "\n").replace(/\n$/, "");
     const fence = computeSafeFence(cleanSuggestion);
     if (allowCommitSuggestion && finding.suggestionVerified) {
-      lines.push(
-        "",
+      suggestionBlock = [
         `> ✓ Verified with \`cargo check\``,
         `${fence}suggestion`,
         cleanSuggestion,
         fence,
-      );
+      ].join("\n");
     } else if (!allowCommitSuggestion) {
       const note = finding.suggestionVerified
         ? `> ✓ Verified with \`cargo check\``
         : `> ℹ️ Candidate patch (not compiler-verified):`;
-      lines.push("", note, `${fence}rust`, cleanSuggestion, fence);
+      suggestionBlock = [note, `${fence}rust`, cleanSuggestion, fence].join("\n");
     }
   }
 
-  const safePrompt = sanitizeAgentPrompt(finding.agentPrompt);
   const lineRangeLabel =
     finding.startLine === finding.endLine
       ? `line ${finding.startLine}`
       : `lines ${finding.startLine}-${finding.endLine}`;
 
-  lines.push(
-    "",
-    `<details><summary>Prompt for Coding Agents</summary>`,
-    "",
-    `In \`${finding.filePath}\` (${lineRangeLabel}):`,
-    safePrompt,
-    "",
-    `</details>`,
-  );
-
-  return lines.join("\n");
+  return fillTemplate(inlineFindingTemplate, {
+    TYPE_ICON: TYPE_EMOJI[finding.type],
+    FINDING_TYPE: finding.type,
+    SEV_ICON: SEVERITY_EMOJI[finding.severity],
+    SEVERITY: finding.severity,
+    STATE_LABEL: finding.epistemicState ?? "VERIFIED-DEFECT",
+    MECHANISM_LABEL: finding.evidenceMechanism ?? "Correctness",
+    TITLE: sanitizeMarkdownText(finding.title).trim(),
+    BODY: sanitizeMarkdownText(finding.body).trim(),
+    META_BULLETS: metaBullets.join("\n"),
+    SUGGESTION_BLOCK: suggestionBlock,
+    FILE_PATH: finding.filePath,
+    LINE_RANGE_LABEL: lineRangeLabel,
+    SAFE_PROMPT: sanitizeAgentPrompt(finding.agentPrompt),
+  });
 }
 
 export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
@@ -385,23 +410,22 @@ export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
   const outside = bundle.outsideDiffFindings ?? [];
   const nitpicks = bundle.nitpickFindings ?? [];
   const actionableTotal = inlineCount + outside.length;
-
-  const lines: string[] = [
-    PEER_REVIEW_MARKER,
-    `**Actionable comments posted: ${inlineCount}**` +
-      (outside.length > 0 ? ` *(+${outside.length} outside diff range)*` : "") +
-      (nitpicks.length > 0 ? ` | **Nitpicks: ${nitpicks.length}**` : ""),
-  ];
-
-  if (bundle.failedCohorts && bundle.failedCohorts.length > 0) {
-    lines.push(
-      "",
-      `> [!WARNING]`,
-      `> **Partial Review (${bundle.failedCohorts.length} cohort(s) failed):** ${bundle.failedCohorts.map((c) => `\`${sanitizeMarkdownText(c)}\``).join(", ")}.`,
-    );
-  }
-
   const allActionable = [...bundle.findings, ...outside];
+
+  const headerLine =
+    `**Actionable comments posted: ${inlineCount}**` +
+    (outside.length > 0 ? ` *(+${outside.length} outside diff range)*` : "") +
+    (nitpicks.length > 0 ? ` | **Nitpicks: ${nitpicks.length}**` : "");
+
+  const failedCohortsBanner =
+    bundle.failedCohorts && bundle.failedCohorts.length > 0
+      ? [
+          `> [!WARNING]`,
+          `> **Partial Review (${bundle.failedCohorts.length} cohort(s) failed):** ${bundle.failedCohorts.map((c) => `\`${sanitizeMarkdownText(c)}\``).join(", ")}.`,
+        ].join("\n")
+      : "";
+
+  let severityBreakdownLine = "";
   if (allActionable.length > 0) {
     const crit = allActionable.filter((f) => f.severity === "Critical").length;
     const maj = allActionable.filter((f) => f.severity === "Major").length;
@@ -409,126 +433,47 @@ export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
     const triv = allActionable.filter(
       (f) => f.severity === "Trivial" || f.severity === "Info",
     ).length;
-    lines.push(
-      `> **Severity Breakdown (${actionableTotal} actionable):** 🔴 Critical: \`${crit}\` | 🟠 Major: \`${maj}\` | 🟡 Minor: \`${min}\`${triv > 0 ? ` | 🔵 Trivial/Info: \`${triv}\`` : ""}`,
-    );
+    severityBreakdownLine = `> **Severity Breakdown (${actionableTotal} actionable):** 🔴 Critical: \`${crit}\` | 🟠 Major: \`${maj}\` | 🟡 Minor: \`${min}\`${triv > 0 ? ` | 🔵 Trivial/Info: \`${triv}\`` : ""}`;
   }
 
-  if (outside.length > 0) {
-    const byFile = new Map<string, Finding[]>();
-    for (const f of outside) {
-      const list = byFile.get(f.filePath) ?? [];
-      list.push(f);
-      byFile.set(f.filePath, list);
-    }
+  const outsideDiffSection = renderGroupedCollapsibleSection(
+    `⚠️ Outside diff range comments (${outside.length})`,
+    outside,
+    "> [!CAUTION]\n> Some comments are outside the diff and can't be posted inline due to GitHub limitations.",
+  );
 
-    lines.push(
-      "",
-      "> [!CAUTION]",
-      "> Some comments are outside the diff and can't be posted inline due to GitHub limitations.",
-      "",
-      "<details>",
-      `<summary>⚠️ Outside diff range comments (${outside.length})</summary>`,
-      "<blockquote>",
-    );
+  const nitpickSection = renderGroupedCollapsibleSection(
+    `🧹 Nitpick comments (${nitpicks.length})`,
+    nitpicks,
+  );
 
-    for (const [filePath, fileFindings] of byFile.entries()) {
-      lines.push(
-        "",
-        "<details>",
-        `<summary><code>${filePath}</code> (${fileFindings.length})</summary>`,
-        "<blockquote>",
-      );
-      for (const f of fileFindings) {
-        const rangeLabel =
-          f.startLine === f.endLine ? `${f.startLine}` : `${f.startLine}-${f.endLine}`;
-        lines.push(
-          "",
-          `\`${filePath}\` (${rangeLabel}):`,
-          "",
-          renderInlineFindingComment(f, { allowCommitSuggestion: false }),
-          "",
-          "---",
-        );
-      }
-      lines.push("</blockquote>", "</details>");
-    }
-
-    lines.push("</blockquote>", "</details>");
-  }
-
-  if (nitpicks.length > 0) {
-    const byFile = new Map<string, Finding[]>();
-    for (const f of nitpicks) {
-      const list = byFile.get(f.filePath) ?? [];
-      list.push(f);
-      byFile.set(f.filePath, list);
-    }
-
-    lines.push(
-      "",
-      "<details>",
-      `<summary>🧹 Nitpick comments (${nitpicks.length})</summary>`,
-      "<blockquote>",
-    );
-
-    for (const [filePath, fileFindings] of byFile.entries()) {
-      lines.push(
-        "",
-        "<details>",
-        `<summary><code>${filePath}</code> (${fileFindings.length})</summary>`,
-        "<blockquote>",
-      );
-      for (const f of fileFindings) {
-        const rangeLabel =
-          f.startLine === f.endLine ? `${f.startLine}` : `${f.startLine}-${f.endLine}`;
-        lines.push(
-          "",
-          `\`${filePath}\` (${rangeLabel}):`,
-          "",
-          renderInlineFindingComment(f, { allowCommitSuggestion: false }),
-          "",
-          "---",
-        );
-      }
-      lines.push("</blockquote>", "</details>");
-    }
-
-    lines.push("</blockquote>", "</details>");
-  }
-
-  return lines.join("\n");
+  return fillTemplate(reviewSummaryTemplate, {
+    PEER_REVIEW_MARKER,
+    HEADER_LINE: headerLine,
+    FAILED_COHORTS_BANNER: failedCohortsBanner,
+    SEVERITY_BREAKDOWN_LINE: severityBreakdownLine,
+    OUTSIDE_DIFF_SECTION: outsideDiffSection,
+    NITPICK_SECTION: nitpickSection,
+  });
 }
 
 export function renderCombinedLocalReviewMarkdown(bundle: ReviewBundle): string {
-  const sections: string[] = [
-    renderWalkthroughComment(bundle),
-    "",
-    "---",
-    "",
-    "## PR Review Summary & Collapsible Sections",
-    "",
-    renderPrReviewSummaryBody(bundle),
-    "",
-    "---",
-    "",
-    `## 2. Actionable Inline Diff Findings (${bundle.findings.length})`,
-  ];
+  const inlineFindingsBody =
+    bundle.findings.length === 0
+      ? "No inline diff comments for the active review profile."
+      : bundle.findings
+          .map(
+            (finding) =>
+              `### \`${finding.filePath}:${finding.startLine}-${finding.endLine}\`\n\n${renderInlineFindingComment(finding)}`,
+          )
+          .join("\n\n");
 
-  if (bundle.findings.length === 0) {
-    sections.push("", "No inline diff comments for the active review profile.");
-  } else {
-    for (const finding of bundle.findings) {
-      sections.push(
-        "",
-        `### \`${finding.filePath}:${finding.startLine}-${finding.endLine}\``,
-        "",
-        renderInlineFindingComment(finding),
-      );
-    }
-  }
-
-  return sections.join("\n");
+  return fillTemplate(combinedReviewTemplate, {
+    WALKTHROUGH_MD: renderWalkthroughComment(bundle),
+    REVIEW_SUMMARY_MD: renderPrReviewSummaryBody(bundle),
+    INLINE_COUNT: String(bundle.findings.length),
+    INLINE_FINDINGS_BODY: inlineFindingsBody,
+  });
 }
 
 export async function writeLocalReviewArtifacts(
