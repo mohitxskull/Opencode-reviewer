@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -166,5 +166,54 @@ rule = "Never hold std::sync::Mutex across .await"
       stderr: (t) => err.push(t),
     });
     expect(code3).toBe(0);
+  });
+
+  test("peer init in a Cargo workspace generates repo-tailored peer.toml, working deny.toml, and optional CI workflow in JSON mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "peer-init-cargo-"));
+    tempDirs.push(dir);
+    runGit(dir, ["init", "-b", "main"]);
+    runGit(dir, ["config", "user.name", "Tester"]);
+    runGit(dir, ["config", "user.email", "test@example.com"]);
+
+    await writeFile(
+      join(dir, "Cargo.toml"),
+      `[package]\nname = "demo_app"\nversion = "0.1.0"\nedition = "2021"\nlicense = "MIT OR Apache-2.0"\n`,
+    );
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "main.rs"), `fn main() {\n    unsafe { let _x = 1; }\n}\n`);
+    runGit(dir, ["add", "."]);
+    runGit(dir, ["commit", "-m", "initial cargo app with unsafe"]);
+    const baseSha = runGit(dir, ["rev-parse", "HEAD"]);
+
+    const out: string[] = [];
+    const code = await runCli(["init", "--ci", "--json", "--repo", dir], {
+      stdout: (t) => out.push(t),
+    });
+    expect(code).toBe(0);
+    const payload = JSON.parse(out.join("\n")) as {
+      status: string;
+      workspace: { isCargoWorkspace: boolean; hasPublishableLib: boolean; hasUnsafeCode: boolean };
+      enabledTools: string[];
+      filesCreated: string[];
+    };
+    expect(payload.status).toBe("initialized");
+    expect(payload.workspace.isCargoWorkspace).toBe(true);
+    // Binary crate (`src/main.rs` only) -> semver is NOT auto-enabled
+    expect(payload.workspace.hasPublishableLib).toBe(false);
+    // Contains `unsafe` -> geiger IS auto-enabled
+    expect(payload.workspace.hasUnsafeCode).toBe(true);
+    expect(payload.enabledTools).toContain("deny");
+    expect(payload.enabledTools).toContain("geiger");
+    expect(payload.enabledTools).not.toContain("semver");
+
+    expect(await Bun.file(join(dir, "deny.toml")).exists()).toBe(true);
+    expect(await Bun.file(join(dir, ".github", "workflows", "peer.yml")).exists()).toBe(true);
+
+    // First-adoption additive config: when baseSha has no peer.toml yet, local peer.toml additively enables deny & geiger
+    const effectiveCfg = await loadPeerConfig(dir, baseSha);
+    expect(effectiveCfg.tools.deny).toBe(true);
+    expect(effectiveCfg.tools.geiger).toBe(true);
+    expect(effectiveCfg.tools.clippy).toBe(true);
+    expect(effectiveCfg.tools.audit).toBe(true);
   });
 });

@@ -28,6 +28,11 @@ peer next [PR_NUMBER] --json
   ```bash
   curl -fsSL https://raw.githubusercontent.com/mohitxskull/Opencode-reviewer/main/install.sh | sh
   ```
+- If the repository has no `peer.toml` or `deny.toml` yet (or the user asks to set up/onboard `peer`), run:
+  ```bash
+  peer init --json [--tools deny,geiger,semver,coverage,miri|all] [--install] [--baseline] [--ci]
+  ```
+  `peer init` inspects `cargo metadata`, writes a repo-tailored `peer.toml` and a zero-false-positive `deny.toml` seeded with the workspace's OSI-approved licenses, and optionally installs missing Cargo analyzers (`--install`), seeds `.peer/baseline.json` (`--baseline`), or scaffolds `.github/workflows/peer.yml` (`--ci`).
 - If the user only wants a fast local/CI deterministic check (no PR number, no GitHub token), run:
   ```bash
   peer check --base main --json    # or --staged / --all-files

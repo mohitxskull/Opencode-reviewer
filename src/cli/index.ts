@@ -64,7 +64,8 @@ Commands:
   peer doctor                      Check local Rust toolchain & analyzer readiness
   peer prompt <name|list>          Print embedded Rust lens prompt (walkthrough|soundness|idioms|skeptic|format)
   peer restore                     Restore original branch after an interrupted checkout (e.g. SIGKILL)
-  peer init [--fresh]              Scaffold a peer.toml repository configuration file
+  peer init [--fresh] [--install] [--baseline] [--ci] [--tools <list|all>]
+                                   Smart repo onboarding: tailored peer.toml, zero-false-positive deny.toml, optional tool install & CI
   peer learn add "<rule>" [--scope "<glob>"] [--repo <path>]
   peer learn list [--repo <path>]
   peer learn remove <id> [--repo <path>]
@@ -161,6 +162,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         strict: { type: "boolean", default: false },
         "no-checkout": { type: "boolean", default: false },
         fresh: { type: "boolean", default: false },
+        install: { type: "boolean", default: false },
+        baseline: { type: "boolean", default: false },
+        ci: { type: "boolean", default: false },
         submit: { type: "boolean", default: false },
         scope: { type: "string" },
         json: { type: "boolean", default: false },
@@ -230,7 +234,15 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     if (parsed.positionals[0] === "init") {
       return await runInitCommand(
         repoRoot,
-        { fresh: parsed.values.fresh ?? false },
+        {
+          fresh: parsed.values.fresh ?? false,
+          install: parsed.values.install ?? false,
+          baseline: parsed.values.baseline ?? false,
+          ci: parsed.values.ci ?? false,
+          tools: parseToolsOption(parsed.values.tools),
+          json: isJson,
+          quiet: isQuiet,
+        },
         writeOut,
         writeErr,
       );

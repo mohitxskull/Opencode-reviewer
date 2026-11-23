@@ -69,6 +69,53 @@ export default {
       });
 
       editor.add({
+        name: "peer_init",
+        description:
+          "Onboard a Rust repository for peer: inspects `cargo metadata`, generates a repo-tailored `peer.toml` and zero-false-positive `deny.toml` (seeded with the workspace's OSI-approved licenses), optionally installs missing Cargo analyzers (`install=true`), seeds `.peer/baseline.json` (`baseline=true`), or scaffolds `.github/workflows/peer.yml` (`ci=true`). Returns structured JSON.",
+        input: {
+          type: "object",
+          properties: {
+            fresh: {
+              type: "boolean",
+              description: "Overwrite existing peer.toml / deny.toml",
+            },
+            install: {
+              type: "boolean",
+              description: "Install missing Cargo analyzers (via cargo-binstall or cargo install)",
+            },
+            tools: {
+              type: "string",
+              description: "Optional Cargo analyzers to enable: deny,geiger,semver,coverage,miri or all",
+            },
+            baseline: {
+              type: "boolean",
+              description: "Seed .peer/baseline.json with current findings for brownfield adoption",
+            },
+            ci: {
+              type: "boolean",
+              description: "Scaffold .github/workflows/peer.yml GitHub Action workflow",
+            },
+          },
+          additionalProperties: false,
+        },
+        async execute(args) {
+          const cliArgs = ["init", "--json"];
+          if (args.fresh === true) cliArgs.push("--fresh");
+          if (args.install === true) cliArgs.push("--install");
+          if (typeof args.tools === "string" && args.tools) cliArgs.push("--tools", args.tools);
+          if (args.baseline === true) cliArgs.push("--baseline");
+          if (args.ci === true) cliArgs.push("--ci");
+          const res = await runPeer(cliArgs, directory);
+          if (res.exitCode !== 0) {
+            throw new Error(
+              res.stderr.trim() || res.stdout.trim() || `peer init exited ${res.exitCode}`,
+            );
+          }
+          return { content: res.stdout.trim() };
+        },
+      });
+
+      editor.add({
         name: "peer_next",
         description:
           "Inspect saved .peer/<pr>/<sha>/ artifacts, check whether git HEAD has changed, and return structured JSON with the current stage, counts, artifact paths, and recommended next command.",
