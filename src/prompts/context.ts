@@ -16,6 +16,7 @@ import { resolveFileArchitecturalLayer } from "../rust.ts";
 import { formatSecurityAdvisoriesPromptSection } from "../security.ts";
 import { type CoverageReport, formatCoveragePromptSection } from "../tools/coverage.ts";
 import { formatGeigerPromptSection, type GeigerReport } from "../tools/geiger.ts";
+import { formatMiriPromptSection, type MiriReport } from "../tools/miri.ts";
 import { formatSemverPromptSection, type SemverViolation } from "../tools/semver.ts";
 import {
   compactAnnotatedLines,
@@ -39,6 +40,7 @@ export interface ReviewContext {
   readonly geigerReport?: GeigerReport | null;
   readonly semverViolations?: readonly SemverViolation[];
   readonly coverageReport?: CoverageReport | null;
+  readonly miriReport?: MiriReport | null;
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
   readonly auditLogger?: AuditLogger;
@@ -181,6 +183,10 @@ export function buildReviewContextPrompt(
 
   if (context.coverageReport) {
     sections.push(formatCoveragePromptSection(context.coverageReport));
+  }
+
+  if (context.miriReport) {
+    sections.push(formatMiriPromptSection(context.miriReport));
   }
 
   if (context.clippyDiagnostics.length > 0) {

@@ -61,6 +61,7 @@ import {
   type GeigerReport,
   geigerReportToFindings,
 } from "./tools/geiger.ts";
+import { collectMiriReport, type MiriReport, miriReportToFindings } from "./tools/miri.ts";
 import {
   collectCargoSemverViolations,
   type SemverViolation,
@@ -101,6 +102,7 @@ Options:
   --geiger                   Run cargo-geiger unsafe-code surface audit on workspace crates
   --semver                   Run cargo-semver-checks against PR base commit for breaking public API changes
   --coverage                 Run cargo-llvm-cov on modified crates to flag untested changed production lines
+  --miri                     Run cargo +nightly miri test on crates with modified unsafe regions
   --concurrency <n>          Max parallel OpenCode lens sessions (default: 4; use 1 for single-GPU local models)
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
@@ -127,6 +129,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         geiger: { type: "boolean", default: false },
         semver: { type: "boolean", default: false },
         coverage: { type: "boolean", default: false },
+        miri: { type: "boolean", default: false },
         concurrency: { type: "string" },
         model: { type: "string" },
         scope: { type: "string" },
@@ -201,6 +204,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const enableGeiger = parsed.values.geiger ?? false;
     const enableSemver = parsed.values.semver ?? false;
     const enableCoverage = parsed.values.coverage ?? false;
+    const enableMiri = parsed.values.miri ?? false;
     const rawConcurrency = parsed.values.concurrency;
     let concurrencyLimit = 4;
     if (rawConcurrency !== undefined) {
@@ -342,6 +346,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     let capturedGeigerReport: GeigerReport | null = null;
     let capturedSemverViolations: SemverViolation[] = [];
     let capturedCoverageReport: CoverageReport | null = null;
+    let capturedMiriReport: MiriReport | null = null;
     const bundle = await withInPlaceCheckout(
       {
         repoRoot,
@@ -480,7 +485,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             .map((fp) => resolveFileArchitecturalLayer(crateGraph, fp).crateName)
             .filter((name) => Boolean(crateGraph.crates[name])),
         );
-        const [geigerReport, semverViolations, coverageReport] = await Promise.all([
+        const [geigerReport, semverViolations, coverageReport, miriReport] = await Promise.all([
           collectCargoGeigerReport(repoRoot, {
             enabled: enableGeiger,
             crateGraph,
@@ -493,12 +498,17 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             enabled: enableCoverage,
             packages: Array.from(modifiedCrates),
           }),
+          collectMiriReport(repoRoot, diffMap, {
+            enabled: enableMiri,
+            crateGraph,
+          }),
         ]);
         capturedSymbolGraph = symbolGraph;
         capturedDenyDiagnostics = denyDiagnostics;
         capturedGeigerReport = geigerReport;
         capturedSemverViolations = semverViolations;
         capturedCoverageReport = coverageReport;
+        capturedMiriReport = miriReport;
 
         await auditLogger.logEvent(
           "stage.rust_ground_truth.completed",
@@ -536,6 +546,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           geigerReport,
           semverViolations,
           coverageReport,
+          miriReport,
           symbolGraph,
           learnings,
           auditLogger,
@@ -576,6 +587,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           : [];
         const semverFindings = semverViolationsToFindings(semverViolations);
         const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
+        const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
         const partitioned = partitionAndFilterFindings(
           [
             ...clippyFindings,
@@ -584,6 +596,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             ...geigerFindings,
             ...semverFindings,
             ...coverageFindings,
+            ...miriFindings,
             ...rawLensFindings,
           ],
           diffMap,
@@ -672,6 +685,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
     if (capturedCoverageReport) {
       extraToolOutputs.coverage = capturedCoverageReport;
+    }
+    if (capturedMiriReport) {
+      extraToolOutputs.miri = capturedMiriReport;
     }
 
     // Step 5: Persist per-commit artifacts & tool diagnostics inside .peer/<pr>/<short-sha>/
