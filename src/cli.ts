@@ -24,10 +24,17 @@ import { advisoriesToFindings, clippyToFindings, partitionAndFilterFindings } fr
 import { LearningStore } from "./learnings.ts";
 import { type MultiLensRunResult, OpenCodeMultiLensOrchestrator } from "./lenses.ts";
 import {
+  type AnalyzeStageContext,
+  AnalyzeStageContextSchema,
+  type ConsideredAndRejectedItem,
   type DeletionProposedItem,
+  type Finding,
+  type PipelineStage,
+  type ReviewBundle,
   ReviewBundleSchema,
   type ReviewProfile,
   ReviewProfileSchema,
+  type RunManifest,
   RunManifestSchema,
 } from "./models.ts";
 import { parseModelSpec } from "./opencode/client.ts";
@@ -36,7 +43,10 @@ import {
   renderInlineFindingComment,
   renderPrReviewSummaryBody,
   renderWalkthroughComment,
-  writeLocalReviewArtifacts,
+  writeAnalyzeStageArtifacts,
+  writePublishStageArtifacts,
+  writeReviewStageArtifacts,
+  writeVerifyStageArtifacts,
 } from "./render/markdown.ts";
 import { formatTerminalReport } from "./render/terminal.ts";
 import {
@@ -51,11 +61,7 @@ import {
   collectCargoLlvmCovReport,
   coverageReportToFindings,
 } from "./tools/coverage.ts";
-import {
-  type CargoDenyDiagnostic,
-  collectCargoDenyDiagnostics,
-  denyDiagnosticsToFindings,
-} from "./tools/deny.ts";
+import { collectCargoDenyDiagnostics, denyDiagnosticsToFindings } from "./tools/deny.ts";
 import {
   collectCargoGeigerReport,
   type GeigerReport,
@@ -70,10 +76,16 @@ import {
 import { SuggestionCompilerVerifier } from "./verifier.ts";
 
 export type LensRunnerFn = (context: ReviewContext) => Promise<MultiLensRunResult>;
+export type SkepticRunnerFn = (
+  repoRoot: string,
+  candidates: readonly Finding[],
+  audit?: AuditLogger,
+) => Promise<{ keptFindings: Finding[]; rejectedItems: ConsideredAndRejectedItem[] }>;
 
 export interface CliDependencies {
   readonly githubClient?: GitHubClient;
   readonly lensRunner?: LensRunnerFn;
+  readonly skepticRunner?: SkepticRunnerFn;
   readonly promptSelectPr?: (
     prs: ReadonlyArray<{ number: number; title: string }>,
   ) => Promise<number>;
@@ -81,33 +93,89 @@ export interface CliDependencies {
   readonly stderr?: (text: string) => void;
 }
 
-const HELP_TEXT = `peer — Local-First Rust PR Reviewer (OpenCode SDK + Octokit)
+const OPTIONAL_TOOLS = ["deny", "geiger", "semver", "coverage", "miri"] as const;
+type OptionalTool = (typeof OPTIONAL_TOOLS)[number];
+const OPTIONAL_TOOL_SET = new Set<string>(OPTIONAL_TOOLS);
 
-Usage:
-  peer [review] [PR_NUMBER_OR_URL] [options]
+const STAGE_COMMANDS = new Set<PipelineStage>(["analyze", "review", "verify", "publish"]);
+
+const HELP_TEXT = `peer — Local-First Rust PR Reviewer (4-Stage Composable Pipeline)
+
+Commands:
+  peer analyze [PR]        Stage 1: Deterministic Rust ground truth only (0 LLM calls)
+  peer review  [PR]        Stage 1 -> 2: Reuses analyze, runs LLM lenses + cargo check verifier (default)
+  peer verify  [PR]        Stage 1 -> 3: Reuses review, runs adversarial skeptic pass
+  peer publish [PR]        Stage 4: Uploads latest saved stage (01, 02, or 03) to GitHub PR
   peer learn add "<rule>" [--scope "<glob>"] [--repo <path>]
   peer learn list [--repo <path>]
   peer learn remove <id> [--repo <path>]
 
 Options:
   --repo <path>              Target local Rust git repository (default: cwd)
-  --profile <profile>        Review profile: quiet | chill | assertive (default: assertive)
-  --fresh                    Ignore saved checkpoint and review full PR diff
-  --local-only               Save local review artifacts without posting to GitHub
-  --post                     Post Walkthrough comment and PENDING draft review to GitHub
-  --submit-review            Submit review with event=COMMENT instead of PENDING draft
-  --allow-partial            Exit 0 and allow posting even if one or more review cohorts fail
-  --skeptic                  Run an adversarial skeptic pass to disprove false positives (uses extra LLM calls)
-  --deny                     Run cargo-deny supply-chain/license/ban checks (auto-runs if deny.toml exists)
-  --geiger                   Run cargo-geiger unsafe-code surface audit on workspace crates
-  --semver                   Run cargo-semver-checks against PR base commit for breaking public API changes
-  --coverage                 Run cargo-llvm-cov on modified crates to flag untested changed production lines
-  --miri                     Run cargo +nightly miri test on crates with modified unsafe regions
-  --concurrency <n>          Max parallel OpenCode lens sessions (default: 4; use 1 for single-GPU local models)
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
+  --profile <profile>        Strictness profile: quiet | chill | assertive (default: assertive)
+  --tools <list|all>         Optional Cargo analyzers: deny,geiger,semver,coverage,miri or all
+  --concurrency <n>          Max parallel LLM sessions (1-16, default: 4)
+  --fresh                    Ignore saved stage artifacts & checkpoint; re-run from scratch
+  --submit                   For 'publish': submit as COMMENT instead of PENDING draft
+  --allow-partial            Exit 0 and allow publishing even if a lens cohort fails
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
   -h, --help                 Show this help message
 `;
+
+export function parseToolsOption(raw?: string): Set<OptionalTool> {
+  const selected = new Set<OptionalTool>();
+  if (!raw || raw.trim().length === 0) {
+    return selected;
+  }
+  const parts = raw
+    .split(",")
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const part of parts) {
+    if (part === "all") {
+      for (const t of OPTIONAL_TOOLS) {
+        selected.add(t);
+      }
+      continue;
+    }
+    if (!OPTIONAL_TOOL_SET.has(part)) {
+      throw new Error(
+        `Unknown tool "${part}" in --tools. Valid values: ${OPTIONAL_TOOLS.join(", ")}, all`,
+      );
+    }
+    selected.add(part as OptionalTool);
+  }
+  return selected;
+}
+
+async function loadJsonIfExists<T>(
+  filePath: string,
+  parser: { parse: (val: unknown) => T },
+): Promise<T | null> {
+  const file = Bun.file(filePath);
+  if (!(await file.exists())) {
+    return null;
+  }
+  try {
+    return parser.parse(await file.json());
+  } catch {
+    return null;
+  }
+}
+
+async function loadRawJsonIfExists<T>(filePath: string): Promise<T | null> {
+  const file = Bun.file(filePath);
+  if (!(await file.exists())) {
+    return null;
+  }
+  try {
+    return (await file.json()) as T;
+  } catch {
+    return null;
+  }
+}
 
 export async function runCli(argv: readonly string[], deps: CliDependencies = {}): Promise<number> {
   const writeOut = deps.stdout ?? ((text: string) => console.log(text));
@@ -118,20 +186,13 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       args: [...argv],
       options: {
         repo: { type: "string" },
-        profile: { type: "string" },
-        fresh: { type: "boolean", default: false },
-        "local-only": { type: "boolean", default: false },
-        post: { type: "boolean", default: false },
-        "submit-review": { type: "boolean", default: false },
-        "allow-partial": { type: "boolean", default: false },
-        skeptic: { type: "boolean", default: false },
-        deny: { type: "boolean", default: false },
-        geiger: { type: "boolean", default: false },
-        semver: { type: "boolean", default: false },
-        coverage: { type: "boolean", default: false },
-        miri: { type: "boolean", default: false },
-        concurrency: { type: "string" },
         model: { type: "string" },
+        profile: { type: "string" },
+        tools: { type: "string" },
+        concurrency: { type: "string" },
+        fresh: { type: "boolean", default: false },
+        submit: { type: "boolean", default: false },
+        "allow-partial": { type: "boolean", default: false },
         scope: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
@@ -193,18 +254,25 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       writeErr("Unknown learn subcommand. Expected: peer learn add | list | remove");
       return 1;
     }
+
+    const positionals = [...parsed.positionals];
+    let targetStage: PipelineStage = "review";
+    if (positionals[0] && STAGE_COMMANDS.has(positionals[0] as PipelineStage)) {
+      targetStage = positionals.shift() as PipelineStage;
+    }
+
     const profile: ReviewProfile = ReviewProfileSchema.parse(parsed.values.profile ?? "assertive");
     const fresh = parsed.values.fresh ?? false;
-    const localOnly = parsed.values["local-only"] ?? false;
-    const postToGitHub = parsed.values.post ?? false;
-    const submitReview = parsed.values["submit-review"] ?? false;
+    const submitReview = parsed.values.submit ?? false;
     const allowPartial = parsed.values["allow-partial"] ?? false;
-    const skeptic = parsed.values.skeptic ?? false;
-    const forceDeny = parsed.values.deny ?? false;
-    const enableGeiger = parsed.values.geiger ?? false;
-    const enableSemver = parsed.values.semver ?? false;
-    const enableCoverage = parsed.values.coverage ?? false;
-    const enableMiri = parsed.values.miri ?? false;
+    const enabledTools = parseToolsOption(parsed.values.tools);
+    const enabledToolsList = Array.from(enabledTools).sort();
+
+    if (submitReview && targetStage !== "publish") {
+      writeErr("Error: --submit is only valid with `peer publish`.");
+      return 1;
+    }
+
     const rawConcurrency = parsed.values.concurrency;
     let concurrencyLimit = 4;
     if (rawConcurrency !== undefined) {
@@ -216,24 +284,12 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       concurrencyLimit = parsedConcurrency;
     }
 
-    if (postToGitHub && localOnly) {
-      writeErr("Error: Cannot combine --post and --local-only.");
-      return 1;
-    }
-    if (submitReview && !postToGitHub) {
-      writeErr("Error: --submit-review requires --post.");
-      return 1;
+    // Step 1: Enforce clean working tree BEFORE any network or git mutation (except read-only publish)
+    if (targetStage !== "publish") {
+      await ensureCleanWorkingTree(repoRoot);
     }
 
-    // Step 1: Enforce clean working tree BEFORE any network or git mutation
-    await ensureCleanWorkingTree(repoRoot);
-
-    const positionals = [...parsed.positionals];
-    if (positionals[0] === "review") {
-      positionals.shift();
-    }
     const rawPrTarget = positionals[0];
-
     let defaultOwner = "unknown";
     let defaultRepo = "unknown";
     try {
@@ -289,30 +345,133 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const pr = await githubClient.getPullRequest(owner, repo, prNumber);
     const checkpointStore = new CheckpointStore(repoRoot);
     const modelSpec = parseModelSpec(parsed.values.model);
+    const modelLabel = `${modelSpec.providerID}/${modelSpec.id}`;
     const runStartMs = Date.now();
-
-    // Short-circuit immediately when this exact PR commit was already reviewed cleanly
-    // (0 checkouts, 0 cargo builds, 0 LLM calls) unless --fresh or --post is requested.
     const commitDir = resolvePeerCommitDir(repoRoot, pr.number, pr.headSha);
-    if (!fresh && !postToGitHub) {
-      const existingRunFile = Bun.file(join(commitDir, "run.json"));
-      if (await existingRunFile.exists()) {
-        try {
-          const existingRun = RunManifestSchema.parse(await existingRunFile.json());
-          if (
-            existingRun.status === "completed" &&
-            existingRun.headSha === pr.headSha &&
-            existingRun.profile === profile
-          ) {
-            writeOut(
-              `Already reviewed PR #${pr.number} at commit ${pr.headSha.slice(0, 7)} (profile=${profile}, ${existingRun.inlineFindingsCount} inline / ${existingRun.outsideDiffFindingsCount} outside-diff findings).\nReport: file://${resolve(commitDir, "review.md")}\nPass --fresh to force a re-review.`,
-            );
-            return 0;
-          }
-        } catch {
-          // Ignore malformed run.json and proceed with fresh review
-        }
+    const existingManifest = !fresh
+      ? await loadJsonIfExists<RunManifest>(join(commitDir, "run.json"), RunManifestSchema)
+      : null;
+
+    // ─── STAGE 4: PUBLISH (reads latest saved bundle; 0 builds, 0 LLM calls) ───
+    if (targetStage === "publish") {
+      const verifyBundle = await loadJsonIfExists(
+        join(commitDir, "03-verify", "bundle.json"),
+        ReviewBundleSchema,
+      );
+      const reviewBundle = await loadJsonIfExists(
+        join(commitDir, "02-review", "bundle.json"),
+        ReviewBundleSchema,
+      );
+      const analyzeBundle = await loadJsonIfExists(
+        join(commitDir, "01-analyze", "bundle.json"),
+        ReviewBundleSchema,
+      );
+      const analyzeContext = await loadJsonIfExists(
+        join(commitDir, "01-analyze", "context.json"),
+        AnalyzeStageContextSchema,
+      );
+
+      let sourceStage: PipelineStage | null = null;
+      let bundleToPublish: ReviewBundle | null = null;
+      if (verifyBundle) {
+        sourceStage = "verify";
+        bundleToPublish = verifyBundle;
+      } else if (reviewBundle) {
+        sourceStage = "review";
+        bundleToPublish = reviewBundle;
+      } else if (analyzeBundle) {
+        sourceStage = "analyze";
+        bundleToPublish = analyzeBundle;
       }
+
+      if (!bundleToPublish || !sourceStage || !analyzeContext) {
+        writeErr(
+          `No local review artifacts found for PR #${pr.number} @ ${pr.headSha.slice(0, 7)}. Run \`peer analyze ${pr.number}\`, \`peer review ${pr.number}\`, or \`peer verify ${pr.number}\` first.`,
+        );
+        return 1;
+      }
+
+      const failedCohorts = bundleToPublish.failedCohorts ?? [];
+      if (failedCohorts.length > 0 && !allowPartial) {
+        writeErr(
+          `Error: ${failedCohorts.length} review cohort(s) failed (${failedCohorts.join(", ")}). Refusing to publish partial review. Pass --allow-partial to override.`,
+        );
+        return 2;
+      }
+
+      const walkthroughCommentBody = renderWalkthroughComment(bundleToPublish);
+      await githubClient.upsertWalkthroughComment(owner, repo, pr.number, walkthroughCommentBody);
+
+      const inlineComments: InlineReviewCommentInput[] = bundleToPublish.findings.map(
+        (finding) => ({
+          path: finding.filePath,
+          startLine: finding.startLine,
+          endLine: finding.endLine,
+          body: renderInlineFindingComment(finding),
+        }),
+      );
+
+      await githubClient.postPrReview({
+        owner,
+        repo,
+        prNumber: pr.number,
+        commitId: pr.headSha,
+        comments: inlineComments,
+        diffMap: analyzeContext.activeDiffMap,
+        submit: submitReview,
+        summaryBody: renderPrReviewSummaryBody(bundleToPublish),
+      });
+
+      await checkpointStore.save({
+        prNumber: pr.number,
+        baseSha: pr.baseSha,
+        lastReviewedHeadSha: pr.headSha,
+        reviewedAt: new Date().toISOString(),
+        profile: bundleToPublish.profile,
+      });
+
+      const existingStages = existingManifest?.completedStages ?? [sourceStage];
+      await writePublishStageArtifacts(
+        repoRoot,
+        bundleToPublish,
+        {
+          sourceStage,
+          submitted: submitReview,
+          inlineCommentsCount: inlineComments.length,
+        },
+        existingStages,
+        {
+          model: existingManifest?.model ?? modelLabel,
+          durationMs: Date.now() - runStartMs,
+          enabledTools: existingManifest?.enabledTools ?? enabledToolsList,
+        },
+      );
+
+      writeOut(
+        `Published PR #${pr.number} @ ${pr.headSha.slice(0, 7)} from stage \`${sourceStage}\` (${inlineComments.length} inline comment(s), mode=${submitReview ? "COMMENT" : "PENDING"}).\nReceipt: file://${resolve(commitDir, "04-publish", "report.md")}`,
+      );
+      return 0;
+    }
+
+    // ─── SHORT-CIRCUIT: Target stage already completed for this commit & profile ───
+    if (
+      !fresh &&
+      existingManifest &&
+      existingManifest.status === "completed" &&
+      existingManifest.headSha === pr.headSha &&
+      existingManifest.profile === profile &&
+      existingManifest.completedStages.includes(targetStage)
+    ) {
+      const stageFolder =
+        targetStage === "analyze"
+          ? "01-analyze"
+          : targetStage === "review"
+            ? "02-review"
+            : "03-verify";
+      writeOut(
+        `Already completed stage \`${targetStage}\` for PR #${pr.number} @ ${pr.headSha.slice(0, 7)} (profile=${profile}, ${existingManifest.inlineFindingsCount} inline / ${existingManifest.outsideDiffFindingsCount} outside-diff findings).\nReport: file://${resolve(commitDir, stageFolder, "report.md")}\nPass --fresh to force a re-run.`,
+      );
+      return 0;
     }
 
     const auditLogger = new AuditLogger({
@@ -324,272 +483,178 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     await auditLogger.logEvent(
       "run.started",
-      `▶ Stage 1/6: Resolved PR #${pr.number} (${owner}/${repo}: "${pr.title}") head=${pr.headSha.slice(0, 7)} base=${pr.baseSha.slice(0, 7)}`,
+      `▶ Resolved PR #${pr.number} (${owner}/${repo}: "${pr.title}") head=${pr.headSha.slice(0, 7)} base=${pr.baseSha.slice(0, 7)} target=${targetStage}`,
       {
         owner,
         repo,
         prNumber: pr.number,
-        title: pr.title,
         headSha: pr.headSha,
         baseSha: pr.baseSha,
-        model: `${modelSpec.providerID}/${modelSpec.id}`,
+        targetStage,
+        model: modelLabel,
+        enabledTools: enabledToolsList,
         fresh,
-        localOnly,
-        postToGitHub,
       },
     );
 
-    let failedCohortsCount = 0;
-    let activeDiffMap: Record<string, import("./models.ts").DiffFileMap> = {};
-    let capturedSymbolGraph: RustSymbolGraph | undefined;
-    let capturedDenyDiagnostics: CargoDenyDiagnostic[] = [];
-    let capturedGeigerReport: GeigerReport | null = null;
-    let capturedSemverViolations: SemverViolation[] = [];
-    let capturedCoverageReport: CoverageReport | null = null;
-    let capturedMiriReport: MiriReport | null = null;
-    const bundle = await withInPlaceCheckout(
-      {
-        repoRoot,
-        targetSha: pr.headSha,
-        prNumber: pr.number,
-      },
-      async () => {
-        let { diffBaseSha, isIncremental } = await checkpointStore.resolveDiffBase({
-          prNumber: pr.number,
-          prBaseSha: pr.baseSha,
-          currentHeadSha: pr.headSha,
-          fresh,
-          profile,
-        });
+    // ─── STAGE 1: ANALYZE (reuse saved 01-analyze/context.json if valid) ───
+    let analyzeContext: AnalyzeStageContext | null = !fresh
+      ? await loadJsonIfExists(
+          join(commitDir, "01-analyze", "context.json"),
+          AnalyzeStageContextSchema,
+        )
+      : null;
 
-        let diffText: string;
-        const diffRangeSpec = isIncremental
-          ? `${diffBaseSha}..${pr.headSha}`
-          : `${diffBaseSha}...${pr.headSha}`;
-        const localDiffAttempt = tryGitRawSync(repoRoot, [
-          "diff",
-          "--no-color",
-          "--unified=3",
-          diffRangeSpec,
-        ]);
-        if (localDiffAttempt.ok && (isIncremental || localDiffAttempt.stdout.length > 0)) {
-          diffText = localDiffAttempt.stdout;
-        } else {
-          if (isIncremental) {
-            isIncremental = false;
-            diffBaseSha = pr.baseSha;
-            await auditLogger.logEvent(
-              "diff.incremental.fallback",
-              `  ├─ ⚠ Local incremental diff (${diffRangeSpec}) unavailable; falling back to full GitHub PR diff`,
-              { diffRangeSpec, fallbackBaseSha: pr.baseSha },
-            );
-          }
-          diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
-        }
+    if (
+      analyzeContext &&
+      (analyzeContext.headSha !== pr.headSha || analyzeContext.profile !== profile)
+    ) {
+      analyzeContext = null;
+    }
 
-        const rawDiffMap = parseUnifiedDiff(diffText);
-        const diffMap = filterCodeOnlyDiffMap(rawDiffMap);
-        // Anchor GitHub inline comments against the full PR diff (pr.baseSha...pr.headSha)
-        // when running incrementally so reverted hunks do not trigger GitHub HTTP 422.
-        if (isIncremental) {
-          const fullPrDiffAttempt = tryGitRawSync(repoRoot, [
+    let analyzeBundle: ReviewBundle | null = analyzeContext
+      ? await loadJsonIfExists(join(commitDir, "01-analyze", "bundle.json"), ReviewBundleSchema)
+      : null;
+
+    let symbolGraph: RustSymbolGraph | undefined;
+    let geigerReport: GeigerReport | null = null;
+    let semverViolations: SemverViolation[] = [];
+    let coverageReport: CoverageReport | null = null;
+    let miriReport: MiriReport | null = null;
+
+    if (analyzeContext) {
+      const toolsDir = join(commitDir, "01-analyze", "tools");
+      symbolGraph =
+        (await loadRawJsonIfExists<RustSymbolGraph>(join(toolsDir, "symbol-graph.json"))) ??
+        undefined;
+      geigerReport = await loadRawJsonIfExists<GeigerReport>(join(toolsDir, "geiger.json"));
+      semverViolations =
+        (await loadRawJsonIfExists<SemverViolation[]>(join(toolsDir, "semver.json"))) ?? [];
+      coverageReport = await loadRawJsonIfExists<CoverageReport>(join(toolsDir, "coverage.json"));
+      miriReport = await loadRawJsonIfExists<MiriReport>(join(toolsDir, "miri.json"));
+      await auditLogger.logEvent(
+        "stage.analyze.reused",
+        `▶ Stage 1 (analyze): Reusing cached deterministic analysis from ${join(commitDir, "01-analyze")}`,
+      );
+    } else {
+      await withInPlaceCheckout(
+        { repoRoot, targetSha: pr.headSha, prNumber: pr.number },
+        async () => {
+          let { diffBaseSha, isIncremental } = await checkpointStore.resolveDiffBase({
+            prNumber: pr.number,
+            prBaseSha: pr.baseSha,
+            currentHeadSha: pr.headSha,
+            fresh,
+            profile,
+          });
+
+          let diffText: string;
+          const diffRangeSpec = isIncremental
+            ? `${diffBaseSha}..${pr.headSha}`
+            : `${diffBaseSha}...${pr.headSha}`;
+          const localDiffAttempt = tryGitRawSync(repoRoot, [
             "diff",
             "--no-color",
             "--unified=3",
-            `${pr.baseSha}...${pr.headSha}`,
+            diffRangeSpec,
           ]);
-          activeDiffMap =
-            fullPrDiffAttempt.ok && fullPrDiffAttempt.stdout.length > 0
-              ? filterCodeOnlyDiffMap(parseUnifiedDiff(fullPrDiffAttempt.stdout))
-              : diffMap;
-        } else {
-          activeDiffMap = diffMap;
-        }
-        const modifiedFiles = new Set(Object.keys(diffMap));
-        const excludedFiles = Object.keys(rawDiffMap).filter((fp) => !modifiedFiles.has(fp));
+          if (localDiffAttempt.ok && (isIncremental || localDiffAttempt.stdout.length > 0)) {
+            diffText = localDiffAttempt.stdout;
+          } else {
+            if (isIncremental) {
+              isIncremental = false;
+              diffBaseSha = pr.baseSha;
+            }
+            diffText = await githubClient.getPullRequestDiff(owner, repo, pr.number);
+          }
 
-        await auditLogger.logEvent(
-          "stage.checkout_and_diff",
-          `▶ Stage 2/6: Checked out ${pr.headSha.slice(0, 7)} (${modifiedFiles.size} Rust code files kept, ${excludedFiles.length} non-code files skipped, profile=${profile})`,
-          {
-            diffBaseSha,
-            headSha: pr.headSha,
-            isIncremental,
-            profile,
-            keptRustFiles: Array.from(modifiedFiles),
-            excludedNonCodeFiles: excludedFiles,
-          },
-        );
+          const rawDiffMap = parseUnifiedDiff(diffText);
+          const diffMap = filterCodeOnlyDiffMap(rawDiffMap);
+          let activeDiffMap = diffMap;
+          if (isIncremental) {
+            const fullPrDiffAttempt = tryGitRawSync(repoRoot, [
+              "diff",
+              "--no-color",
+              "--unified=3",
+              `${pr.baseSha}...${pr.headSha}`,
+            ]);
+            if (fullPrDiffAttempt.ok && fullPrDiffAttempt.stdout.length > 0) {
+              activeDiffMap = filterCodeOnlyDiffMap(parseUnifiedDiff(fullPrDiffAttempt.stdout));
+            }
+          }
 
-        const baseline = collectRustToolchainBaseline(repoRoot);
+          const modifiedFiles = new Set(Object.keys(diffMap));
+          const excludedFiles = Object.keys(rawDiffMap).filter((fp) => !modifiedFiles.has(fp));
+          const baseline = collectRustToolchainBaseline(repoRoot);
 
-        // Short-circuit when 0 reviewable Rust code files were modified (e.g. docs-only PR)
-        if (modifiedFiles.size === 0 && !deps.lensRunner) {
           await auditLogger.logEvent(
-            "stage.short_circuit.no_rust_files",
-            `  ├─ ℹ No reviewable Rust code files modified; skipping Cargo Clippy and OpenCode lenses.`,
+            "stage.analyze.started",
+            `▶ Stage 1 (analyze): Running deterministic Rust analyzers on ${modifiedFiles.size} file(s)...`,
           );
-          return ReviewBundleSchema.parse({
-            pr,
-            diffBaseSha,
-            headSha: pr.headSha,
-            isIncremental,
-            profile,
-            baseline,
-            walkthrough: {
-              summary: "No Rust source or Cargo manifest files were modified in this range.",
-              changes: [],
-              sequenceDiagram: null,
-              triage: {
-                reviewEffort: 1,
-                mergeRisk: "Minimal",
-                rationale: "Non-Rust or documentation-only change set.",
-              },
-            },
-            findings: [],
-            outsideDiffFindings: [],
-            nitpickFindings: [],
-            consideredAndRejected: [],
-            deletionsProposed: [],
-            openQuestions: [],
-            notReviewed: excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
-            failedCohorts: [],
-            clippyDiagnostics: [],
-            generatedAt: new Date().toISOString(),
-          });
-        }
 
-        await auditLogger.logEvent(
-          "stage.rust_ground_truth.started",
-          `▶ Stage 3/6: Collecting local Rust ground truth (cargo metadata + cargo clippy + cargo audit/CVE + symbol call-site graph)...`,
-        );
-        const gtStartMs = Date.now();
+          const [crateGraph, clippyDiagnostics, securityAdvisories, denyDiagnostics, builtGraph] =
+            await Promise.all([
+              collectCrateGraph(repoRoot),
+              modifiedFiles.size > 0
+                ? collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap)
+                : Promise.resolve([]),
+              modifiedFiles.size > 0
+                ? collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha })
+                : Promise.resolve([]),
+              modifiedFiles.size > 0
+                ? collectCargoDenyDiagnostics(repoRoot, { force: enabledTools.has("deny") })
+                : Promise.resolve([]),
+              modifiedFiles.size > 0
+                ? buildRustSymbolGraph(repoRoot, diffMap)
+                : Promise.resolve({ nodes: [] }),
+            ]);
 
-        const [
-          crateGraph,
-          clippyDiagnostics,
-          securityAdvisories,
-          denyDiagnostics,
-          symbolGraph,
-          learnings,
-        ] = await Promise.all([
-          collectCrateGraph(repoRoot),
-          collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap),
-          collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha }),
-          collectCargoDenyDiagnostics(repoRoot, { force: forceDeny }),
-          buildRustSymbolGraph(repoRoot, diffMap),
-          learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha),
-        ]);
-        const modifiedCrates = new Set(
-          Array.from(modifiedFiles)
-            .map((fp) => resolveFileArchitecturalLayer(crateGraph, fp).crateName)
-            .filter((name) => Boolean(crateGraph.crates[name])),
-        );
-        const [geigerReport, semverViolations, coverageReport, miriReport] = await Promise.all([
-          collectCargoGeigerReport(repoRoot, {
-            enabled: enableGeiger,
-            crateGraph,
-          }),
-          collectCargoSemverViolations(repoRoot, {
-            enabled: enableSemver,
-            baseSha: pr.baseSha,
-          }),
-          collectCargoLlvmCovReport(repoRoot, diffMap, {
-            enabled: enableCoverage,
-            packages: Array.from(modifiedCrates),
-          }),
-          collectMiriReport(repoRoot, diffMap, {
-            enabled: enableMiri,
-            crateGraph,
-          }),
-        ]);
-        capturedSymbolGraph = symbolGraph;
-        capturedDenyDiagnostics = denyDiagnostics;
-        capturedGeigerReport = geigerReport;
-        capturedSemverViolations = semverViolations;
-        capturedCoverageReport = coverageReport;
-        capturedMiriReport = miriReport;
+          symbolGraph = builtGraph;
+          const modifiedCrates = new Set(
+            Array.from(modifiedFiles)
+              .map((fp) => resolveFileArchitecturalLayer(crateGraph, fp).crateName)
+              .filter((name) => Boolean(crateGraph.crates[name])),
+          );
 
-        await auditLogger.logEvent(
-          "stage.rust_ground_truth.completed",
-          `  ├─ ✓ Rust ground truth ready in ${Date.now() - gtStartMs}ms (${Object.keys(crateGraph.crates).length} crate(s), ${clippyDiagnostics.length} Clippy diagnostic(s), ${securityAdvisories.length} CVE/RustSec advisory(s), ${symbolGraph.nodes.length} modified symbol(s) graphed, ${learnings.length} repo learning(s))`,
-          {
-            durationMs: Date.now() - gtStartMs,
-            crateCount: Object.keys(crateGraph.crates).length,
-            clippyCount: clippyDiagnostics.length,
-            clippyDiagnostics,
-            securityAdvisoriesCount: securityAdvisories.length,
+          const [geigerRes, semverRes, coverageRes, miriRes] = await Promise.all([
+            collectCargoGeigerReport(repoRoot, {
+              enabled: enabledTools.has("geiger"),
+              crateGraph,
+            }),
+            collectCargoSemverViolations(repoRoot, {
+              enabled: enabledTools.has("semver"),
+              baseSha: pr.baseSha,
+            }),
+            collectCargoLlvmCovReport(repoRoot, diffMap, {
+              enabled: enabledTools.has("coverage"),
+              packages: Array.from(modifiedCrates),
+            }),
+            collectMiriReport(repoRoot, diffMap, {
+              enabled: enabledTools.has("miri"),
+              crateGraph,
+            }),
+          ]);
+
+          geigerReport = geigerRes;
+          semverViolations = semverRes;
+          coverageReport = coverageRes;
+          miriReport = miriRes;
+
+          const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
+          const auditFindings = await advisoriesToFindings(
             securityAdvisories,
-            symbolGraphNodes: symbolGraph.nodes.map((n) => ({
-              name: n.name,
-              kind: n.kind,
-              filePath: n.filePath,
-              line: n.line,
-              prodRefs: n.prodReferences.length,
-              testRefs: n.testReferences.length,
-            })),
-            learningsCount: learnings.length,
-          },
-        );
+            repoRoot,
+            crateGraph,
+          );
+          const denyFindings = denyDiagnosticsToFindings(denyDiagnostics);
+          const geigerFindings = geigerReport
+            ? geigerReportToFindings(geigerReport, modifiedCrates, crateGraph)
+            : [];
+          const semverFindings = semverViolationsToFindings(semverViolations);
+          const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
+          const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
 
-        const reviewContext: ReviewContext = {
-          repoRoot,
-          pr,
-          diffBaseSha,
-          headSha: pr.headSha,
-          isIncremental,
-          fresh,
-          crateGraph,
-          diffMap,
-          clippyDiagnostics,
-          securityAdvisories,
-          geigerReport,
-          semverViolations,
-          coverageReport,
-          miriReport,
-          symbolGraph,
-          learnings,
-          auditLogger,
-        };
-
-        await auditLogger.logEvent(
-          "stage.lenses.started",
-          `▶ Stage 4/6: Running OpenCode review lenses (model: ${modelSpec.providerID}/${modelSpec.id})...`,
-          {
-            model: `${modelSpec.providerID}/${modelSpec.id}`,
-          },
-        );
-
-        const lensRunner: LensRunnerFn =
-          deps.lensRunner ??
-          (async (ctx) => {
-            const orchestrator = new OpenCodeMultiLensOrchestrator({
-              model: modelSpec,
-              concurrencyLimit,
-              skeptic,
-            });
-            return await orchestrator.runAllLenses(ctx);
-          });
-
-        const lensResult = await lensRunner(reviewContext);
-        failedCohortsCount = lensResult.failedCohorts?.length ?? 0;
-        const { walkthrough, findings: rawLensFindings } = lensResult;
-
-        // Post-lens safety check: restore working tree if any external tool touched tracked files
-        runGitSync(repoRoot, ["checkout", "--", "."]);
-
-        // Step 3: Judge Pass (merge Clippy + CVE/audit + lens findings, partition into inline / outside-diff / nitpicks)
-        const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
-        const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
-        const denyFindings = denyDiagnosticsToFindings(denyDiagnostics);
-        const geigerFindings = geigerReport
-          ? geigerReportToFindings(geigerReport, modifiedCrates, crateGraph)
-          : [];
-        const semverFindings = semverViolationsToFindings(semverViolations);
-        const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
-        const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
-        const partitioned = partitionAndFilterFindings(
-          [
+          const deterministicFindings = [
             ...clippyFindings,
             ...auditFindings,
             ...denyFindings,
@@ -597,170 +662,323 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             ...semverFindings,
             ...coverageFindings,
             ...miriFindings,
-            ...rawLensFindings,
-          ],
-          diffMap,
-          profile,
-        );
+          ];
 
-        await auditLogger.logEvent(
-          "stage.judge.completed",
-          `▶ Stage 5/6: Judge partitioned ${rawLensFindings.length + clippyFindings.length} raw findings -> ${partitioned.inlineFindings.length} inline, ${partitioned.outsideDiffFindings.length} outside-diff, ${partitioned.nitpickFindings.length} nitpicks (${lensResult.consideredAndRejected?.length ?? 0} hypotheses considered & rejected). Running cargo check on suggestions...`,
-          {
-            rawLensFindingsCount: rawLensFindings.length,
-            clippyFindingsCount: clippyFindings.length,
-            inlineCount: partitioned.inlineFindings.length,
-            outsideDiffCount: partitioned.outsideDiffFindings.length,
-            nitpickCount: partitioned.nitpickFindings.length,
-            consideredAndRejectedCount: lensResult.consideredAndRejected?.length ?? 0,
-            deletionsProposedCount: lensResult.deletionsProposed?.length ?? 0,
-            openQuestionsCount: lensResult.openQuestions?.length ?? 0,
+          const partitionedDet = partitionAndFilterFindings(
+            deterministicFindings,
+            diffMap,
+            profile,
+          );
+
+          analyzeContext = AnalyzeStageContextSchema.parse({
+            pr,
+            diffBaseSha,
+            headSha: pr.headSha,
+            isIncremental,
+            profile,
+            baseline,
+            crateGraph,
+            diffMap,
+            activeDiffMap,
+            excludedFiles,
+            clippyDiagnostics,
+            securityAdvisories,
+            enabledTools: enabledToolsList,
+            deterministicFindings,
+            generatedAt: new Date().toISOString(),
+          });
+
+          analyzeBundle = ReviewBundleSchema.parse({
+            pr,
+            diffBaseSha,
+            headSha: pr.headSha,
+            isIncremental,
+            profile,
+            baseline,
+            walkthrough: {
+              summary: `Deterministic static/dynamic analysis across ${modifiedFiles.size} Rust file(s) (${clippyDiagnostics.length} Clippy, ${securityAdvisories.length} CVE/RustSec, ${deterministicFindings.length} total deterministic finding(s)).`,
+              changes: Array.from(modifiedFiles).map((filePath) => {
+                const layerInfo = resolveFileArchitecturalLayer(crateGraph, filePath);
+                return {
+                  layer: layerInfo.layer,
+                  crateName: layerInfo.crateName,
+                  filePath,
+                  summary: "Analyzed by deterministic Rust toolchain",
+                };
+              }),
+              sequenceDiagram: null,
+              triage: {
+                reviewEffort: Math.min(5, Math.max(1, Math.ceil(modifiedFiles.size / 3))),
+                mergeRisk: deterministicFindings.some((f) => f.severity === "Critical")
+                  ? "Critical"
+                  : deterministicFindings.some((f) => f.severity === "Major")
+                    ? "High"
+                    : "Low",
+                rationale: "Deterministic Stage 1 analysis (0 LLM calls).",
+              },
+            },
+            findings: partitionedDet.inlineFindings,
+            outsideDiffFindings: partitionedDet.outsideDiffFindings,
+            nitpickFindings: partitionedDet.nitpickFindings,
+            consideredAndRejected: [],
+            deletionsProposed: clippyDiagnostics
+              .filter((d) => d.code === "dead_code")
+              .map((d) => ({
+                pathOrSymbol: `${d.filePath}:${d.startLine}`,
+                reachabilityEvidence: `rustc dead_code diagnostic: ${d.message}`,
+                replacement: "Remove dead symbol or wire into production caller",
+              })),
+            openQuestions: [],
+            notReviewed: excludedFiles.map((f) => `${f} (non-Rust or documentation file skipped)`),
+            failedCohorts: [],
+            clippyDiagnostics,
+            securityAdvisories,
+            generatedAt: analyzeContext.generatedAt,
+          });
+
+          const extraToolOutputs: Record<string, unknown> = {};
+          if (denyDiagnostics.length > 0) extraToolOutputs.deny = denyDiagnostics;
+          if (geigerReport) extraToolOutputs.geiger = geigerReport;
+          if (semverViolations.length > 0) extraToolOutputs.semver = semverViolations;
+          if (coverageReport) extraToolOutputs.coverage = coverageReport;
+          if (miriReport) extraToolOutputs.miri = miriReport;
+
+          await writeAnalyzeStageArtifacts(repoRoot, analyzeContext, analyzeBundle, {
+            model: "deterministic",
+            durationMs: Date.now() - runStartMs,
+            enabledTools: enabledToolsList,
+            symbolGraph,
+            extraToolOutputs,
+          });
+        },
+      );
+    }
+
+    if (!analyzeContext || !analyzeBundle) {
+      writeErr("Internal error: Stage 1 (analyze) produced no context.");
+      return 1;
+    }
+
+    if (targetStage === "analyze") {
+      writeOut(formatTerminalReport(analyzeBundle, repoRoot, join(commitDir, "01-analyze")));
+      return 0;
+    }
+
+    // ─── STAGE 2: REVIEW (OpenCode multi-lens + Judge + cargo check verifier) ───
+    let reviewBundle: ReviewBundle | null =
+      !fresh && existingManifest?.completedStages.includes("review")
+        ? await loadJsonIfExists(join(commitDir, "02-review", "bundle.json"), ReviewBundleSchema)
+        : null;
+
+    if (reviewBundle) {
+      await auditLogger.logEvent(
+        "stage.review.reused",
+        `▶ Stage 2 (review): Reusing cached LLM review from ${join(commitDir, "02-review")}`,
+      );
+    } else {
+      const ctxData = analyzeContext;
+      const modifiedFiles = new Set(Object.keys(ctxData.diffMap));
+
+      if (modifiedFiles.size === 0 && !deps.lensRunner) {
+        reviewBundle = analyzeBundle;
+        await writeReviewStageArtifacts(repoRoot, reviewBundle, {
+          model: modelLabel,
+          durationMs: Date.now() - runStartMs,
+          enabledTools: enabledToolsList,
+        });
+      } else {
+        reviewBundle = await withInPlaceCheckout(
+          { repoRoot, targetSha: pr.headSha, prNumber: pr.number },
+          async () => {
+            const learnings = await learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha);
+            const reviewContext: ReviewContext = {
+              repoRoot,
+              pr,
+              diffBaseSha: ctxData.diffBaseSha,
+              headSha: pr.headSha,
+              isIncremental: ctxData.isIncremental,
+              fresh,
+              crateGraph: ctxData.crateGraph,
+              diffMap: ctxData.diffMap,
+              clippyDiagnostics: ctxData.clippyDiagnostics,
+              securityAdvisories: ctxData.securityAdvisories,
+              geigerReport,
+              semverViolations,
+              coverageReport,
+              miriReport,
+              symbolGraph,
+              learnings,
+              auditLogger,
+            };
+
+            await auditLogger.logEvent(
+              "stage.review.started",
+              `▶ Stage 2 (review): Running OpenCode review lenses (model: ${modelLabel})...`,
+            );
+
+            const lensRunner: LensRunnerFn =
+              deps.lensRunner ??
+              (async (ctx) => {
+                const orchestrator = new OpenCodeMultiLensOrchestrator({
+                  model: modelSpec,
+                  concurrencyLimit,
+                  skeptic: false,
+                });
+                return await orchestrator.runAllLenses(ctx);
+              });
+
+            const lensResult = await lensRunner(reviewContext);
+            runGitSync(repoRoot, ["checkout", "--", "."]);
+
+            const partitioned = partitionAndFilterFindings(
+              [...ctxData.deterministicFindings, ...lensResult.findings],
+              ctxData.diffMap,
+              profile,
+            );
+
+            const hasBaselineCompileErrors = ctxData.clippyDiagnostics.some(
+              (d) => d.level === "error",
+            );
+            const verifier = new SuggestionCompilerVerifier();
+            const verifiedInline = hasBaselineCompileErrors
+              ? partitioned.inlineFindings
+              : await verifier.verifySuggestions(repoRoot, partitioned.inlineFindings, auditLogger);
+
+            const existingDeletionRefs = new Set(
+              (lensResult.deletionsProposed ?? []).map((d) => d.pathOrSymbol),
+            );
+            const rustcDeadCodeDeletions: DeletionProposedItem[] = ctxData.clippyDiagnostics
+              .filter((d) => d.code === "dead_code")
+              .map((d) => ({
+                pathOrSymbol: `${d.filePath}:${d.startLine}`,
+                reachabilityEvidence: `rustc dead_code diagnostic: ${d.message}`,
+                replacement: "Remove dead symbol or wire into production caller",
+              }))
+              .filter((d) => !existingDeletionRefs.has(d.pathOrSymbol));
+
+            return ReviewBundleSchema.parse({
+              pr,
+              diffBaseSha: ctxData.diffBaseSha,
+              headSha: pr.headSha,
+              isIncremental: ctxData.isIncremental,
+              profile,
+              baseline: ctxData.baseline,
+              walkthrough: lensResult.walkthrough,
+              findings: verifiedInline,
+              outsideDiffFindings: partitioned.outsideDiffFindings,
+              nitpickFindings: partitioned.nitpickFindings,
+              consideredAndRejected: lensResult.consideredAndRejected ?? [],
+              deletionsProposed: [
+                ...(lensResult.deletionsProposed ?? []),
+                ...rustcDeadCodeDeletions,
+              ],
+              openQuestions: lensResult.openQuestions ?? [],
+              notReviewed: ctxData.excludedFiles.map(
+                (f) => `${f} (non-Rust or documentation file skipped)`,
+              ),
+              failedCohorts: lensResult.failedCohorts ?? [],
+              clippyDiagnostics: ctxData.clippyDiagnostics,
+              securityAdvisories: ctxData.securityAdvisories,
+              generatedAt: new Date().toISOString(),
+            });
           },
         );
 
-        // Step 4: Transactional cargo check verification of single-hunk inline diff suggestions
-        // Skip per-suggestion cargo check if baseline workspace already has compiler errors
-        const hasBaselineCompileErrors = clippyDiagnostics.some((d) => d.level === "error");
-        const verifier = new SuggestionCompilerVerifier();
-        const verifiedInline = hasBaselineCompileErrors
-          ? partitioned.inlineFindings
-          : await verifier.verifySuggestions(repoRoot, partitioned.inlineFindings, auditLogger);
-        const verifiedOutside = partitioned.outsideDiffFindings;
+        await writeReviewStageArtifacts(repoRoot, reviewBundle, {
+          model: modelLabel,
+          durationMs: Date.now() - runStartMs,
+          enabledTools: enabledToolsList,
+        });
+      }
+    }
 
-        const existingDeletionRefs = new Set(
-          (lensResult.deletionsProposed ?? []).map((d) => d.pathOrSymbol),
+    const failedCohortsCount = reviewBundle.failedCohorts?.length ?? 0;
+    if (targetStage === "review") {
+      writeOut(formatTerminalReport(reviewBundle, repoRoot, join(commitDir, "02-review")));
+      if (failedCohortsCount > 0 && !allowPartial) {
+        writeErr(
+          `Error: ${failedCohortsCount} review cohort(s) failed (${(reviewBundle.failedCohorts ?? []).join(", ")}). Pass --allow-partial to override.`,
         );
-        // Why: Use compiler-verified `dead_code` diagnostics from rustc/clippy rather
-        // than regex grep counts, which false-positive on trait impl methods and inline tests.
-        const rustcDeadCodeDeletions: DeletionProposedItem[] = clippyDiagnostics
-          .filter((d) => d.code === "dead_code")
-          .map((d) => ({
-            pathOrSymbol: `${d.filePath}:${d.startLine}`,
-            reachabilityEvidence: `rustc dead_code diagnostic: ${d.message}`,
-            replacement: "Remove dead symbol or wire into production caller",
-          }))
-          .filter((d) => !existingDeletionRefs.has(d.pathOrSymbol));
+        return 2;
+      }
+      return 0;
+    }
 
-        const mergedDeletions = [
-          ...(lensResult.deletionsProposed ?? []),
-          ...rustcDeadCodeDeletions,
-        ];
-
-        const notReviewedItems = excludedFiles.map(
-          (f) => `${f} (non-Rust or documentation file skipped)`,
+    // ─── STAGE 3: VERIFY (Adversarial skeptic pass over LLM findings) ───
+    const verifyBundle = await withInPlaceCheckout(
+      { repoRoot, targetSha: pr.headSha, prNumber: pr.number },
+      async () => {
+        await auditLogger.logEvent(
+          "stage.verify.started",
+          `▶ Stage 3 (verify): Running adversarial skeptic pass over Stage 2 findings...`,
         );
 
-        return ReviewBundleSchema.parse({
-          pr,
-          diffBaseSha,
-          headSha: pr.headSha,
-          isIncremental,
-          profile,
-          baseline,
-          walkthrough,
-          findings: verifiedInline,
-          outsideDiffFindings: verifiedOutside,
-          nitpickFindings: partitioned.nitpickFindings,
-          consideredAndRejected: lensResult.consideredAndRejected ?? [],
-          deletionsProposed: mergedDeletions,
-          openQuestions: lensResult.openQuestions ?? [],
-          notReviewed: notReviewedItems,
-          failedCohorts: lensResult.failedCohorts ?? [],
-          clippyDiagnostics: [...clippyDiagnostics],
-          securityAdvisories: [...securityAdvisories],
+        const skepticRunner: SkepticRunnerFn =
+          deps.skepticRunner ??
+          (async (root, candidates, audit) => {
+            const orchestrator = new OpenCodeMultiLensOrchestrator({
+              model: modelSpec,
+              concurrencyLimit,
+            });
+            return await orchestrator.verifyFindingsWithSkeptic(root, candidates, audit);
+          });
+
+        const llmInline = reviewBundle.findings.filter(
+          (f) => f.source !== "clippy" && f.source !== "audit",
+        );
+        const detInline = reviewBundle.findings.filter(
+          (f) => f.source === "clippy" || f.source === "audit",
+        );
+        const llmOutside = (reviewBundle.outsideDiffFindings ?? []).filter(
+          (f) => f.source !== "clippy" && f.source !== "audit",
+        );
+        const detOutside = (reviewBundle.outsideDiffFindings ?? []).filter(
+          (f) => f.source === "clippy" || f.source === "audit",
+        );
+
+        const allLlmCandidates = [...llmInline, ...llmOutside];
+        const skepticRes = await skepticRunner(repoRoot, allLlmCandidates, auditLogger);
+        const keptIds = new Set(skepticRes.keptFindings.map((f) => f.id));
+
+        const updatedBundle = ReviewBundleSchema.parse({
+          ...reviewBundle,
+          findings: [...detInline, ...llmInline.filter((f) => keptIds.has(f.id))],
+          outsideDiffFindings: [...detOutside, ...llmOutside.filter((f) => keptIds.has(f.id))],
+          consideredAndRejected: [
+            ...(reviewBundle.consideredAndRejected ?? []),
+            ...skepticRes.rejectedItems,
+          ],
           generatedAt: new Date().toISOString(),
         });
+
+        await writeVerifyStageArtifacts(
+          repoRoot,
+          updatedBundle,
+          {
+            keptCount: skepticRes.keptFindings.length,
+            refutedItems: skepticRes.rejectedItems,
+          },
+          {
+            model: modelLabel,
+            durationMs: Date.now() - runStartMs,
+            enabledTools: enabledToolsList,
+          },
+        );
+
+        return updatedBundle;
       },
     );
 
-    const extraToolOutputs: Record<string, unknown> = {};
-    if (capturedDenyDiagnostics.length > 0) {
-      extraToolOutputs.deny = capturedDenyDiagnostics;
-    }
-    if (capturedGeigerReport) {
-      extraToolOutputs.geiger = capturedGeigerReport;
-    }
-    if (capturedSemverViolations.length > 0) {
-      extraToolOutputs.semver = capturedSemverViolations;
-    }
-    if (capturedCoverageReport) {
-      extraToolOutputs.coverage = capturedCoverageReport;
-    }
-    if (capturedMiriReport) {
-      extraToolOutputs.miri = capturedMiriReport;
-    }
-
-    // Step 5: Persist per-commit artifacts & tool diagnostics inside .peer/<pr>/<short-sha>/
-    const artifactDir = await writeLocalReviewArtifacts(repoRoot, bundle, {
-      model: `${modelSpec.providerID}/${modelSpec.id}`,
-      durationMs: Date.now() - runStartMs,
-      symbolGraph: capturedSymbolGraph,
-      extraToolOutputs,
-    });
-
-    await auditLogger.logEvent(
-      "run.completed",
-      `▶ Stage 6/6: Review complete! Artifacts & audit log written to ${artifactDir}`,
-      {
-        artifactDir,
-        auditJsonlPath: auditLogger.getLatestAuditJsonlPath(),
-        runAuditJsonlPath: auditLogger.getRunAuditJsonlPath(),
-        inlineFindingsCount: bundle.findings.length,
-        outsideDiffFindingsCount: bundle.outsideDiffFindings?.length ?? 0,
-        nitpickFindingsCount: bundle.nitpickFindings?.length ?? 0,
-      },
-    );
-
-    writeOut(formatTerminalReport(bundle, repoRoot, artifactDir));
-
+    writeOut(formatTerminalReport(verifyBundle, repoRoot, join(commitDir, "03-verify")));
     if (failedCohortsCount > 0 && !allowPartial) {
       writeErr(
-        `Error: ${failedCohortsCount} review cohort(s) failed (${(bundle.failedCohorts ?? []).join(", ")}). Skipping GitHub post and checkpoint update. Pass --allow-partial to override.`,
+        `Error: ${failedCohortsCount} review cohort(s) failed (${(verifyBundle.failedCohorts ?? []).join(", ")}). Pass --allow-partial to override.`,
       );
       return 2;
     }
-
-    // Step 6: Post to GitHub if --post was specified and --local-only was not
-    if (postToGitHub && !localOnly) {
-      const walkthroughCommentBody = renderWalkthroughComment(bundle);
-      await githubClient.upsertWalkthroughComment(owner, repo, pr.number, walkthroughCommentBody);
-
-      const inlineComments: InlineReviewCommentInput[] = bundle.findings.map((finding) => ({
-        path: finding.filePath,
-        startLine: finding.startLine,
-        endLine: finding.endLine,
-        body: renderInlineFindingComment(finding),
-      }));
-
-      await githubClient.postPrReview({
-        owner,
-        repo,
-        prNumber: pr.number,
-        commitId: pr.headSha,
-        comments: inlineComments,
-        diffMap: activeDiffMap,
-        submit: submitReview,
-        summaryBody: renderPrReviewSummaryBody(bundle),
-      });
-    }
-
-    // Advance incremental checkpoint ONLY after local artifacts and optional GitHub post succeed,
-    // when 0 cohorts failed (F-07), and when not in --local-only mode (so a subsequent --post
-    // does not skip findings that were never published).
-    if (failedCohortsCount === 0 && !localOnly) {
-      await checkpointStore.save({
-        prNumber: pr.number,
-        baseSha: pr.baseSha,
-        lastReviewedHeadSha: pr.headSha,
-        reviewedAt: bundle.generatedAt,
-        profile: bundle.profile,
-      });
-    }
-
     return 0;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    writeErr(`Error: ${message}`);
+    writeErr(`Error: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 }

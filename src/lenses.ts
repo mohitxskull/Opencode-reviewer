@@ -121,6 +121,7 @@ export class OpenCodeMultiLensOrchestrator {
     await ensurePeerWorkspaceExcluded(context.repoRoot).catch(() => {});
     const cacheDir = join(
       resolvePeerCommitDir(context.repoRoot, context.pr.number, context.headSha),
+      "02-review",
       "cache",
     );
 
@@ -394,6 +395,18 @@ export class OpenCodeMultiLensOrchestrator {
     } catch {
       // Cache persistence is best-effort
     }
+  }
+
+  public async verifyFindingsWithSkeptic(
+    repoRoot: string,
+    candidates: readonly Finding[],
+    audit?: AuditLogger,
+  ): Promise<{ keptFindings: Finding[]; rejectedItems: ConsideredAndRejectedItem[] }> {
+    if (candidates.length === 0) {
+      return { keptFindings: [], rejectedItems: [] };
+    }
+    const client = await this.clientFactory();
+    return await this.runSkepticPass(client, repoRoot, candidates, audit);
   }
 
   private async runSkepticPass(

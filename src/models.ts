@@ -262,6 +262,9 @@ export const ReviewCheckpointSchema = z.object({
 });
 export type ReviewCheckpoint = z.infer<typeof ReviewCheckpointSchema>;
 
+export const PipelineStageSchema = z.enum(["analyze", "review", "verify", "publish"]);
+export type PipelineStage = z.infer<typeof PipelineStageSchema>;
+
 export const RunManifestSchema = z.object({
   prNumber: z.number().int().min(1),
   headSha: z.string().min(7),
@@ -271,6 +274,9 @@ export const RunManifestSchema = z.object({
   profile: ReviewProfileSchema,
   model: z.string().min(1),
   status: z.enum(["completed", "partial", "failed"]),
+  completedStages: z.array(PipelineStageSchema).default([]),
+  latestStage: PipelineStageSchema.default("review"),
+  enabledTools: z.array(z.string()).default([]),
   failedCohorts: z.array(z.string()).default([]),
   inlineFindingsCount: z.number().int().min(0),
   outsideDiffFindingsCount: z.number().int().min(0),
@@ -281,6 +287,25 @@ export const RunManifestSchema = z.object({
   generatedAt: z.string(),
 });
 export type RunManifest = z.infer<typeof RunManifestSchema>;
+
+export const AnalyzeStageContextSchema = z.object({
+  pr: PullRequestMetadataSchema,
+  diffBaseSha: z.string().min(7),
+  headSha: z.string().min(7),
+  isIncremental: z.boolean(),
+  profile: ReviewProfileSchema,
+  baseline: ReviewBaselineHeaderSchema,
+  crateGraph: CrateGraphSchema,
+  diffMap: z.record(z.string(), DiffFileMapSchema),
+  activeDiffMap: z.record(z.string(), DiffFileMapSchema),
+  excludedFiles: z.array(z.string()),
+  clippyDiagnostics: z.array(ClippyDiagnosticSchema),
+  securityAdvisories: z.array(SecurityAdvisorySchema),
+  enabledTools: z.array(z.string()).default([]),
+  deterministicFindings: z.array(FindingSchema).default([]),
+  generatedAt: z.string(),
+});
+export type AnalyzeStageContext = z.infer<typeof AnalyzeStageContextSchema>;
 
 export const ReviewBundleSchema = z.object({
   pr: PullRequestMetadataSchema,

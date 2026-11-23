@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runCli } from "../src/cli.ts";
+import { parseToolsOption, runCli } from "../src/cli.ts";
 import { GitHubClient } from "../src/github.ts";
 
 const tempDirs: string[] = [];
@@ -79,8 +79,8 @@ afterEach(async () => {
   }
 });
 
-describe("Task 07: End-to-end peer CLI pipeline", () => {
-  test("runCli reviews Rust PR end-to-end, verifies suggestions with cargo check, writes artifacts, and posts PENDING review", async () => {
+describe("End-to-end 4-stage composable peer CLI pipeline", () => {
+  test("analyze -> review -> verify -> publish reuses prior stages, verifies suggestions, runs skeptic, and publishes PENDING review", async () => {
     const { repoDir, baseSha, prHeadSha } = await createTempRustGitRepo();
 
     const postedReviews: Array<Record<string, unknown>> = [];
@@ -157,15 +157,44 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
       fetch: mockFetch as typeof fetch,
     });
 
-    const stdoutChunks: string[] = [];
-    const exitCode = await runCli(["review", "42", "--post", "--repo", repoDir], {
+    const commitDir = join(repoDir, ".peer", "42", prHeadSha.slice(0, 7));
+
+    // ─── STAGE 1: peer analyze 42 (0 LLM calls) ───
+    let analyzeLensCalled = false;
+    const analyzeCode = await runCli(["analyze", "42", "--repo", repoDir], {
       githubClient,
-      stdout: (text) => stdoutChunks.push(text),
+      stdout: () => {},
+      lensRunner: async () => {
+        analyzeLensCalled = true;
+        throw new Error("analyze stage must never call lensRunner");
+      },
+    });
+    expect(analyzeCode).toBe(0);
+    expect(analyzeLensCalled).toBe(false);
+    expect(await Bun.file(join(commitDir, "01-analyze", "report.md")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "01-analyze", "context.json")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "01-analyze", "tools", "clippy.json")).exists()).toBe(
+      true,
+    );
+    expect(await Bun.file(join(commitDir, "01-analyze", "tools", "audit.json")).exists()).toBe(
+      true,
+    );
+    expect(
+      await Bun.file(join(commitDir, "01-analyze", "tools", "symbol-graph.json")).exists(),
+    ).toBe(true);
+    expect(await Bun.file(join(commitDir, "review.md")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "run.json")).exists()).toBe(true);
+    expect(runGit(repoDir, ["status", "--porcelain"])).toBe("");
+
+    // ─── STAGE 2: peer review 42 (reuses 01-analyze, runs LLM + cargo check verifier) ───
+    let reviewLensCalls = 0;
+    const reviewCode = await runCli(["review", "42", "--repo", repoDir], {
+      githubClient,
+      stdout: () => {},
       lensRunner: async (context) => {
-        // Confirm that while lensRunner executes, the PR head commit is checked out!
+        reviewLensCalls += 1;
         expect(runGit(repoDir, ["rev-parse", "HEAD"])).toBe(prHeadSha);
         expect(context.pr.number).toBe(42);
-
         return {
           walkthrough: {
             summary: "Doubles `x` before adding `1` in `calculate`.",
@@ -185,7 +214,6 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
             },
           },
           findings: [
-            // Finding 1: Valid compiling suggestion on line 2
             {
               id: "soundness-1",
               filePath: "src/lib.rs",
@@ -201,7 +229,6 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
               confidence: 0.95,
               source: "soundness",
             },
-            // Finding 2: Broken non-compiling suggestion on line 3
             {
               id: "idioms-1",
               filePath: "src/lib.rs",
@@ -221,43 +248,69 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
         };
       },
     });
+    expect(reviewCode).toBe(0);
+    expect(reviewLensCalls).toBe(1);
+    expect(await Bun.file(join(commitDir, "02-review", "report.md")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "02-review", "walkthrough.md")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "02-review", "bundle.json")).exists()).toBe(true);
 
-    expect(exitCode).toBe(0);
+    // ─── STAGE 3: peer verify 42 (reuses 02-review with 0 lens calls, runs skeptic) ───
+    let skepticCalls = 0;
+    const verifyCode = await runCli(["verify", "42", "--repo", repoDir], {
+      githubClient,
+      stdout: () => {},
+      lensRunner: async () => {
+        throw new Error(
+          "verify stage must reuse cached 02-review bundle without calling lensRunner",
+        );
+      },
+      skepticRunner: async (_root, candidates) => {
+        skepticCalls += 1;
+        // Keep soundness-1, keep idioms-1 too so we can assert compiler-verification stripping below
+        return {
+          keptFindings: [...candidates],
+          rejectedItems: [],
+        };
+      },
+    });
+    expect(verifyCode).toBe(0);
+    expect(skepticCalls).toBe(1);
+    expect(await Bun.file(join(commitDir, "03-verify", "report.md")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "03-verify", "skeptic.json")).exists()).toBe(true);
+    expect(await Bun.file(join(commitDir, "03-verify", "bundle.json")).exists()).toBe(true);
 
-    // 1. Original symbolic branch "main" and baseSha are restored
-    expect(runGit(repoDir, ["symbolic-ref", "--short", "HEAD"])).toBe("main");
-    expect(runGit(repoDir, ["rev-parse", "HEAD"])).toBe(baseSha);
-    expect(runGit(repoDir, ["status", "--porcelain"])).toBe("");
+    // Re-running `peer verify 42` without `--fresh` short-circuits immediately
+    const secondOut: string[] = [];
+    const secondVerifyCode = await runCli(["verify", "42", "--repo", repoDir], {
+      githubClient,
+      stdout: (t) => secondOut.push(t),
+      skepticRunner: async () => {
+        throw new Error("Should short-circuit when stage verify is already completed");
+      },
+    });
+    expect(secondVerifyCode).toBe(0);
+    expect(secondOut.join("\n")).toContain("Already completed stage `verify`");
 
-    // 2. Per-commit artifacts & tool diagnostics exist inside .peer/42/<short-sha>/ (git-ignored!)
-    const commitDir = join(repoDir, ".peer", "42", prHeadSha.slice(0, 7));
-    expect(await Bun.file(join(commitDir, "review.md")).exists()).toBe(true);
-    expect(await Bun.file(join(commitDir, "run.json")).exists()).toBe(true);
-    expect(await Bun.file(join(commitDir, "findings.json")).exists()).toBe(true);
-    expect(await Bun.file(join(commitDir, "audit.jsonl")).exists()).toBe(true);
-    expect(await Bun.file(join(commitDir, "tools", "clippy.json")).exists()).toBe(true);
-    expect(await Bun.file(join(commitDir, "tools", "audit.json")).exists()).toBe(true);
-    expect(await Bun.file(join(commitDir, "tools", "symbol-graph.json")).exists()).toBe(true);
+    // ─── STAGE 4: peer publish 42 (0 builds, 0 LLM calls, uploads saved Stage 3 bundle) ───
+    const publishCode = await runCli(["publish", "42", "--repo", repoDir], {
+      githubClient,
+      stdout: () => {},
+      lensRunner: async () => {
+        throw new Error("publish stage must never run lensRunner");
+      },
+    });
+    expect(publishCode).toBe(0);
+    expect(await Bun.file(join(commitDir, "04-publish", "report.md")).exists()).toBe(true);
     expect(
       await Bun.file(join(repoDir, ".git", "peer", "reviews", "pr-42", "checkpoint.json")).exists(),
     ).toBe(true);
 
-    // 2b. Re-running on the same commit without --fresh short-circuits immediately (0 lens calls!)
-    let secondRunLensCalled = false;
-    const secondOut: string[] = [];
-    const secondExitCode = await runCli(["review", "42", "--local-only", "--repo", repoDir], {
-      githubClient,
-      stdout: (t) => secondOut.push(t),
-      lensRunner: async () => {
-        secondRunLensCalled = true;
-        throw new Error("Should not invoke lensRunner when commit is already reviewed");
-      },
-    });
-    expect(secondExitCode).toBe(0);
-    expect(secondRunLensCalled).toBe(false);
-    expect(secondOut.join("\n")).toContain("Already reviewed PR #42");
+    // Original symbolic branch "main" and baseSha are restored & working tree is clean
+    expect(runGit(repoDir, ["symbolic-ref", "--short", "HEAD"])).toBe("main");
+    expect(runGit(repoDir, ["rev-parse", "HEAD"])).toBe(baseSha);
+    expect(runGit(repoDir, ["status", "--porcelain"])).toBe("");
 
-    // 3. GitHub walkthrough comment and PENDING review were posted
+    // GitHub walkthrough comment and PENDING review were posted with verified suggestion
     expect(postedComments.length).toBe(1);
     expect(postedReviews.length).toBe(1);
     const reviewPayload = postedReviews[0];
@@ -274,7 +327,6 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     const line3Comment = reviewComments.find((c) => c.line === 3);
     expect(line2Comment?.body).toContain("```suggestion");
     expect(line2Comment?.body).toContain("saturating_mul(2)");
-    // Non-compiling suggestion on line 3 was stripped by cargo check!
     expect(line3Comment?.body).not.toContain("```suggestion");
     expect(line3Comment?.body).toContain("Compiler verification note");
   });
@@ -282,7 +334,6 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
   test("runCli refuses dirty working tree before network or checkout", async () => {
     const { repoDir, baseSha } = await createTempRustGitRepo();
 
-    // Dirty the tracked file
     await writeFile(join(repoDir, "src", "lib.rs"), "// dirty uncommitted edit\n");
 
     let networkCalled = false;
@@ -292,7 +343,7 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     };
 
     const stderrChunks: string[] = [];
-    const exitCode = await runCli(["review", "42", "--local-only", "--repo", repoDir], {
+    const exitCode = await runCli(["review", "42", "--repo", repoDir], {
       githubClient: new GitHubClient({
         token: "fake",
         fetch: mockFetch as unknown as typeof fetch,
@@ -309,7 +360,6 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
   test("F-03: runCli uses 3-dot merge-base diff so commits added to main after PR branched do not appear as reverted in PR diff", async () => {
     const { repoDir, baseSha, prHeadSha } = await createTempRustGitRepo();
 
-    // Advance main by modifying an existing file (`Cargo.toml`) AFTER pr-42 branched off `baseSha`
     await writeFile(
       join(repoDir, "Cargo.toml"),
       `[package]\nname = "sample_rust"\nversion = "0.2.0"\nedition = "2021"\n`,
@@ -330,7 +380,6 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
             body: "Doubles input.",
             user: { login: "alice" },
             head: { ref: "pr-42", sha: prHeadSha },
-            // GitHub reports base.sha as the current tip of main (advancedMainSha)
             base: { ref: "main", sha: advancedMainSha },
             html_url: "https://github.com/tikv/sample-rust/pull/42",
             updated_at: "2026-11-22T00:00:00Z",
@@ -342,7 +391,7 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     };
 
     let observedDiffFiles: string[] = [];
-    const exitCode = await runCli(["review", "42", "--local-only", "--repo", repoDir], {
+    const exitCode = await runCli(["review", "42", "--repo", repoDir], {
       githubClient: new GitHubClient({
         token: "fake",
         fetch: mockFetch as unknown as typeof fetch,
@@ -363,28 +412,26 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     });
 
     expect(exitCode).toBe(0);
-    // Only src/lib.rs from pr-42 should be in diffMap, NOT src/unrelated_on_main.rs
     expect(observedDiffFiles).toEqual(["src/lib.rs"]);
   });
 
-  test("F-15 & F-16: runCli supports 'peer learn add/list/remove' subcommands and rejects conflicting --post --local-only flags", async () => {
+  test("supports 'peer learn add/list/remove', parses --tools, and rejects --submit outside publish", async () => {
     const { repoDir } = await createTempRustGitRepo();
+
+    expect(Array.from(parseToolsOption("deny,geiger")).sort()).toEqual(["deny", "geiger"]);
+    expect(parseToolsOption("all").size).toBe(5);
+    expect(() => parseToolsOption("unknown_tool")).toThrow('Unknown tool "unknown_tool"');
 
     const out: string[] = [];
     const err: string[] = [];
 
-    // 1. Conflicting --post and --local-only flags
-    const conflictCode = await runCli(
-      ["review", "42", "--post", "--local-only", "--repo", repoDir],
-      {
-        stdout: (t) => out.push(t),
-        stderr: (t) => err.push(t),
-      },
-    );
-    expect(conflictCode).toBe(1);
-    expect(err.join("\n")).toContain("Cannot combine --post and --local-only");
+    const badSubmitCode = await runCli(["review", "42", "--submit", "--repo", repoDir], {
+      stdout: (t) => out.push(t),
+      stderr: (t) => err.push(t),
+    });
+    expect(badSubmitCode).toBe(1);
+    expect(err.join("\n")).toContain("--submit is only valid with `peer publish`");
 
-    // 2. peer learn add -> list -> remove
     out.length = 0;
     const addCode = await runCli(
       [
@@ -399,8 +446,7 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
       { stdout: (t) => out.push(t), stderr: (t) => err.push(t) },
     );
     expect(addCode).toBe(0);
-    const addedLine = out.join("\n");
-    expect(addedLine).toContain("Added learning [");
+    expect(out.join("\n")).toContain("Added learning [");
 
     out.length = 0;
     const listCode = await runCli(["learn", "list", "--repo", repoDir], {
@@ -421,14 +467,13 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     expect(out.join("\n")).toContain(`Removed learning [${id}]`);
   });
 
-  test("runCli fails fast before network calls when origin remote is missing and no PR URL is given, and exits 2 on partial cohort failures unless --allow-partial is passed", async () => {
+  test("fails fast without origin remote and exits 2 on partial cohort failure blocking publish", async () => {
     const { repoDir, baseSha, prHeadSha } = await createTempRustGitRepo();
 
-    // 1. Remove origin remote and run `peer review` with no positional target
     runGit(repoDir, ["remote", "remove", "origin"]);
     let listPrsCalled = false;
     const errOut: string[] = [];
-    const noOriginCode = await runCli(["review", "--local-only", "--repo", repoDir], {
+    const noOriginCode = await runCli(["review", "--repo", repoDir], {
       githubClient: {
         listOpenPrs: async () => {
           listPrsCalled = true;
@@ -441,34 +486,35 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     expect(listPrsCalled).toBe(false);
     expect(errOut.join("\n")).toContain("Unable to determine GitHub repository owner/name");
 
-    // Restore origin remote and test partial cohort failure exit code (2) without posting
     runGit(repoDir, ["remote", "add", "origin", "https://github.com/tikv/sample-rust.git"]);
     let reviewPosted = false;
-    const partialCode = await runCli(["review", "42", "--post", "--repo", repoDir], {
-      githubClient: {
-        getPullRequest: async () => ({
-          owner: "tikv",
-          repo: "sample-rust",
-          number: 42,
-          title: "feat: partial test",
-          body: "",
-          author: "alice",
-          headRefName: "pr-42",
-          baseRefName: "main",
-          headSha: prHeadSha,
-          baseSha,
-          htmlUrl: "https://github.com/tikv/sample-rust/pull/42",
-          updatedAt: "2026-11-22T00:00:00Z",
-        }),
-        upsertWalkthroughComment: async () => {
-          reviewPosted = true;
-          return 1;
-        },
-        postPrReview: async () => {
-          reviewPosted = true;
-          return 2;
-        },
-      } as unknown as GitHubClient,
+    const mockGh = {
+      getPullRequest: async () => ({
+        owner: "tikv",
+        repo: "sample-rust",
+        number: 42,
+        title: "feat: partial test",
+        body: "",
+        author: "alice",
+        headRefName: "pr-42",
+        baseRefName: "main",
+        headSha: prHeadSha,
+        baseSha,
+        htmlUrl: "https://github.com/tikv/sample-rust/pull/42",
+        updatedAt: "2026-11-22T00:00:00Z",
+      }),
+      upsertWalkthroughComment: async () => {
+        reviewPosted = true;
+        return 1;
+      },
+      postPrReview: async () => {
+        reviewPosted = true;
+        return 2;
+      },
+    } as unknown as GitHubClient;
+
+    const partialReviewCode = await runCli(["review", "42", "--repo", repoDir], {
+      githubClient: mockGh,
       stdout: () => {},
       stderr: (t) => errOut.push(t),
       lensRunner: async () => ({
@@ -482,8 +528,15 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
         failedCohorts: ["peer-cohort-1 (1/2: src)"],
       }),
     });
+    expect(partialReviewCode).toBe(2);
 
-    expect(partialCode).toBe(2);
+    // Attempting `peer publish 42` without `--allow-partial` must also exit 2 without posting!
+    const blockedPublishCode = await runCli(["publish", "42", "--repo", repoDir], {
+      githubClient: mockGh,
+      stdout: () => {},
+      stderr: (t) => errOut.push(t),
+    });
+    expect(blockedPublishCode).toBe(2);
     expect(reviewPosted).toBe(false);
   });
 });

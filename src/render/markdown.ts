@@ -3,9 +3,12 @@ import { join } from "node:path";
 import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir } from "../git.ts";
 import type { RustSymbolGraph } from "../graph.ts";
 import {
+  type AnalyzeStageContext,
+  type ConsideredAndRejectedItem,
   type Finding,
   type FindingType,
   PEER_REVIEW_MARKER,
+  type PipelineStage,
   type ReviewBundle,
   type RunManifest,
   RunManifestSchema,
@@ -482,47 +485,27 @@ export function renderCombinedLocalReviewMarkdown(bundle: ReviewBundle): string 
 export interface WriteArtifactsMeta {
   readonly model?: string;
   readonly durationMs?: number;
+  readonly completedStages?: readonly PipelineStage[];
+  readonly latestStage?: PipelineStage;
+  readonly enabledTools?: readonly string[];
   readonly symbolGraph?: RustSymbolGraph;
   readonly extraToolOutputs?: Readonly<Record<string, unknown>>;
 }
 
-export async function writeLocalReviewArtifacts(
-  repoRoot: string,
-  bundle: ReviewBundle,
-  meta: WriteArtifactsMeta = {},
-): Promise<string> {
-  await ensurePeerWorkspaceExcluded(repoRoot);
-  const artifactDir = resolvePeerCommitDir(repoRoot, bundle.pr.number, bundle.headSha);
-  const toolsDir = join(artifactDir, "tools");
-  await mkdir(toolsDir, { recursive: true });
-
-  const walkthroughMd = renderWalkthroughComment(bundle);
-  const reviewMd = renderCombinedLocalReviewMarkdown(bundle);
-  const findingsJson = JSON.stringify(
-    {
-      baseline: bundle.baseline,
-      inlineFindings: bundle.findings,
-      outsideDiffFindings: bundle.outsideDiffFindings ?? [],
-      nitpickFindings: bundle.nitpickFindings ?? [],
-      consideredAndRejected: bundle.consideredAndRejected ?? [],
-      deletionsProposed: bundle.deletionsProposed ?? [],
-      openQuestions: bundle.openQuestions ?? [],
-      notReviewed: bundle.notReviewed ?? [],
-    },
-    null,
-    2,
-  );
-
+function buildRunManifest(bundle: ReviewBundle, meta: WriteArtifactsMeta): RunManifest {
   const failedCohorts = bundle.failedCohorts ?? [];
-  const runManifest: RunManifest = RunManifestSchema.parse({
+  return RunManifestSchema.parse({
     prNumber: bundle.pr.number,
     headSha: bundle.headSha,
     baseSha: bundle.pr.baseSha,
     diffBaseSha: bundle.diffBaseSha,
     isIncremental: bundle.isIncremental,
     profile: bundle.profile,
-    model: meta.model ?? "unknown",
+    model: meta.model ?? "deterministic",
     status: failedCohorts.length > 0 ? "partial" : "completed",
+    completedStages: meta.completedStages ?? ["analyze", "review"],
+    latestStage: meta.latestStage ?? "review",
+    enabledTools: meta.enabledTools ?? [],
     failedCohorts,
     inlineFindingsCount: bundle.findings.length,
     outsideDiffFindingsCount: bundle.outsideDiffFindings?.length ?? 0,
@@ -532,12 +515,34 @@ export async function writeLocalReviewArtifacts(
     durationMs: Math.max(0, Math.round(meta.durationMs ?? 0)),
     generatedAt: bundle.generatedAt,
   });
+}
+
+export async function writeAnalyzeStageArtifacts(
+  repoRoot: string,
+  analyzeContext: AnalyzeStageContext,
+  bundle: ReviewBundle,
+  meta: WriteArtifactsMeta = {},
+): Promise<string> {
+  await ensurePeerWorkspaceExcluded(repoRoot);
+  const commitDir = resolvePeerCommitDir(repoRoot, bundle.pr.number, bundle.headSha);
+  const stageDir = join(commitDir, "01-analyze");
+  const toolsDir = join(stageDir, "tools");
+  await mkdir(toolsDir, { recursive: true });
+
+  const reportMd = renderCombinedLocalReviewMarkdown(bundle);
+  const manifest = buildRunManifest(bundle, {
+    ...meta,
+    model: meta.model ?? "deterministic",
+    completedStages: ["analyze"],
+    latestStage: "analyze",
+  });
 
   const writes: Promise<unknown>[] = [
-    Bun.write(join(artifactDir, "review.md"), reviewMd),
-    Bun.write(join(artifactDir, "walkthrough.md"), walkthroughMd),
-    Bun.write(join(artifactDir, "findings.json"), findingsJson),
-    Bun.write(join(artifactDir, "run.json"), JSON.stringify(runManifest, null, 2)),
+    Bun.write(join(stageDir, "report.md"), reportMd),
+    Bun.write(join(stageDir, "context.json"), JSON.stringify(analyzeContext, null, 2)),
+    Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
+    Bun.write(join(commitDir, "review.md"), reportMd),
+    Bun.write(join(commitDir, "run.json"), JSON.stringify(manifest, null, 2)),
     Bun.write(join(toolsDir, "clippy.json"), JSON.stringify(bundle.clippyDiagnostics, null, 2)),
     Bun.write(
       join(toolsDir, "audit.json"),
@@ -557,5 +562,117 @@ export async function writeLocalReviewArtifacts(
   }
 
   await Promise.all(writes);
-  return artifactDir;
+  return commitDir;
+}
+
+export async function writeReviewStageArtifacts(
+  repoRoot: string,
+  bundle: ReviewBundle,
+  meta: WriteArtifactsMeta = {},
+): Promise<string> {
+  await ensurePeerWorkspaceExcluded(repoRoot);
+  const commitDir = resolvePeerCommitDir(repoRoot, bundle.pr.number, bundle.headSha);
+  const stageDir = join(commitDir, "02-review");
+  await mkdir(stageDir, { recursive: true });
+
+  const walkthroughMd = renderWalkthroughComment(bundle);
+  const reportMd = renderCombinedLocalReviewMarkdown(bundle);
+  const manifest = buildRunManifest(bundle, {
+    ...meta,
+    completedStages: ["analyze", "review"],
+    latestStage: "review",
+  });
+
+  await Promise.all([
+    Bun.write(join(stageDir, "report.md"), reportMd),
+    Bun.write(join(stageDir, "walkthrough.md"), walkthroughMd),
+    Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
+    Bun.write(join(commitDir, "review.md"), reportMd),
+    Bun.write(join(commitDir, "run.json"), JSON.stringify(manifest, null, 2)),
+  ]);
+
+  return commitDir;
+}
+
+export async function writeVerifyStageArtifacts(
+  repoRoot: string,
+  bundle: ReviewBundle,
+  skepticSummary: {
+    readonly keptCount: number;
+    readonly refutedItems: readonly ConsideredAndRejectedItem[];
+  },
+  meta: WriteArtifactsMeta = {},
+): Promise<string> {
+  await ensurePeerWorkspaceExcluded(repoRoot);
+  const commitDir = resolvePeerCommitDir(repoRoot, bundle.pr.number, bundle.headSha);
+  const stageDir = join(commitDir, "03-verify");
+  await mkdir(stageDir, { recursive: true });
+
+  const reportMd = renderCombinedLocalReviewMarkdown(bundle);
+  const manifest = buildRunManifest(bundle, {
+    ...meta,
+    completedStages: ["analyze", "review", "verify"],
+    latestStage: "verify",
+  });
+
+  await Promise.all([
+    Bun.write(join(stageDir, "report.md"), reportMd),
+    Bun.write(join(stageDir, "skeptic.json"), JSON.stringify(skepticSummary, null, 2)),
+    Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
+    Bun.write(join(commitDir, "review.md"), reportMd),
+    Bun.write(join(commitDir, "run.json"), JSON.stringify(manifest, null, 2)),
+  ]);
+
+  return commitDir;
+}
+
+export async function writePublishStageArtifacts(
+  repoRoot: string,
+  bundle: ReviewBundle,
+  publishInfo: {
+    readonly sourceStage: PipelineStage;
+    readonly submitted: boolean;
+    readonly inlineCommentsCount: number;
+  },
+  existingStages: readonly PipelineStage[],
+  meta: WriteArtifactsMeta = {},
+): Promise<string> {
+  await ensurePeerWorkspaceExcluded(repoRoot);
+  const commitDir = resolvePeerCommitDir(repoRoot, bundle.pr.number, bundle.headSha);
+  const stageDir = join(commitDir, "04-publish");
+  await mkdir(stageDir, { recursive: true });
+
+  const completedStages = Array.from(new Set<PipelineStage>([...existingStages, "publish"]));
+  const publishReport = [
+    `# GitHub Publish Receipt — PR #${bundle.pr.number}`,
+    "",
+    `- **PR URL:** ${bundle.pr.htmlUrl}`,
+    `- **Commit:** \`${bundle.headSha.slice(0, 7)}\``,
+    `- **Source Stage:** \`${publishInfo.sourceStage}\``,
+    `- **Review Mode:** ${publishInfo.submitted ? "Submitted (`COMMENT`)" : "Draft (`PENDING`)"}`,
+    `- **Inline Comments Posted:** ${publishInfo.inlineCommentsCount}`,
+    `- **Published At:** ${new Date().toISOString()}`,
+    "",
+  ].join("\n");
+
+  const manifest = buildRunManifest(bundle, {
+    ...meta,
+    completedStages,
+    latestStage: "publish",
+  });
+
+  await Promise.all([
+    Bun.write(join(stageDir, "report.md"), publishReport),
+    Bun.write(join(commitDir, "run.json"), JSON.stringify(manifest, null, 2)),
+  ]);
+
+  return commitDir;
+}
+
+export async function writeLocalReviewArtifacts(
+  repoRoot: string,
+  bundle: ReviewBundle,
+  meta: WriteArtifactsMeta = {},
+): Promise<string> {
+  return await writeReviewStageArtifacts(repoRoot, bundle, meta);
 }
