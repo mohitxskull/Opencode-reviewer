@@ -33,6 +33,39 @@ export function resolvePeerReviewsDir(repoRoot: string, prNumber: number): strin
   return join(resolvePeerStateDir(repoRoot), "reviews", `pr-${prNumber}`);
 }
 
+export function resolvePeerWorkspaceDir(repoRoot: string): string {
+  return join(repoRoot, ".peer");
+}
+
+// Why: Writing the agent-ready Markdown report to `<repoRoot>/.peer/review.md`
+// and `<repoRoot>/.peer/reviews/pr-<num>/` lets coding agents read it directly
+// from the repo root. Appending `.peer/review.md` and `.peer/reviews/` to
+// `<gitCommonDir>/info/exclude` keeps `git status --porcelain` clean without
+// mutating the repository's tracked `.gitignore` (and still allows teams to
+// commit `.peer/learnings.json` if desired).
+export async function ensurePeerWorkspaceExcluded(repoRoot: string): Promise<void> {
+  const gitCommonDir = resolveGitCommonDir(repoRoot);
+  const infoDir = join(gitCommonDir, "info");
+  const excludePath = join(infoDir, "exclude");
+  await mkdir(infoDir, { recursive: true });
+
+  const excludeFile = Bun.file(excludePath);
+  const existing = (await excludeFile.exists()) ? await excludeFile.text() : "";
+  const lines = new Set(
+    existing
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .map((l) => l.trim()),
+  );
+
+  const requiredEntries = [".peer/review.md", ".peer/reviews/"];
+  const missing = requiredEntries.filter((e) => !lines.has(e));
+  if (missing.length > 0) {
+    const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+    await Bun.write(excludePath, `${existing}${prefix}${missing.join("\n")}\n`);
+  }
+}
+
 export class GitRemoteError extends Error {
   constructor(message: string) {
     super(message);

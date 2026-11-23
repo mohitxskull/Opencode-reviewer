@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   LensOutputParseError,
   parseLensFindingsOutput,
+  parseSkepticVerdicts,
   parseWalkthroughOutput,
 } from "../src/prompts/parser.ts";
 
@@ -232,5 +233,18 @@ None.
         `## FINDINGS\n\n### FINDING\n- severity: Major\n- title: Missing file and lines\n`,
       ),
     ).toThrow(LensOutputParseError);
+
+    const verdicts = parseSkepticVerdicts(`## VERDICTS
+- \`f-1\` | KEEP | Confirmed lock held across await on line 42
+- \`f-2\` | DROP | Guarded by non-empty check on line 18
+`);
+    expect(verdicts.get("f-1")).toEqual({
+      keep: true,
+      reason: "Confirmed lock held across await on line 42",
+    });
+    expect(verdicts.get("f-2")).toEqual({
+      keep: false,
+      reason: "Guarded by non-empty check on line 18",
+    });
   });
 });

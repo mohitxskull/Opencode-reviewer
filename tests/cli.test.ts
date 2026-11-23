@@ -229,12 +229,15 @@ describe("Task 07: End-to-end peer CLI pipeline", () => {
     expect(runGit(repoDir, ["rev-parse", "HEAD"])).toBe(baseSha);
     expect(runGit(repoDir, ["status", "--porcelain"])).toBe("");
 
-    // 2. Local artifacts exist inside .git/peer/reviews/pr-42/
-    const reviewDir = join(repoDir, ".git", "peer", "reviews", "pr-42");
-    expect(await Bun.file(join(reviewDir, "walkthrough.md")).exists()).toBe(true);
-    expect(await Bun.file(join(reviewDir, "findings.json")).exists()).toBe(true);
-    expect(await Bun.file(join(reviewDir, "review.md")).exists()).toBe(true);
-    expect(await Bun.file(join(reviewDir, "checkpoint.json")).exists()).toBe(true);
+    // 2. Local artifacts exist inside .peer/reviews/pr-42/ and .peer/review.md (git-ignored!)
+    const peerReviewDir = join(repoDir, ".peer", "reviews", "pr-42");
+    expect(await Bun.file(join(repoDir, ".peer", "review.md")).exists()).toBe(true);
+    expect(await Bun.file(join(peerReviewDir, "walkthrough.md")).exists()).toBe(true);
+    expect(await Bun.file(join(peerReviewDir, "findings.json")).exists()).toBe(true);
+    expect(await Bun.file(join(peerReviewDir, "review.md")).exists()).toBe(true);
+    expect(
+      await Bun.file(join(repoDir, ".git", "peer", "reviews", "pr-42", "checkpoint.json")).exists(),
+    ).toBe(true);
 
     // 3. GitHub walkthrough comment and PENDING review were posted
     expect(postedComments.length).toBe(1);

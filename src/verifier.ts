@@ -3,6 +3,7 @@ import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { AuditLogger } from "./audit.ts";
 import { isReviewableRustCodeFile } from "./diff.ts";
+import { buildScrubbedCargoEnv } from "./env.ts";
 import { registerSignalCleanup } from "./lifecycle.ts";
 import { type Finding, FindingSchema } from "./models.ts";
 
@@ -18,6 +19,7 @@ async function defaultCargoCheckRunner(repoRoot: string): Promise<CargoCheckResu
     ["cargo", "check", "--workspace", "--all-targets", "--message-format=json"],
     {
       cwd: repoRoot,
+      env: buildScrubbedCargoEnv(),
       stdout: "pipe",
       stderr: "pipe",
     },

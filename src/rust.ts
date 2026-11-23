@@ -1,22 +1,27 @@
 import { dirname, relative } from "node:path";
+import { buildScrubbedCargoEnv } from "./env.ts";
 import {
   type ClippyDiagnostic,
   ClippyDiagnosticSchema,
   type CrateGraph,
   CrateGraphSchema,
   type CrateLayerInfo,
+  type DiffFileMap,
   type ReviewBaselineHeader,
   ReviewBaselineHeaderSchema,
 } from "./models.ts";
 
 export function collectRustToolchainBaseline(repoRoot: string): ReviewBaselineHeader {
+  const env = buildScrubbedCargoEnv();
   const rustcProc = Bun.spawnSync(["rustc", "--version"], {
     cwd: repoRoot,
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
   const cargoProc = Bun.spawnSync(["cargo", "--version"], {
     cwd: repoRoot,
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -54,6 +59,7 @@ interface CargoMetadataPayload {
 export async function collectCrateGraph(repoRoot: string): Promise<CrateGraph> {
   const proc = Bun.spawn(["cargo", "metadata", "--format-version", "1", "--no-deps"], {
     cwd: repoRoot,
+    env: buildScrubbedCargoEnv(),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -297,6 +303,7 @@ export function findSuggestedReplacementForMessage(
 export async function collectClippyDiagnostics(
   repoRoot: string,
   modifiedFiles: ReadonlySet<string>,
+  diffMap?: Readonly<Record<string, DiffFileMap>>,
 ): Promise<ClippyDiagnostic[]> {
   if (modifiedFiles.size === 0) {
     return [];
@@ -306,6 +313,7 @@ export async function collectClippyDiagnostics(
     ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json"],
     {
       cwd: repoRoot,
+      env: buildScrubbedCargoEnv(),
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -357,6 +365,18 @@ export async function collectClippyDiagnostics(
 
     const startLine = Math.max(1, primarySpan.line_start);
     const endLine = Math.max(startLine, primarySpan.line_end);
+
+    // When diffMap is provided, filter warnings to modified diff hunks (+/- 3 lines)
+    // so pre-existing warnings on untouched lines of a modified file don't add noise.
+    if (msg.level === "warning" && diffMap) {
+      const fm = diffMap[normalizedPath];
+      if (
+        fm &&
+        !fm.hunks.some((h) => startLine <= h.newEnd + 3 && endLine >= Math.max(1, h.newStart - 3))
+      ) {
+        continue;
+      }
+    }
     const code = msg.code?.code ?? null;
     const dedupKey = `${normalizedPath}:${startLine}:${endLine}:${code ?? ""}:${msg.message}`;
     if (seenKeys.has(dedupKey)) {

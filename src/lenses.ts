@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rename } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import type { AuditLogger } from "./audit.ts";
@@ -35,10 +35,15 @@ import {
   buildWalkthroughContextPrompt,
   type ReviewContext,
 } from "./prompts/context.ts";
-import { parseLensFindingsOutput, parseWalkthroughOutput } from "./prompts/parser.ts";
+import {
+  parseLensFindingsOutput,
+  parseSkepticVerdicts,
+  parseWalkthroughOutput,
+} from "./prompts/parser.ts";
 import {
   COHORT_DEEP_AUDIT_PROMPT,
   IDIOMS_LOGIC_LENS_PROMPT,
+  SKEPTIC_VERIFIER_PROMPT,
   SOUNDNESS_CONCURRENCY_LENS_PROMPT,
   WALKTHROUGH_LENS_PROMPT,
 } from "./prompts/templates.ts";
@@ -80,6 +85,7 @@ export interface MultiLensOrchestratorOptions {
   readonly clientFactory?: () => Promise<OpenCodeClientLike>;
   readonly sessionWaitTimeoutMs?: number;
   readonly concurrencyLimit?: number;
+  readonly skeptic?: boolean;
 }
 
 export interface MultiLensRunResult {
@@ -96,12 +102,14 @@ export class OpenCodeMultiLensOrchestrator {
   private readonly clientFactory: () => Promise<OpenCodeClientLike>;
   private readonly sessionWaitTimeoutMs: number;
   private readonly concurrencyLimit: number;
+  private readonly skeptic: boolean;
 
   constructor(options: MultiLensOrchestratorOptions = {}) {
     this.model = options.model ?? parseModelSpec();
     this.clientFactory = options.clientFactory ?? createDefaultOpenCodeClient;
     this.sessionWaitTimeoutMs = options.sessionWaitTimeoutMs ?? DEFAULT_SESSION_WAIT_TIMEOUT_MS;
     this.concurrencyLimit = Math.max(1, options.concurrencyLimit ?? 4);
+    this.skeptic = options.skeptic ?? false;
   }
 
   public async runAllLenses(context: ReviewContext): Promise<MultiLensRunResult> {
@@ -183,13 +191,27 @@ export class OpenCodeMultiLensOrchestrator {
         this.concurrencyLimit,
       );
 
+      let combinedFindings = [...soundnessOut.findings, ...idiomsOut.findings];
+      const combinedRejected = [
+        ...soundnessOut.consideredAndRejected,
+        ...idiomsOut.consideredAndRejected,
+      ];
+
+      if (this.skeptic && combinedFindings.length > 0) {
+        const skepticRes = await this.runSkepticPass(
+          client,
+          context.repoRoot,
+          combinedFindings,
+          audit,
+        );
+        combinedFindings = skepticRes.keptFindings;
+        combinedRejected.push(...skepticRes.rejectedItems);
+      }
+
       return {
         walkthrough,
-        findings: [...soundnessOut.findings, ...idiomsOut.findings],
-        consideredAndRejected: [
-          ...soundnessOut.consideredAndRejected,
-          ...idiomsOut.consideredAndRejected,
-        ],
+        findings: combinedFindings,
+        consideredAndRejected: combinedRejected,
         deletionsProposed: [...soundnessOut.deletionsProposed, ...idiomsOut.deletionsProposed],
         openQuestions: [...soundnessOut.openQuestions, ...idiomsOut.openQuestions],
       };
@@ -219,95 +241,90 @@ export class OpenCodeMultiLensOrchestrator {
       walkthroughPromise.catch(() => {});
     }
 
-    const cohortFindings: Finding[] = [];
+    let cohortFindings: Finding[] = [];
     const consideredAndRejected: ConsideredAndRejectedItem[] = [];
     const deletionsProposed: DeletionProposedItem[] = [];
     const openQuestions: OpenQuestionItem[] = [];
     const failedCohorts: string[] = [];
-    const concurrencyLimit = this.concurrencyLimit;
 
-    for (let i = 0; i < cohorts.length; i += concurrencyLimit) {
-      const batch = cohorts.slice(i, i + concurrencyLimit);
-      const batchResults = await Promise.all(
-        batch.map(async (cohort, batchIdx) => {
-          const cohortOrdinal = i + batchIdx + 1;
-          const cohortDiffMap: Record<string, DiffFileMap> = {};
-          for (const fp of cohort.filePaths) {
-            const fm = context.diffMap[fp];
-            if (fm) {
-              cohortDiffMap[fp] = fm;
-            }
-          }
-          const cohortFileSet = new Set(cohort.filePaths);
-          const cohortClippy = context.clippyDiagnostics.filter((d) =>
-            cohortFileSet.has(d.filePath),
-          );
-          const cohortSymbolGraph = context.symbolGraph
-            ? {
-                nodes: context.symbolGraph.nodes.filter(
-                  (n) =>
-                    cohortFileSet.has(n.filePath) ||
-                    n.prodReferences.some((r) => cohortFileSet.has(r.filePath)),
-                ),
-              }
-            : undefined;
-
-          const cohortContext: ReviewContext = {
-            ...context,
-            diffMap: cohortDiffMap,
-            clippyDiagnostics: cohortClippy,
-            symbolGraph: cohortSymbolGraph,
-          };
-
-          const cohortPrompt = buildReviewContextPrompt(
-            cohortContext,
-            32_000,
-            cohort.filePaths.length,
-          );
-          const title = `peer-${cohort.id} (${cohortOrdinal}/${cohorts.length}: ${cohort.label})`;
-          try {
-            return await this.runFindingsLens(
-              client,
-              context.repoRoot,
-              title,
-              COHORT_DEEP_AUDIT_PROMPT,
-              cohortPrompt,
-              "soundness",
-              cohort.filePaths,
-              cacheDir,
-              context.fresh ?? false,
-              audit,
-            );
-          } catch (err) {
-            if (err instanceof OpenCodeProviderQuotaError) {
-              throw err;
-            }
-            failedCohorts.push(title);
-            await audit?.logEvent(
-              "lens.session.failed",
-              `  ├─ ⚠ Cohort [${title}] failed after retries: ${err instanceof Error ? err.message : String(err)}`,
-              {
-                title,
-                files: cohort.filePaths,
-                error: err instanceof Error ? err.message : String(err),
-              },
-            );
-            return {
-              findings: [],
-              consideredAndRejected: [],
-              deletionsProposed: [],
-              openQuestions: [],
-            };
-          }
-        }),
-      );
-
-      for (const res of batchResults) {
-        cohortFindings.push(...res.findings);
-        consideredAndRejected.push(...res.consideredAndRejected);
-        deletionsProposed.push(...res.deletionsProposed);
-        openQuestions.push(...res.openQuestions);
+    const cohortTasks = cohorts.map((cohort, idx) => async () => {
+      const cohortOrdinal = idx + 1;
+      const cohortDiffMap: Record<string, DiffFileMap> = {};
+      for (const fp of cohort.filePaths) {
+        const fm = context.diffMap[fp];
+        if (fm) {
+          cohortDiffMap[fp] = fm;
+        }
       }
+      const cohortFileSet = new Set(cohort.filePaths);
+      const cohortClippy = context.clippyDiagnostics.filter((d) => cohortFileSet.has(d.filePath));
+      const cohortSymbolGraph = context.symbolGraph
+        ? {
+            nodes: context.symbolGraph.nodes.filter(
+              (n) =>
+                cohortFileSet.has(n.filePath) ||
+                n.prodReferences.some((r) => cohortFileSet.has(r.filePath)),
+            ),
+          }
+        : undefined;
+
+      const cohortContext: ReviewContext = {
+        ...context,
+        diffMap: cohortDiffMap,
+        clippyDiagnostics: cohortClippy,
+        symbolGraph: cohortSymbolGraph,
+      };
+
+      const cohortPrompt = buildReviewContextPrompt(cohortContext, 32_000, cohort.filePaths.length);
+      const title = `peer-${cohort.id} (${cohortOrdinal}/${cohorts.length}: ${cohort.label})`;
+      try {
+        return await this.runFindingsLens(
+          client,
+          context.repoRoot,
+          title,
+          COHORT_DEEP_AUDIT_PROMPT,
+          cohortPrompt,
+          "soundness",
+          cohort.filePaths,
+          cacheDir,
+          context.fresh ?? false,
+          audit,
+        );
+      } catch (err) {
+        if (err instanceof OpenCodeProviderQuotaError) {
+          throw err;
+        }
+        failedCohorts.push(title);
+        await audit?.logEvent(
+          "lens.session.failed",
+          `  ├─ ⚠ Cohort [${title}] failed after retries: ${err instanceof Error ? err.message : String(err)}`,
+          {
+            title,
+            files: cohort.filePaths,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+        return {
+          findings: [],
+          consideredAndRejected: [],
+          deletionsProposed: [],
+          openQuestions: [],
+        };
+      }
+    });
+
+    const allResults = await runWithConcurrency(cohortTasks, this.concurrencyLimit);
+    for (const res of allResults) {
+      cohortFindings.push(...res.findings);
+      consideredAndRejected.push(...res.consideredAndRejected);
+      deletionsProposed.push(...res.deletionsProposed);
+      openQuestions.push(...res.openQuestions);
+    }
+
+    if (this.skeptic && cohortFindings.length > 0) {
+      const skepticRes = await this.runSkepticPass(client, context.repoRoot, cohortFindings, audit);
+      cohortFindings = skepticRes.keptFindings;
+      consideredAndRejected.push(...skepticRes.rejectedItems);
     }
 
     const walkthrough =
@@ -350,9 +367,83 @@ export class OpenCodeMultiLensOrchestrator {
       const tmp = `${cachePath}.${randomUUID().slice(0, 8)}.tmp`;
       await Bun.write(tmp, JSON.stringify(data, null, 2));
       await rename(tmp, cachePath);
+
+      // Prune cache directory to the 50 newest entries so disk usage stays bounded
+      const entries = (await readdir(dir)).filter((f) => f.endsWith(".json"));
+      if (entries.length > 50) {
+        const withMtime = await Promise.all(
+          entries.map(async (name) => {
+            const fullPath = join(dir, name);
+            try {
+              const info = await stat(fullPath);
+              return { fullPath, mtimeMs: info.mtimeMs };
+            } catch {
+              return { fullPath, mtimeMs: 0 };
+            }
+          }),
+        );
+        withMtime.sort((a, b) => b.mtimeMs - a.mtimeMs);
+        for (const stale of withMtime.slice(50)) {
+          await rm(stale.fullPath, { force: true }).catch(() => {});
+        }
+      }
     } catch {
       // Cache persistence is best-effort
     }
+  }
+
+  private async runSkepticPass(
+    client: OpenCodeClientLike,
+    repoRoot: string,
+    candidates: readonly Finding[],
+    audit?: AuditLogger,
+  ): Promise<{ keptFindings: Finding[]; rejectedItems: ConsideredAndRejectedItem[] }> {
+    const candidateSummary = candidates
+      .map(
+        (f) =>
+          `### Candidate \`${f.id}\`\n- File: \`${f.filePath}:${f.startLine}-${f.endLine}\`\n- Severity: ${f.severity} | Type: ${f.type}\n- Title: ${f.title}\n- Claim: ${f.body}`,
+      )
+      .join("\n\n");
+
+    const prompt = `${SKEPTIC_VERIFIER_PROMPT}\n\n# Candidate Findings (${candidates.length})\n\n${candidateSummary}`;
+    const { replyText, durationMs } = await this.executeReadOnlyPrompt(
+      client,
+      repoRoot,
+      "peer-lens-skeptic",
+      prompt,
+      Array.from(new Set(candidates.map((c) => c.filePath))),
+      audit,
+    );
+
+    const verdicts = parseSkepticVerdicts(replyText);
+    const keptFindings: Finding[] = [];
+    const rejectedItems: ConsideredAndRejectedItem[] = [];
+
+    for (const candidate of candidates) {
+      const verdict = verdicts.get(candidate.id);
+      if (verdict && !verdict.keep) {
+        rejectedItems.push({
+          location: `${candidate.filePath}:${candidate.startLine}-${candidate.endLine}`,
+          hypothesis: candidate.title,
+          reasonDismissed: `Skeptic pass refuted: ${verdict.reason}`,
+        });
+      } else {
+        keptFindings.push(candidate);
+      }
+    }
+
+    await audit?.logEvent(
+      "lens.skeptic.completed",
+      `  ├─ ✓ Skeptic pass finished in ${(durationMs / 1000).toFixed(1)}s (${keptFindings.length} kept, ${rejectedItems.length} refuted)`,
+      {
+        durationMs,
+        inputCount: candidates.length,
+        keptCount: keptFindings.length,
+        refutedCount: rejectedItems.length,
+      },
+    );
+
+    return { keptFindings, rejectedItems };
   }
 
   private async executeReadOnlyPrompt(
@@ -496,11 +587,15 @@ export class OpenCodeMultiLensOrchestrator {
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
+      const attemptPrompt =
+        attempt === 1 || lastError === null
+          ? fullPrompt
+          : `${fullPrompt}\n\nIMPORTANT FORMAT CORRECTION: Your previous response could not be parsed (${lastError instanceof Error ? lastError.message : String(lastError)}). Strictly follow the ## SUMMARY / ## TRIAGE / ## CHANGES / ## SEQUENCE_DIAGRAM Markdown format.`;
       const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
         client,
         repoRoot,
         "peer-lens-walkthrough",
-        fullPrompt,
+        attemptPrompt,
         [],
         audit,
       );
@@ -586,11 +681,15 @@ export class OpenCodeMultiLensOrchestrator {
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
+      const attemptPrompt =
+        attempt === 1 || lastError === null
+          ? fullPrompt
+          : `${fullPrompt}\n\nIMPORTANT FORMAT CORRECTION: Your previous response could not be parsed (${lastError instanceof Error ? lastError.message : String(lastError)}). Strictly follow the ## FINDINGS / ### FINDING (- file:, - lines:, - severity:, - type:, - title:) Markdown format.`;
       const { replyText, sessionID, durationMs, assistantTurns } = await this.executeReadOnlyPrompt(
         client,
         repoRoot,
         title,
-        fullPrompt,
+        attemptPrompt,
         files,
         audit,
         buildReadOnlySessionPermissions(repoRoot),

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildScrubbedCargoEnv } from "../src/env.ts";
 import { advisoriesToFindings } from "../src/judge.ts";
 import {
   CargoAuditMissingError,
@@ -160,5 +161,26 @@ describe("Deterministic CVE & RustSec advisory collector", () => {
     expect(findings[0]?.type).toBe("Security");
     expect(findings[0]?.source).toBe("audit");
     expect(findings[0]?.title).toContain("CVE-2023-5678");
+  });
+
+  test("buildScrubbedCargoEnv strips secrets and SSH sockets while keeping Cargo/Rust toolchain vars", () => {
+    const scrubbed = buildScrubbedCargoEnv({
+      PATH: "/usr/bin:/home/user/.cargo/bin",
+      HOME: "/home/user",
+      CARGO_HOME: "/home/user/.cargo",
+      PEER_GITHUB_TOKEN: "ghp_super_secret",
+      GITHUB_TOKEN: "gho_secret",
+      SSH_AUTH_SOCK: "/tmp/ssh-agent.sock",
+      AWS_SECRET_ACCESS_KEY: "aws_secret",
+      OPENAI_API_KEY: "sk-secret",
+    });
+
+    expect(scrubbed.PATH).toBe("/usr/bin:/home/user/.cargo/bin");
+    expect(scrubbed.CARGO_HOME).toBe("/home/user/.cargo");
+    expect(scrubbed.PEER_GITHUB_TOKEN).toBeUndefined();
+    expect(scrubbed.GITHUB_TOKEN).toBeUndefined();
+    expect(scrubbed.SSH_AUTH_SOCK).toBeUndefined();
+    expect(scrubbed.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(scrubbed.OPENAI_API_KEY).toBeUndefined();
   });
 });

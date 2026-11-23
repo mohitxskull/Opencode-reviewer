@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { resolvePeerReviewsDir } from "../git.ts";
+import { ensurePeerWorkspaceExcluded, resolvePeerWorkspaceDir } from "../git.ts";
 import {
   type Finding,
   type FindingType,
@@ -480,7 +480,9 @@ export async function writeLocalReviewArtifacts(
   repoRoot: string,
   bundle: ReviewBundle,
 ): Promise<string> {
-  const artifactDir = resolvePeerReviewsDir(repoRoot, bundle.pr.number);
+  await ensurePeerWorkspaceExcluded(repoRoot);
+  const workspacePeerDir = resolvePeerWorkspaceDir(repoRoot);
+  const artifactDir = join(workspacePeerDir, "reviews", `pr-${bundle.pr.number}`);
   await mkdir(artifactDir, { recursive: true });
 
   const walkthroughMd = renderWalkthroughComment(bundle);
@@ -501,6 +503,7 @@ export async function writeLocalReviewArtifacts(
   );
 
   await Promise.all([
+    Bun.write(join(workspacePeerDir, "review.md"), reviewMd),
     Bun.write(join(artifactDir, "walkthrough.md"), walkthroughMd),
     Bun.write(join(artifactDir, "review.md"), reviewMd),
     Bun.write(join(artifactDir, "findings.json"), findingsJson),

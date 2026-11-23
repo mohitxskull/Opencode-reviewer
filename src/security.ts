@@ -1,4 +1,8 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildScrubbedCargoEnv } from "./env.ts";
+import { tryGitRawSync } from "./git.ts";
 import { type SecurityAdvisory, SecurityAdvisorySchema } from "./models.ts";
 
 export class CargoAuditMissingError extends Error {
@@ -99,13 +103,19 @@ export function parseCargoAuditJson(rawJson: string): SecurityAdvisory[] {
 
 export type CargoAuditRunner = (
   repoRoot: string,
+  lockfilePath?: string,
 ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
 async function defaultCargoAuditRunner(
   repoRoot: string,
+  lockfilePath?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const proc = Bun.spawn(["cargo", "audit", "--json"], {
+  const args = lockfilePath
+    ? ["audit", "--json", "--no-fetch", "--file", lockfilePath]
+    : ["audit", "--json"];
+  const proc = Bun.spawn(["cargo", ...args], {
     cwd: repoRoot,
+    env: buildScrubbedCargoEnv(),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -117,13 +127,18 @@ async function defaultCargoAuditRunner(
   return { stdout, stderr, exitCode };
 }
 
+function advisoryKey(adv: SecurityAdvisory): string {
+  return `${adv.id}:${adv.packageName}:${adv.packageVersion}`;
+}
+
 // Why: LLMs have stale training cutoffs and cannot reliably enumerate CVEs or
 // RustSec advisories from memory. We require `cargo audit --json` as the single
 // deterministic Stage 3 ground truth — failing loud with install instructions
-// if `cargo-audit` is missing rather than degrading to an incomplete fallback.
+// if `cargo-audit` is missing. When `baseSha` is provided, we diff against
+// `baseSha:Cargo.lock` so only newly introduced PR advisories are surfaced.
 export async function collectSecurityAdvisories(
   repoRoot: string,
-  options: { runner?: CargoAuditRunner } = {},
+  options: { baseSha?: string; runner?: CargoAuditRunner } = {},
 ): Promise<SecurityAdvisory[]> {
   const lockFile = Bun.file(join(repoRoot, "Cargo.lock"));
   if (!(await lockFile.exists())) {
@@ -133,20 +148,43 @@ export async function collectSecurityAdvisories(
   const runner = options.runner ?? defaultCargoAuditRunner;
   const { stdout, stderr, exitCode } = await runner(repoRoot);
 
-  if (stdout.trim().startsWith("{")) {
-    return parseCargoAuditJson(stdout);
+  if (!stdout.trim().startsWith("{")) {
+    if (
+      exitCode !== 0 &&
+      /no such command:\s*`?audit`?|not found|ENOENT/i.test(`${stderr}\n${stdout}`)
+    ) {
+      throw new CargoAuditMissingError();
+    }
+    throw new Error(
+      `cargo audit --json failed (exit ${exitCode}): ${(stderr || stdout).trim().slice(0, 300)}`,
+    );
   }
 
-  if (
-    exitCode !== 0 &&
-    /no such command:\s*`?audit`?|not found|ENOENT/i.test(`${stderr}\n${stdout}`)
-  ) {
-    throw new CargoAuditMissingError();
+  const headAdvisories = parseCargoAuditJson(stdout);
+  if (headAdvisories.length === 0 || !options.baseSha) {
+    return headAdvisories;
   }
 
-  throw new Error(
-    `cargo audit --json failed (exit ${exitCode}): ${(stderr || stdout).trim().slice(0, 300)}`,
-  );
+  // Diff against baseSha's Cargo.lock so pre-existing repo CVEs don't spam unrelated PRs
+  const baseLock = tryGitRawSync(repoRoot, ["show", `${options.baseSha}:Cargo.lock`]);
+  if (!baseLock.ok || baseLock.stdout.trim().length === 0) {
+    return headAdvisories;
+  }
+
+  const tmpDir = await mkdtemp(join(tmpdir(), "peer-base-lock-"));
+  try {
+    const baseLockPath = join(tmpDir, "Cargo.lock");
+    await writeFile(baseLockPath, baseLock.stdout);
+    const baseRun = await runner(repoRoot, baseLockPath);
+    if (baseRun.stdout.trim().startsWith("{")) {
+      const baseKeys = new Set(parseCargoAuditJson(baseRun.stdout).map(advisoryKey));
+      return headAdvisories.filter((adv) => !baseKeys.has(advisoryKey(adv)));
+    }
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+
+  return headAdvisories;
 }
 
 export function formatSecurityAdvisoriesPromptSection(
@@ -170,7 +208,7 @@ export function formatSecurityAdvisoriesPromptSection(
   });
 
   return (
-    `## Deterministic CVE / RustSec Advisories (${advisories.length} found — Confirm reachability in production code)\n` +
+    `## Deterministic CVE / RustSec Advisories (${advisories.length} new in PR — Confirm reachability in production code)\n` +
     lines.join("\n")
   );
 }

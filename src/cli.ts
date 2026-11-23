@@ -73,6 +73,7 @@ Options:
   --post                     Post Walkthrough comment and PENDING draft review to GitHub
   --submit-review            Submit review with event=COMMENT instead of PENDING draft
   --allow-partial            Exit 0 and allow posting even if one or more review cohorts fail
+  --skeptic                  Run an adversarial skeptic pass to disprove false positives (uses extra LLM calls)
   --concurrency <n>          Max parallel OpenCode lens sessions (default: 4; use 1 for single-GPU local models)
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
@@ -94,6 +95,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         post: { type: "boolean", default: false },
         "submit-review": { type: "boolean", default: false },
         "allow-partial": { type: "boolean", default: false },
+        skeptic: { type: "boolean", default: false },
         concurrency: { type: "string" },
         model: { type: "string" },
         scope: { type: "string" },
@@ -163,6 +165,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const postToGitHub = parsed.values.post ?? false;
     const submitReview = parsed.values["submit-review"] ?? false;
     const allowPartial = parsed.values["allow-partial"] ?? false;
+    const skeptic = parsed.values.skeptic ?? false;
     const rawConcurrency = parsed.values.concurrency;
     let concurrencyLimit = 4;
     if (rawConcurrency !== undefined) {
@@ -394,8 +397,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         const [crateGraph, clippyDiagnostics, securityAdvisories, symbolGraph, learnings] =
           await Promise.all([
             collectCrateGraph(repoRoot),
-            collectClippyDiagnostics(repoRoot, modifiedFiles),
-            collectSecurityAdvisories(repoRoot),
+            collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap),
+            collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha }),
             buildRustSymbolGraph(repoRoot, diffMap),
             learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha),
           ]);
@@ -452,6 +455,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
             const orchestrator = new OpenCodeMultiLensOrchestrator({
               model: modelSpec,
               concurrencyLimit,
+              skeptic,
             });
             return await orchestrator.runAllLenses(ctx);
           });
@@ -591,9 +595,10 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       });
     }
 
-    // Advance incremental checkpoint ONLY after local artifacts and optional GitHub post succeed
-    // and only when 0 cohorts failed (F-07)
-    if (failedCohortsCount === 0) {
+    // Advance incremental checkpoint ONLY after local artifacts and optional GitHub post succeed,
+    // when 0 cohorts failed (F-07), and when not in --local-only mode (so a subsequent --post
+    // does not skip findings that were never published).
+    if (failedCohortsCount === 0 && !localOnly) {
       await checkpointStore.save({
         prNumber: pr.number,
         baseSha: pr.baseSha,

@@ -621,3 +621,26 @@ export function parseWalkthroughOutput(rawText: string): WalkthroughReport {
     },
   });
 }
+
+export interface SkepticVerdict {
+  readonly keep: boolean;
+  readonly reason: string;
+}
+
+export function parseSkepticVerdicts(rawText: string): Map<string, SkepticVerdict> {
+  const verdicts = new Map<string, SkepticVerdict>();
+  const sections = splitTopLevelSections(rawText);
+  const verdictSection = sections.get("VERDICTS") ?? rawText;
+
+  for (const [id, decision, reason] of parsePipeBulletTriples(verdictSection)) {
+    const norm = decision.trim().toUpperCase();
+    if (norm === "KEEP" || norm === "DROP") {
+      verdicts.set(id, {
+        keep: norm === "KEEP",
+        reason: reason.trim(),
+      });
+    }
+  }
+
+  return verdicts;
+}
