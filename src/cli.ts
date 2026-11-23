@@ -45,6 +45,11 @@ import {
   collectRustToolchainBaseline,
 } from "./rust.ts";
 import { collectSecurityAdvisories } from "./security.ts";
+import {
+  type CargoDenyDiagnostic,
+  collectCargoDenyDiagnostics,
+  denyDiagnosticsToFindings,
+} from "./tools/deny.ts";
 import { SuggestionCompilerVerifier } from "./verifier.ts";
 
 export type LensRunnerFn = (context: ReviewContext) => Promise<MultiLensRunResult>;
@@ -76,6 +81,7 @@ Options:
   --submit-review            Submit review with event=COMMENT instead of PENDING draft
   --allow-partial            Exit 0 and allow posting even if one or more review cohorts fail
   --skeptic                  Run an adversarial skeptic pass to disprove false positives (uses extra LLM calls)
+  --deny                     Run cargo-deny supply-chain/license/ban checks (auto-runs if deny.toml exists)
   --concurrency <n>          Max parallel OpenCode lens sessions (default: 4; use 1 for single-GPU local models)
   --model <provider/model>   OpenCode model spec (default: hy4-flash-free)
   --scope <glob>             Optional path glob for 'peer learn add' (e.g. "src/oms/**")
@@ -98,6 +104,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         "submit-review": { type: "boolean", default: false },
         "allow-partial": { type: "boolean", default: false },
         skeptic: { type: "boolean", default: false },
+        deny: { type: "boolean", default: false },
         concurrency: { type: "string" },
         model: { type: "string" },
         scope: { type: "string" },
@@ -168,6 +175,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const submitReview = parsed.values["submit-review"] ?? false;
     const allowPartial = parsed.values["allow-partial"] ?? false;
     const skeptic = parsed.values.skeptic ?? false;
+    const forceDeny = parsed.values.deny ?? false;
     const rawConcurrency = parsed.values.concurrency;
     let concurrencyLimit = 4;
     if (rawConcurrency !== undefined) {
@@ -305,6 +313,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     let failedCohortsCount = 0;
     let activeDiffMap: Record<string, import("./models.ts").DiffFileMap> = {};
     let capturedSymbolGraph: RustSymbolGraph | undefined;
+    let capturedDenyDiagnostics: CargoDenyDiagnostic[] = [];
     const bundle = await withInPlaceCheckout(
       {
         repoRoot,
@@ -423,15 +432,23 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         );
         const gtStartMs = Date.now();
 
-        const [crateGraph, clippyDiagnostics, securityAdvisories, symbolGraph, learnings] =
-          await Promise.all([
-            collectCrateGraph(repoRoot),
-            collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap),
-            collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha }),
-            buildRustSymbolGraph(repoRoot, diffMap),
-            learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha),
-          ]);
+        const [
+          crateGraph,
+          clippyDiagnostics,
+          securityAdvisories,
+          denyDiagnostics,
+          symbolGraph,
+          learnings,
+        ] = await Promise.all([
+          collectCrateGraph(repoRoot),
+          collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap),
+          collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha }),
+          collectCargoDenyDiagnostics(repoRoot, { force: forceDeny }),
+          buildRustSymbolGraph(repoRoot, diffMap),
+          learningStore.getMatchingLearnings(modifiedFiles, pr.baseSha),
+        ]);
         capturedSymbolGraph = symbolGraph;
+        capturedDenyDiagnostics = denyDiagnostics;
 
         await auditLogger.logEvent(
           "stage.rust_ground_truth.completed",
@@ -500,8 +517,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         // Step 3: Judge Pass (merge Clippy + CVE/audit + lens findings, partition into inline / outside-diff / nitpicks)
         const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
         const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);
+        const denyFindings = denyDiagnosticsToFindings(denyDiagnostics);
         const partitioned = partitionAndFilterFindings(
-          [...clippyFindings, ...auditFindings, ...rawLensFindings],
+          [...clippyFindings, ...auditFindings, ...denyFindings, ...rawLensFindings],
           diffMap,
           profile,
         );
@@ -581,6 +599,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       model: `${modelSpec.providerID}/${modelSpec.id}`,
       durationMs: Date.now() - runStartMs,
       symbolGraph: capturedSymbolGraph,
+      extraToolOutputs: capturedDenyDiagnostics.length > 0 ? { deny: capturedDenyDiagnostics } : {},
     });
 
     await auditLogger.logEvent(
