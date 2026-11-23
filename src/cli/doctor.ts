@@ -84,19 +84,31 @@ function probeVersion(binPath: string, args: readonly string[]): string {
 }
 
 function probeMiri(): { status: string; detail: string } {
-  const cargoPath = Bun.which("cargo");
-  if (!cargoPath) {
+  const rustupPath = Bun.which("rustup");
+  if (!rustupPath) {
     return { status: "missing", detail: "rustup +nightly component add miri" };
   }
-  const proc = Bun.spawnSync([cargoPath, "+nightly", "miri", "--version"], {
+  // Why: Check installed toolchains locally via `rustup toolchain list` first so
+  // `cargo +nightly` never triggers a slow/networked toolchain lookup when nightly is absent.
+  const toolchains = Bun.spawnSync([rustupPath, "toolchain", "list"], {
     stdout: "pipe",
     stderr: "pipe",
   });
-  if (proc.exitCode === 0) {
+  if (toolchains.exitCode !== 0 || !/\bnightly\b/.test(toolchains.stdout.toString())) {
     return {
-      status: "ok",
-      detail: proc.stdout.toString().trim().split("\n")[0]?.slice(0, 48) || "installed",
+      status: "missing",
+      detail: "rustup toolchain install nightly && rustup +nightly component add miri",
     };
+  }
+  const components = Bun.spawnSync(
+    [rustupPath, "component", "list", "--toolchain", "nightly", "--installed"],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  if (components.exitCode === 0 && /\bmiri\b/.test(components.stdout.toString())) {
+    return { status: "ok", detail: "miri (nightly component installed)" };
   }
   return { status: "missing", detail: "rustup +nightly component add miri" };
 }

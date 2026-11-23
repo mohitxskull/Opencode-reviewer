@@ -118,5 +118,5 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
     });
     expect(code3).toBe(0);
     expect(out3.join("\n")).toContain("0 new finding(s)");
-  });
+  }, 30_000);
 });

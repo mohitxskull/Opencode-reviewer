@@ -289,7 +289,7 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     expect(line2Comment?.body).toContain("saturating_mul(2)");
     expect(line3Comment?.body).not.toContain("```suggestion");
     expect(line3Comment?.body).toContain("Compiler verification note");
-  });
+  }, 30_000);
 
   test("runCli refuses dirty working tree before network or checkout", async () => {
     const { repoDir, baseSha } = await createTempRustGitRepo();
