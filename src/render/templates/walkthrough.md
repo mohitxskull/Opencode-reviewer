@@ -27,9 +27,9 @@
 
 ### Architectural Layer Walkthrough
 
-|      Layer       | Crate | File | Summary |
-| :--------------: | :---- | :--- | :------ |
-| {{CHANGES_ROWS}} |
+| Layer | Crate | File | Summary |
+| :---: | :---- | :--- | :------ |
+{{CHANGES_ROWS}}
 
 {{SEQUENCE_DIAGRAM_SECTION}}
 

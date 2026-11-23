@@ -1,6 +1,6 @@
-import { rmSync } from "node:fs";
+import { lstatSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
   type ReviewCheckpoint,
@@ -8,6 +8,58 @@ import {
   type ReviewProfile,
 } from "../domain/models.ts";
 import { registerSignalCleanup, triggerSignalCleanup } from "../infra/lifecycle.ts";
+
+export function assertSafeGitSha(sha: string, label = "git SHA"): string {
+  const trimmed = sha.trim();
+  if (!/^[0-9a-f]{7,40}$/i.test(trimmed)) {
+    throw new Error(`Invalid ${label}: "${sha}" (expected 7-40 hex chars)`);
+  }
+  return trimmed;
+}
+
+export function assertSafeGitRef(ref: string, label = "git ref"): string {
+  const trimmed = ref.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("-") ||
+    trimmed.includes("..") ||
+    /[\s\0~^:?*[\\]/.test(trimmed)
+  ) {
+    throw new Error(`Unsafe ${label}: "${ref}"`);
+  }
+  return trimmed;
+}
+
+/**
+ * Verifies that every existing path segment from `repoRoot` down to `targetDir`
+ * is a real directory inside `repoRoot` and NOT a symbolic link escaping `repoRoot`.
+ */
+export function assertContainedNonSymlinkDir(repoRoot: string, targetDir: string): void {
+  const realRoot = realpathSync(repoRoot);
+  const absTarget = resolve(realRoot, targetDir);
+  if (absTarget !== realRoot && !absTarget.startsWith(`${realRoot}${sep}`)) {
+    throw new Error(`Refusing to access path outside repository root: ${targetDir}`);
+  }
+  const rel = relative(realRoot, absTarget);
+  if (!rel) {
+    return;
+  }
+  let cur = realRoot;
+  for (const part of rel.split(sep).filter(Boolean)) {
+    cur = join(cur, part);
+    try {
+      const st = lstatSync(cur);
+      if (st.isSymbolicLink()) {
+        throw new Error(`Refusing to follow symbolic link inside workspace: ${cur}`);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        break;
+      }
+      throw err;
+    }
+  }
+}
 
 // Why: Storing checkpoints and reports under .git/peer/reviews/pr-<number>/ keeps
 // review state inside git's administrative directory so in-place branch checkouts
@@ -42,7 +94,13 @@ export function resolvePeerWorkspaceDir(repoRoot: string): string {
 }
 
 export function resolvePeerCommitDir(repoRoot: string, prNumber: number, headSha: string): string {
-  return join(resolvePeerWorkspaceDir(repoRoot), String(prNumber), headSha.slice(0, 7));
+  if (!Number.isInteger(prNumber) || prNumber < 1) {
+    throw new Error(`Invalid PR number: ${prNumber}`);
+  }
+  const safeSha = assertSafeGitSha(headSha, "headSha");
+  const dir = join(resolvePeerWorkspaceDir(repoRoot), String(prNumber), safeSha.slice(0, 7));
+  assertContainedNonSymlinkDir(repoRoot, dir);
+  return dir;
 }
 
 // Why: Writing per-commit diagnostics and the single agent-ready `review.md` to
@@ -179,7 +237,8 @@ export function detectRepoOwnerAndName(
   repoRoot: string,
   remoteName = "origin",
 ): { owner: string; repo: string } {
-  const remoteUrl = runGitSync(repoRoot, ["remote", "get-url", remoteName]);
+  const safeRemote = assertSafeGitRef(remoteName, "remoteName");
+  const remoteUrl = runGitSync(repoRoot, ["remote", "get-url", "--", safeRemote]);
   return parseGitHubOwnerRepo(remoteUrl);
 }
 
@@ -237,7 +296,8 @@ export async function restoreInterruptedSession(
     rmSync(sessionPath, { force: true });
     return { restored: false };
   }
-  runGitSync(repoRoot, ["checkout", "-f", parsed.originalRef]);
+  const safeOriginalRef = assertSafeGitRef(parsed.originalRef, "session.originalRef");
+  runGitSync(repoRoot, ["checkout", "-f", safeOriginalRef]);
   if (parsed.hadCargoLockOnEntry === false) {
     const trackedCheck = tryGitSync(repoRoot, ["ls-files", "--error-unmatch", "Cargo.lock"]);
     if (!trackedCheck.ok) {
@@ -245,7 +305,7 @@ export async function restoreInterruptedSession(
     }
   }
   rmSync(sessionPath, { force: true });
-  return { restored: true, originalRef: parsed.originalRef };
+  return { restored: true, originalRef: safeOriginalRef };
 }
 
 /**
@@ -258,18 +318,21 @@ export function ensureCommitFetched(
   refName?: string,
   remoteName = "origin",
 ): boolean {
-  const exists = tryGitSync(repoRoot, ["cat-file", "-e", `${commitSha}^{commit}`]);
+  const safeSha = assertSafeGitSha(commitSha, "commitSha");
+  const safeRemote = assertSafeGitRef(remoteName, "remoteName");
+  const exists = tryGitSync(repoRoot, ["cat-file", "-e", `${safeSha}^{commit}`]);
   if (exists.ok) {
     return true;
   }
   if (refName) {
-    tryGitSync(repoRoot, ["fetch", "--no-tags", remoteName, refName]);
-    if (tryGitSync(repoRoot, ["cat-file", "-e", `${commitSha}^{commit}`]).ok) {
+    const safeRef = assertSafeGitRef(refName, "refName");
+    tryGitSync(repoRoot, ["fetch", "--no-tags", "--", safeRemote, safeRef]);
+    if (tryGitSync(repoRoot, ["cat-file", "-e", `${safeSha}^{commit}`]).ok) {
       return true;
     }
   }
-  tryGitSync(repoRoot, ["fetch", "--no-tags", remoteName, commitSha]);
-  return tryGitSync(repoRoot, ["cat-file", "-e", `${commitSha}^{commit}`]).ok;
+  tryGitSync(repoRoot, ["fetch", "--no-tags", "--", safeRemote, safeSha]);
+  return tryGitSync(repoRoot, ["cat-file", "-e", `${safeSha}^{commit}`]).ok;
 }
 
 // Why: We check out the PR commit in-place (after verifying `git status --porcelain`
@@ -305,20 +368,21 @@ export class InPlaceCheckoutSession {
       this.restoreOriginalRefSync();
     });
 
-    // Persist original ref before detaching HEAD so `peer restore` can recover after SIGKILL
+    // Persist original ref atomically before detaching HEAD so `peer restore` can recover after SIGKILL
+    const safeTargetSha = assertSafeGitSha(this.options.targetSha, "targetSha");
     try {
       const stateDir = resolvePeerStateDir(this.options.repoRoot);
       await mkdir(stateDir, { recursive: true });
       const payload: PersistedCheckoutSession = {
         originalRef: this.originalRef,
-        targetSha: this.options.targetSha,
+        targetSha: safeTargetSha,
         hadCargoLockOnEntry: this.hadCargoLockOnEntry,
         startedAt: new Date().toISOString(),
       };
-      await Bun.write(
-        resolveSessionFilePath(this.options.repoRoot),
-        JSON.stringify(payload, null, 2),
-      );
+      const sessionPath = resolveSessionFilePath(this.options.repoRoot);
+      const tmpSessionPath = `${sessionPath}.${process.pid}.${Bun.randomUUIDv7().slice(-8)}.tmp`;
+      await Bun.write(tmpSessionPath, JSON.stringify(payload, null, 2));
+      await rename(tmpSessionPath, sessionPath);
     } catch {
       // Best-effort crash recovery record
     }
@@ -327,19 +391,20 @@ export class InPlaceCheckoutSession {
       const hasCommit = tryGitSync(this.options.repoRoot, [
         "cat-file",
         "-e",
-        `${this.options.targetSha}^{commit}`,
+        `${safeTargetSha}^{commit}`,
       ]);
       if (!hasCommit.ok && this.options.prNumber !== undefined) {
-        const remote = this.options.remoteName ?? "origin";
+        const remote = assertSafeGitRef(this.options.remoteName ?? "origin", "remoteName");
         runGitSync(this.options.repoRoot, [
           "fetch",
           "--no-tags",
+          "--",
           remote,
           `pull/${this.options.prNumber}/head`,
         ]);
       }
 
-      runGitSync(this.options.repoRoot, ["checkout", "--detach", this.options.targetSha]);
+      runGitSync(this.options.repoRoot, ["checkout", "--detach", safeTargetSha]);
     } catch (err) {
       this.restoreOriginalRefSync();
       this.removeSignalListeners();

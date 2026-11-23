@@ -115,7 +115,9 @@ export async function collectCargoDenyDiagnostics(
     exitCode !== 0 &&
     !combined.includes('"type":"diagnostic"') &&
     !combined.includes('"type": "diagnostic"') &&
-    /no such command:\s*`?deny`?|not found|ENOENT/i.test(combined)
+    /(?:^|\n)error:\s*no such command:\s*`?deny`?|cargo-deny:\s*(?:command )?not found/i.test(
+      combined,
+    )
   ) {
     throw new CargoDenyMissingError();
   }

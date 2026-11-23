@@ -15,9 +15,15 @@ import {
 } from "../domain/models.ts";
 
 export class LensOutputParseError extends Error {
-  constructor(message: string) {
+  public readonly code: "EMPTY" | "NO_FINDINGS_SECTION" | "ALL_BLOCKS_MALFORMED";
+
+  constructor(
+    message: string,
+    code: "EMPTY" | "NO_FINDINGS_SECTION" | "ALL_BLOCKS_MALFORMED" = "NO_FINDINGS_SECTION",
+  ) {
     super(message);
     this.name = "LensOutputParseError";
+    this.code = code;
   }
 }
 
@@ -471,19 +477,10 @@ export function parseLensFindingsWithWarnings(rawText: string): {
 } {
   const trimmed = rawText.trim();
   if (!trimmed) {
-    throw new LensOutputParseError("Empty response from findings lens.");
+    throw new LensOutputParseError("Empty response from findings lens.", "EMPTY");
   }
 
-  // 1. Seamless JSON fallback
-  const jsonObj = tryExtractJsonObject(trimmed);
-  if (jsonObj !== null) {
-    const validated = LensFindingsOutputSchema.safeParse(jsonObj);
-    if (validated.success) {
-      return { output: validated.data, warnings: [], malformedBlocks: [] };
-    }
-  }
-
-  // 2. Structured Markdown parser
+  // 1. Structured Markdown headers take precedence over embedded ```json code examples
   const sections = splitTopLevelSections(trimmed);
   const hasKnownSection =
     sections.has("FINDINGS") ||
@@ -493,9 +490,18 @@ export function parseLensFindingsWithWarnings(rawText: string): {
     sections.has("OPEN_QUESTIONS") ||
     /^###\s+FINDING\b/im.test(trimmed);
 
+  // 2. Seamless JSON fallback only when the response is not a Structured Markdown document
   if (!hasKnownSection) {
+    const jsonObj = tryExtractJsonObject(trimmed);
+    if (jsonObj !== null) {
+      const validated = LensFindingsOutputSchema.safeParse(jsonObj);
+      if (validated.success) {
+        return { output: validated.data, warnings: [], malformedBlocks: [] };
+      }
+    }
     throw new LensOutputParseError(
       `Failed to parse structured Markdown or JSON from lens response: ${trimmed.slice(0, 200)}`,
+      "NO_FINDINGS_SECTION",
     );
   }
 
@@ -556,6 +562,7 @@ export function parseLensFindingsWithWarnings(rawText: string): {
   if (findingBlocks.length > 0 && findings.length === 0) {
     throw new LensOutputParseError(
       `Found ${findingBlocks.length} FINDING block(s) in lens output, but none could be parsed.`,
+      "ALL_BLOCKS_MALFORMED",
     );
   }
 

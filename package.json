@@ -8,9 +8,9 @@
     "peer": "./src/cli/index.ts"
   },
   "scripts": {
-    "lint": "biome lint src tests",
-    "format": "bun fmt --no-script src tests",
-    "format:check": "bun fmt --no-script --check src tests",
+    "lint": "biome lint src tests plugins/opencode",
+    "format": "bun fmt --no-script src tests plugins/opencode",
+    "format:check": "bun fmt --no-script --check src tests plugins/opencode",
     "typecheck": "bun check",
     "build": "bun build src/cli/index.ts --compile --outfile dist/peer",
     "test": "bun test"

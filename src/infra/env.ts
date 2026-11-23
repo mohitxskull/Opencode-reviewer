@@ -65,14 +65,33 @@ const SECRET_ENV_KEY_PATTERN = /(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|CONNECTION
 // (including `SCCACHE_AZURE_CONNECTION_STRING` / `SCCACHE_REDIS_PASSWORD`).
 // Passing an explicit allowlisted environment + secret denylist prevents exfiltration
 // while preserving corporate proxies, TLS certs, local sccache, and Windows system vars.
+function scrubProxyCredentials(key: string, val: string): string {
+  if (!/PROXY/i.test(key)) {
+    return val;
+  }
+  try {
+    const parsed = new URL(val);
+    if (parsed.username || parsed.password) {
+      parsed.username = "";
+      parsed.password = "";
+      return parsed.toString();
+    }
+    return val;
+  } catch {
+    return val.replace(/\/\/[^/@\s]+@/g, "//");
+  }
+}
+
 export function buildScrubbedCargoEnv(
   sourceEnv: Readonly<Record<string, string | undefined>> = process.env,
 ): Record<string, string> {
-  const scrubbed: Record<string, string> = {};
+  const scrubbed: Record<string, string> = {
+    RUSTUP_AUTO_INSTALL: "0",
+  };
   for (const key of ALLOWED_CARGO_ENV_KEYS) {
     const val = sourceEnv[key];
     if (typeof val === "string" && val.length > 0 && !SECRET_ENV_KEY_PATTERN.test(key)) {
-      scrubbed[key] = val;
+      scrubbed[key] = scrubProxyCredentials(key, val);
     }
   }
   for (const [key, val] of Object.entries(sourceEnv)) {
@@ -82,7 +101,7 @@ export function buildScrubbedCargoEnv(
       !SECRET_ENV_KEY_PATTERN.test(key) &&
       ALLOWED_CARGO_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
     ) {
-      scrubbed[key] = val;
+      scrubbed[key] = scrubProxyCredentials(key, val);
     }
   }
   return scrubbed;

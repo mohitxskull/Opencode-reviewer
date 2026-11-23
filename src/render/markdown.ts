@@ -43,25 +43,29 @@ function computeSafeFence(content: string): string {
 }
 
 const SHELL_COMMAND_IN_BACKTICKS_REGEX =
-  /\b(?:cat|curl|wget|bash|sh|zsh|nc|ncat|python|python3|perl|ruby|node|bun|rm|chmod|chown|sudo|env|printenv|export|eval|exec|ssh|scp|base64|whoami|id|uname)\b|[;$|><&]|\/etc\/|\/proc\/|\/var\//i;
+  /\b(?:cat|curl|wget|bash|sh|zsh|nc|ncat|python|python3|perl|ruby|node|bun|rm|chmod|chown|sudo|printenv|eval|exec|ssh|scp|base64|whoami|uname)\b|\bid\s+-[a-z]+\b|&&\s*(?:curl|wget|bash|sh|zsh|nc|rm|cat)\b|\|\s*(?:bash|sh|zsh|nc|ncat)\b|\/etc\/|\/proc\/|\/var\//i;
 
 // Why: AI-generated "Prompt for Coding Agents" blocks posted to GitHub PR threads
 // are consumed by downstream coding agents (such as autofix). Sanitizing shell
 // execution directives, secret env var names, and non-GitHub URLs at render time
-// enforces the untrusted-input defense-in-depth boundary.
+// enforces the untrusted-input defense-in-depth boundary while preserving Rust
+// type syntax (`Option<T>`, `&str`, `|x| x + 1`).
 export function sanitizeAgentPrompt(prompt: string): string {
   let sanitized = prompt;
 
-  // Redact fenced code blocks containing shell commands
-  sanitized = sanitized.replace(/```[^\n]*\n([\s\S]*?)```/g, (fullMatch, inner: string) => {
-    if (SHELL_COMMAND_IN_BACKTICKS_REGEX.test(inner)) {
-      return "[redacted-command-block]";
-    }
-    return fullMatch;
-  });
+  // Redact fenced code blocks (backticks or tildes) containing shell commands
+  sanitized = sanitized.replace(
+    /(?:`{3,}|~{3,})[^\n]*\n([\s\S]*?)(?:`{3,}|~{3,})/g,
+    (fullMatch, inner: string) => {
+      if (SHELL_COMMAND_IN_BACKTICKS_REGEX.test(inner)) {
+        return "[redacted-command-block]";
+      }
+      return fullMatch;
+    },
+  );
 
-  // Redact backtick code spans ONLY when they contain shell execution commands or path/pipe metacharacters,
-  // preserving legitimate inline Rust code spans like `src/lib.rs` or `x.saturating_add(1)`.
+  // Redact backtick code spans ONLY when they contain shell execution commands,
+  // preserving legitimate inline Rust code spans like `Option<T>`, `&str`, `|x| x + 1`, or `x.saturating_add(1)`.
   sanitized = sanitized.replace(/`([^`]*)`/g, (fullMatch, inner: string) => {
     if (SHELL_COMMAND_IN_BACKTICKS_REGEX.test(inner)) {
       return "[redacted-command]";
@@ -77,17 +81,18 @@ export function sanitizeAgentPrompt(prompt: string): string {
   }
   sanitized = sanitized.replace(/\$\(/g, "[redacted-command]");
 
-  // Strip credential paths (~/.ssh, $HOME/.ssh, /home/.../.aws, ~/.gnupg, id_rsa, .env)
+  // Strip credential paths (~/.ssh, $HOME/.ssh, /home/.../.aws, ~/.gnupg, id_rsa, .env, /etc/passwd)
   sanitized = sanitized.replace(
     /(?:~|\$HOME|\$\{HOME\}|\/home\/[^/\s]+|\/Users\/[^/\s]+|\/root)\/\.(?:ssh|aws|gnupg|config|cargo\/credentials)\S*/gi,
     "[redacted-path]",
   );
+  sanitized = sanitized.replace(/\/etc\/(?:passwd|shadow|sudoers)\b/gi, "[redacted-path]");
   sanitized = sanitized.replace(/\b(?:id_rsa|id_ed25519)\b/gi, "[redacted-key]");
   sanitized = sanitized.replace(/(?:^|\s)\.[a-z0-9_.-]*env\b/gi, " [redacted-env]");
 
-  // Strip secret environment variable names (any *TOKEN*, *SECRET*, *API_KEY*, *PRIVATE_KEY*, *PASSWORD*, *CREDENTIAL*)
+  // Strip secret environment variable names (case-insensitive when $-prefixed, or uppercase token names)
   sanitized = sanitized.replace(
-    /\$?\b[A-Z0-9_]*(?:TOKEN|SECRET|API_KEY|PRIVATE_KEY|PASSWORD|CREDENTIAL)S?\b/g,
+    /\$[A-Za-z0-9_]*(?:TOKEN|SECRET|API_KEY|PRIVATE_KEY|PASSWORD|CREDENTIAL)S?\b|\b[A-Z0-9_]*(?:TOKEN|SECRET|API_KEY|PRIVATE_KEY|PASSWORD|CREDENTIAL)S?\b/gi,
     "[redacted-secret]",
   );
 
@@ -104,7 +109,7 @@ export function sanitizeAgentPrompt(prompt: string): string {
     return "[redacted-url]";
   });
 
-  // Neutralize closing HTML/Markdown container tags and Markdown images
+  // Neutralize closing HTML/Markdown container tags, comments, and Markdown images
   sanitized = sanitizeMarkdownText(sanitized);
 
   return sanitized.trim();
@@ -112,8 +117,12 @@ export function sanitizeAgentPrompt(prompt: string): string {
 
 export function sanitizeMarkdownText(text: string): string {
   return text
+    .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/!\[[^\]]*\]\([^)]*\)/g, "[redacted-image]")
-    .replace(/<\/?(?:details|summary|blockquote|script|iframe|object|embed)\b[^>]*>/gi, "")
+    .replace(
+      /<\/?(?:details|summary|blockquote|script|iframe|object|embed|style|svg)\b[^>]*>/gi,
+      "",
+    )
     .replace(/<img\b[^>]*>/gi, "");
 }
 

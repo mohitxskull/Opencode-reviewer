@@ -104,6 +104,24 @@ function normalizeGitDiffPath(rawPath: string | undefined): string | null {
   return cleaned.length > 0 ? cleaned : null;
 }
 
+export function extractAllDiffPaths(diffText: string): string[] {
+  if (!diffText || diffText.trim().length === 0) {
+    return [];
+  }
+  const paths = new Set<string>();
+  for (const file of parseDiff(diffText)) {
+    const toPath = normalizeGitDiffPath(file.to);
+    if (toPath) {
+      paths.add(toPath);
+    }
+    const fromPath = normalizeGitDiffPath(file.from);
+    if (fromPath) {
+      paths.add(fromPath);
+    }
+  }
+  return Array.from(paths).sort();
+}
+
 export function parseUnifiedDiff(diffText: string): Record<string, DiffFileMap> {
   const result: Record<string, DiffFileMap> = {};
   if (!diffText || diffText.trim().length === 0) {

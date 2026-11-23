@@ -5,12 +5,21 @@ REPO="mohitxskull/Opencode-reviewer"
 INSTALL_DIR="${PEER_INSTALL_DIR:-${HOME}/.local/bin}"
 VERSION="${PEER_VERSION:-latest}"
 
+case "${VERSION}" in
+  latest|v[0-9]*.[0-9]*.[0-9]*) ;;
+  *)
+    echo "Error: invalid PEER_VERSION '${VERSION}' (expected 'latest' or 'vX.Y.Z')." >&2
+    exit 1
+    ;;
+esac
+
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 
 case "${OS}" in
-  linux) OS_SLUG="linux" ;;
-  darwin) OS_SLUG="darwin" ;;
+  linux*) OS_SLUG="linux"; EXT="tar.gz"; BIN_NAME="peer" ;;
+  darwin*) OS_SLUG="darwin"; EXT="tar.gz"; BIN_NAME="peer" ;;
+  msys*|mingw*|cygwin*) OS_SLUG="windows"; EXT="zip"; BIN_NAME="peer.exe" ;;
   *)
     echo "Unsupported OS: ${OS}. Download manually from https://github.com/${REPO}/releases" >&2
     exit 1
@@ -26,7 +35,7 @@ case "${ARCH}" in
     ;;
 esac
 
-ARCHIVE="peer-${OS_SLUG}-${ARCH_SLUG}.tar.gz"
+ARCHIVE="peer-${OS_SLUG}-${ARCH_SLUG}.${EXT}"
 if [ "${VERSION}" = "latest" ]; then
   BASE_URL="https://github.com/${REPO}/releases/latest/download"
 else
@@ -60,10 +69,14 @@ if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
   exit 1
 fi
 
-tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "${TMP_DIR}"
+if [ "${EXT}" = "zip" ]; then
+  unzip -q "${TMP_DIR}/${ARCHIVE}" -d "${TMP_DIR}"
+else
+  tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "${TMP_DIR}"
+fi
 mkdir -p "${INSTALL_DIR}"
-install -m 755 "${TMP_DIR}/peer" "${INSTALL_DIR}/peer"
-ln -sf "${INSTALL_DIR}/peer" "${INSTALL_DIR}/cargo-peer"
+install -m 755 "${TMP_DIR}/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+ln -sf "${INSTALL_DIR}/${BIN_NAME}" "${INSTALL_DIR}/cargo-peer"
 
 echo "Installed peer (+ cargo-peer alias) to ${INSTALL_DIR}/peer"
 case ":${PATH}:" in

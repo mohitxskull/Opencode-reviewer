@@ -10,8 +10,13 @@ type SignalCleanupFn = () => void;
 
 const cleanupStack: SignalCleanupFn[] = [];
 let signalListenersAttached = false;
+let handlingSignal = false;
 
 function handleSignal(signal: NodeJS.Signals): void {
+  if (handlingSignal) {
+    return;
+  }
+  handlingSignal = true;
   triggerSignalCleanup();
   const exitCode = signal === "SIGINT" ? 130 : 143;
   process.exit(exitCode);

@@ -58,8 +58,13 @@ async function getRustParser(): Promise<Parser> {
 
 function hasAttributeMatching(node: SyntaxNode, pattern: RegExp): boolean {
   let prev = node.previousNamedSibling;
-  while (prev && prev.type === "attribute_item") {
-    if (pattern.test(prev.text)) {
+  while (
+    prev &&
+    (prev.type === "attribute_item" ||
+      prev.type === "line_comment" ||
+      prev.type === "block_comment")
+  ) {
+    if (prev.type === "attribute_item" && pattern.test(prev.text)) {
       return true;
     }
     prev = prev.previousNamedSibling;
@@ -96,9 +101,10 @@ function hasUnsafeModifier(node: SyntaxNode): boolean {
   return false;
 }
 
-// Anchor strictly to attribute syntax so #[serde(rename = "test")] or #[doc = "test"] never match
+// Anchor strictly to attribute syntax so #[serde(rename = "test")] or #[doc = "test"] never match,
+// while supporting #[cfg(test)], #[cfg(all(..., test, ...))], and #[tokio::test].
 const TEST_ATTR_REGEX =
-  /^#\[\s*(?:cfg\s*\(\s*test\s*\)|(?:[A-Za-z_]\w*::)*test(?:\s*\([^)]*\))?)\s*\]$/;
+  /^#!?\[\s*(?:cfg\s*\(\s*(?:test|(?:all|any)\s*\([^)]*\btest\b[^)]*\))\s*\)|(?:[A-Za-z_]\w*::)*test(?:\s*\([^)]*\))?)\s*\]$/;
 
 // Why: Regexes miss methods whose `fn` line is outside a diff hunk, get fooled
 // by comments/strings, and cannot distinguish inline `#[cfg(test)] mod tests`

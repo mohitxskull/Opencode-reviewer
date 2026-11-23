@@ -40,7 +40,14 @@ export function renderSarifReport(findings: readonly Finding[], version = PEER_V
       locations: [
         {
           physicalLocation: {
-            artifactLocation: { uri: f.filePath },
+            artifactLocation: {
+              uri: f.filePath
+                .replace(/\\/g, "/")
+                .replace(/^\.\//, "")
+                .split("/")
+                .map((seg) => encodeURIComponent(seg))
+                .join("/"),
+            },
             region: {
               startLine: f.startLine,
               endLine: f.endLine,

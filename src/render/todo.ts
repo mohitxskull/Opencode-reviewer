@@ -94,9 +94,12 @@ export function buildReviewTodoQueue(bundle: ReviewBundle): ReviewTodoQueue {
       bucketed.set(k, list);
     }
 
-    for (const groupItems of bucketed.values()) {
+    for (const rawGroupItems of bucketed.values()) {
       const groupId = `${tier}-G${String(groupSeq).padStart(2, "0")}`;
       groupSeq += 1;
+      const groupItems = [...rawGroupItems].sort(
+        (a, b) => Number(Boolean(a.dependsOn)) - Number(Boolean(b.dependsOn)),
+      );
       const files = Array.from(new Set(groupItems.map((f) => f.filePath)));
       const verificationCommands = Array.from(
         new Set(
@@ -168,7 +171,7 @@ export function renderReviewTodoMarkdown(bundle: ReviewBundle): string {
     byTier[severityToTier(f.severity)].push(f);
   }
 
-  let groupLetterCode = 65; // 'A'
+  let groupSeq = 1;
 
   for (const tier of ["P0", "P1", "P2", "P3"] as const) {
     const items = byTier[tier];
@@ -185,12 +188,15 @@ export function renderReviewTodoMarkdown(bundle: ReviewBundle): string {
       groups.set(k, list);
     }
 
-    for (const groupItems of groups.values()) {
+    for (const rawGroupItems of groups.values()) {
+      const groupId = `${tier}-G${String(groupSeq).padStart(2, "0")}`;
+      groupSeq += 1;
+      const groupItems = [...rawGroupItems].sort(
+        (a, b) => Number(Boolean(a.dependsOn)) - Number(Boolean(b.dependsOn)),
+      );
       if (groupItems.length > 1) {
-        const label = String.fromCharCode(groupLetterCode);
-        groupLetterCode += 1;
         const sample = groupItems[0];
-        lines.push(`### Group ${label} — ${sample?.filePath ?? "shared"} (solve together)`, "");
+        lines.push(`### Group ${groupId} — ${sample?.filePath ?? "shared"} (solve together)`, "");
       }
       for (const f of groupItems) {
         const range = f.startLine === f.endLine ? `${f.startLine}` : `${f.startLine}-${f.endLine}`;

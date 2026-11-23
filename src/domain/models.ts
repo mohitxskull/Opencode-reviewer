@@ -30,6 +30,18 @@ export const CHILL_MINOR_MIN_CONFIDENCE = 0.8;
 export const WALKTHROUGH_MARKER = "<!-- peer-walkthrough-comment -->";
 export const PEER_REVIEW_MARKER = "<!-- peer-review-body -->";
 
+export const GitShaSchema = z
+  .string()
+  .regex(/^[0-9a-f]{7,40}$/i, "Invalid git commit SHA (expected 7-40 hex chars)");
+
+export const GitRefNameSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (s) => !s.startsWith("-") && !s.includes("..") && !/[\s\0~^:?*[\\]/.test(s),
+    "Unsafe git ref name",
+  );
+
 export const SeveritySchema = z.enum(["Critical", "Major", "Minor", "Trivial", "Info", "None"]);
 export type Severity = z.infer<typeof SeveritySchema>;
 
@@ -265,10 +277,10 @@ export const PullRequestSummarySchema = z.object({
   number: z.number().int().min(1),
   title: z.string(),
   author: z.string(),
-  headRefName: z.string(),
-  baseRefName: z.string(),
-  headSha: z.string().min(7),
-  baseSha: z.string().min(7),
+  headRefName: GitRefNameSchema,
+  baseRefName: GitRefNameSchema,
+  headSha: GitShaSchema,
+  baseSha: GitShaSchema,
   htmlUrl: z.string().url(),
   updatedAt: z.string(),
 });
@@ -283,8 +295,8 @@ export type PullRequestMetadata = z.infer<typeof PullRequestMetadataSchema>;
 
 export const ReviewCheckpointSchema = z.object({
   prNumber: z.number().int().min(1),
-  baseSha: z.string().min(7),
-  lastReviewedHeadSha: z.string().min(7),
+  baseSha: GitShaSchema,
+  lastReviewedHeadSha: GitShaSchema,
   reviewedAt: z.string(),
   profile: ReviewProfileSchema,
 });
@@ -317,9 +329,9 @@ export type ToolOutcomeDetail = z.infer<typeof ToolOutcomeDetailSchema>;
 
 export const RunManifestSchema = z.object({
   prNumber: z.number().int().min(1),
-  headSha: z.string().min(7),
-  baseSha: z.string().min(7),
-  diffBaseSha: z.string().min(7),
+  headSha: GitShaSchema,
+  baseSha: GitShaSchema,
+  diffBaseSha: GitShaSchema,
   isIncremental: z.boolean(),
   profile: ReviewProfileSchema,
   model: z.string().min(1),
@@ -343,8 +355,8 @@ export type RunManifest = z.infer<typeof RunManifestSchema>;
 
 export const AnalyzeStageContextSchema = z.object({
   pr: PullRequestMetadataSchema,
-  diffBaseSha: z.string().min(7),
-  headSha: z.string().min(7),
+  diffBaseSha: GitShaSchema,
+  headSha: GitShaSchema,
   isIncremental: z.boolean(),
   profile: ReviewProfileSchema,
   baseline: ReviewBaselineHeaderSchema,
@@ -364,8 +376,8 @@ export type AnalyzeStageContext = z.infer<typeof AnalyzeStageContextSchema>;
 
 export const ReviewBundleSchema = z.object({
   pr: PullRequestMetadataSchema,
-  diffBaseSha: z.string().min(7),
-  headSha: z.string().min(7),
+  diffBaseSha: GitShaSchema,
+  headSha: GitShaSchema,
   isIncremental: z.boolean(),
   profile: ReviewProfileSchema,
   baseline: ReviewBaselineHeaderSchema.optional(),

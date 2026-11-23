@@ -9,6 +9,7 @@ import {
   type DeletionProposedItem,
   type Finding,
   FindingSchema,
+  isOptionalAnalyzerFinding,
   type OpenQuestionItem,
   type ReviewBundle,
   ReviewBundleSchema,
@@ -106,8 +107,13 @@ function parseAgentReviewInput(
   try {
     parsedFindings = parseLensFindingsWithWarnings(rawText);
   } catch (err) {
-    // Allow standalone walkthrough.md files inside `--from <dir>` that have no `## FINDINGS` section
-    if (parsedWalkthrough && err instanceof LensOutputParseError) {
+    // Allow standalone walkthrough.md files inside `--from <dir>` that have no `## FINDINGS` section,
+    // but NEVER swallow ALL_BLOCKS_MALFORMED when `### FINDING` blocks were present and broken.
+    if (
+      parsedWalkthrough &&
+      err instanceof LensOutputParseError &&
+      err.code === "NO_FINDINGS_SECTION"
+    ) {
       return {
         walkthrough,
         findings: [],
@@ -121,12 +127,18 @@ function parseAgentReviewInput(
     throw err;
   }
 
+  const seenIds = new Set<string>();
   const findings: Finding[] = parsedFindings.output.findings.map((f) => {
     const fp = computeFindingFingerprint(f);
+    let candidateId = `fp-${fp}`;
+    if (seenIds.has(candidateId)) {
+      candidateId = `fp-${fp}-L${f.startLine}`;
+    }
+    seenIds.add(candidateId);
     const inferredSource = f.type === "Idioms" || f.type === "Refactor" ? "idioms" : "soundness";
     return FindingSchema.parse({
       ...f,
-      id: `fp-${fp}`,
+      id: candidateId,
       suggestionVerified: false,
       source: inferredSource,
     });
@@ -266,10 +278,12 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
           matchedIds.add(f.id);
         }
         // Why: Hard compiler diagnostics (`clippy`) and CVE/sensitive-file findings (`audit` excluding
-        // heuristic `audit-ast-*` detectors) are non-refutable ground truth. Heuristic AST panic/unsafe
-        // findings (`audit-ast-*`) CAN be refuted by the skeptic when guarded by invariants.
+        // heuristic `audit-ast-*` and optional analyzers `audit-coverage-*`/`audit-semver-*`/`audit-geiger-*`)
+        // are non-refutable ground truth. Heuristic AST and optional analyzer findings CAN be refuted by the skeptic.
         const isLockedGroundTruth =
-          f.source === "clippy" || (f.source === "audit" && !f.id.startsWith("audit-ast-"));
+          f.source === "clippy" ||
+          f.id.startsWith("clippy-") ||
+          (f.source === "audit" && !f.id.startsWith("audit-ast-") && !isOptionalAnalyzerFinding(f));
         if (isLockedGroundTruth) {
           if (v && !v.keep) {
             lockedDropIgnoredIds.push(f.id);

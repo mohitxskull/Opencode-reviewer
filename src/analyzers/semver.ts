@@ -160,7 +160,9 @@ export async function collectCargoSemverViolations(
   if (
     exitCode !== 0 &&
     !combined.includes("--- failure ") &&
-    /no such command:\s*`?semver-checks`?|not found|ENOENT/i.test(combined)
+    /(?:^|\n)error:\s*no such command:\s*`?semver-checks`?|cargo-semver-checks:\s*(?:command )?not found/i.test(
+      combined,
+    )
   ) {
     throw new CargoSemverChecksMissingError();
   }

@@ -234,7 +234,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   peer-check:
@@ -249,7 +248,7 @@ jobs:
       - uses: mohitxskull/Opencode-reviewer@main
         with:
           base: \${{ github.event.pull_request.base.sha || 'main' }}
-          sarif: peer.sarif
+          sarif-file: peer.sarif
 `;
 
 const INSTALLABLE_CARGO_BINS: ReadonlyArray<{

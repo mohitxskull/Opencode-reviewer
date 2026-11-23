@@ -23,12 +23,24 @@ function extractAddedLineNumbers(fileMap: DiffFileMap): Set<number> {
 }
 
 function hasSafetyCommentAbove(lines: readonly string[], startLine: number): boolean {
-  // Check up to 3 lines immediately above startLine (1-based) and the line itself
-  const fromIdx = Math.max(0, startLine - 4);
-  const toIdx = Math.min(lines.length - 1, startLine - 1);
-  for (let i = fromIdx; i <= toIdx; i++) {
-    if (/\/\/\s*SAFETY\s*:/i.test(lines[i] ?? "")) {
+  // Check the target line and walk backwards across contiguous comments/attributes above startLine (1-based)
+  // for `// SAFETY:` or `/// # Safety` doc comments on `unsafe fn`/`unsafe trait`.
+  if (/\/\/\s*SAFETY\s*:/i.test(lines[startLine - 1] ?? "")) {
+    return true;
+  }
+  for (let i = startLine - 2; i >= Math.max(0, startLine - 20); i--) {
+    const trimmed = (lines[i] ?? "").trim();
+    if (/\/\/\s*SAFETY\s*:|\/\/[/!]\s*#\s*Safety\b/i.test(trimmed)) {
       return true;
+    }
+    if (
+      !trimmed.startsWith("//") &&
+      !trimmed.startsWith("#[") &&
+      !trimmed.startsWith("*/") &&
+      !trimmed.startsWith("*") &&
+      trimmed.length > 0
+    ) {
+      break;
     }
   }
   return false;
@@ -248,9 +260,9 @@ export async function collectAstDeterministicFindings(
         }
       }
 
-      // Skip documented invariant `.expect()` calls preceded by `/// # Panics` or `// Why:`
+      // Skip documented invariant `.expect()` / `.unwrap()` calls preceded by `/// # Panics`, `// Why:`, or `// INVARIANT:`
       if (
-        call.op === ".expect()" &&
+        (call.op === ".expect()" || call.op === ".unwrap()") &&
         hasPanicInvariantDocOrWhyAbove(lines, call.line, enclosingFn?.startLine)
       ) {
         continue;

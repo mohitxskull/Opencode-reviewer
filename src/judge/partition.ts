@@ -186,6 +186,9 @@ function mergeTwoFindings(a: Finding, b: Finding): Finding {
 
   return FindingSchema.parse({
     ...primary,
+    // Preserve `source: "clippy"` whenever a compiler/Clippy diagnostic was merged so
+    // it remains non-refutable ground truth during skeptic verification.
+    source: a.source === "clippy" || b.source === "clippy" ? "clippy" : primary.source,
     body: combinedBody,
     suggestion: combinedSuggestion,
     agentPrompt: combinedPrompt,

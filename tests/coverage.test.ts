@@ -49,10 +49,10 @@ const SAMPLE_LLVM_COV_JSON = JSON.stringify({
           segments: [
             [10, 1, 5, true, true],
             [11, 1, 5, true, true],
-            [12, 1, 0, true, true],
-            [13, 1, 0, true, true],
+            [12, 1, 0, true, true], // RLE uncovered span covering line 12 and interior line 13
             [14, 1, 3, true, true],
             [15, 1, 0, true, true],
+            [16, 1, 0, false, false], // Region exit before line 16
             [25, 1, 0, true, true], // Outside diff hunk -> ignored
           ],
         },

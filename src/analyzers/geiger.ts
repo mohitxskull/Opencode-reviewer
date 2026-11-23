@@ -183,7 +183,9 @@ export async function collectCargoGeigerReport(
   if (
     exitCode !== 0 &&
     !stdout.includes('"packages"') &&
-    /no such command:\s*`?geiger`?|not found|ENOENT/i.test(combined)
+    /(?:^|\n)error:\s*no such command:\s*`?geiger`?|cargo-geiger:\s*(?:command )?not found/i.test(
+      combined,
+    )
   ) {
     throw new CargoGeigerMissingError();
   }

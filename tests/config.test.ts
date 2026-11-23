@@ -209,11 +209,16 @@ rule = "Never hold std::sync::Mutex across .await"
     expect(await Bun.file(join(dir, "deny.toml")).exists()).toBe(true);
     expect(await Bun.file(join(dir, ".github", "workflows", "peer.yml")).exists()).toBe(true);
 
-    // First-adoption additive config: when baseSha has no peer.toml yet, local peer.toml additively enables deny & geiger
-    const effectiveCfg = await loadPeerConfig(dir, baseSha);
-    expect(effectiveCfg.tools.deny).toBe(true);
-    expect(effectiveCfg.tools.geiger).toBe(true);
-    expect(effectiveCfg.tools.clippy).toBe(true);
-    expect(effectiveCfg.tools.audit).toBe(true);
+    // Local disk load reads the newly generated peer.toml
+    const localCfg = await loadPeerConfig(dir);
+    expect(localCfg.tools.deny).toBe(true);
+    expect(localCfg.tools.geiger).toBe(true);
+    expect(localCfg.tools.clippy).toBe(true);
+    expect(localCfg.tools.audit).toBe(true);
+
+    // Base-branch load strictly reads baseSha and ignores uncommitted/PR-head peer.toml
+    const baseCfg = await loadPeerConfig(dir, baseSha);
+    expect(baseCfg.tools.deny).toBe(false);
+    expect(baseCfg.tools.geiger).toBe(false);
   });
 });

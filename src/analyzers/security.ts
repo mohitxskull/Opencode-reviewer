@@ -148,7 +148,9 @@ export async function collectSecurityAdvisories(
   if (!stdout.trim().startsWith("{")) {
     if (
       exitCode !== 0 &&
-      /no such command:\s*`?audit`?|not found|ENOENT/i.test(`${stderr}\n${stdout}`)
+      /(?:^|\n)error:\s*no such command:\s*`?audit`?|cargo-audit:\s*(?:command )?not found/i.test(
+        `${stderr}\n${stdout}`,
+      )
     ) {
       throw new CargoAuditMissingError();
     }

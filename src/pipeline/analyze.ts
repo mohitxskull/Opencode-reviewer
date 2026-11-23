@@ -36,7 +36,12 @@ import {
   semverViolationsToFindings,
 } from "../analyzers/semver.ts";
 import { buildRustSymbolGraph, type RustSymbolGraph } from "../analyzers/symbol-graph.ts";
-import { filterCodeOnlyDiffMap, findSensitiveFiles, parseUnifiedDiff } from "../domain/diff.ts";
+import {
+  extractAllDiffPaths,
+  filterCodeOnlyDiffMap,
+  findSensitiveFiles,
+  parseUnifiedDiff,
+} from "../domain/diff.ts";
 import {
   type AnalyzeStageContext,
   AnalyzeStageContextSchema,
@@ -285,19 +290,17 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       };
 
       const runDenyWithPolicy = async () => {
-        if (modifiedFiles.size === 0) {
+        if (modifiedFiles.size === 0 || !enabledTools.has("deny")) {
           return [];
         }
         const hasConfig = await hasCargoDenyConfig(repoRoot);
         if (!hasConfig) {
-          if (enabledTools.has("deny")) {
-            toolOutcomes.deny = {
-              status: "skipped",
-              findingsCount: 0,
-              reason: "missing_config",
-              remediationCommand: "cargo deny init",
-            };
-          }
+          toolOutcomes.deny = {
+            status: "skipped",
+            findingsCount: 0,
+            reason: "missing_config",
+            remediationCommand: "cargo deny init",
+          };
           return [];
         }
         try {
@@ -380,7 +383,14 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
       const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
 
-      toolOutcomes.clippy ??= { status: "ok", findingsCount: clippyFindings.length };
+      toolOutcomes.clippy ??=
+        modifiedFiles.size === 0 || !peerConfig.tools.clippy
+          ? {
+              status: "skipped",
+              findingsCount: 0,
+              reason: modifiedFiles.size === 0 ? "no_modified_files" : "not_enabled",
+            }
+          : { status: "ok", findingsCount: clippyFindings.length };
       toolOutcomes.audit ??= { status: "ok", findingsCount: auditFindings.length };
       if (enabledTools.has("deny") && !toolOutcomes.deny) {
         toolOutcomes.deny = { status: "ok", findingsCount: denyFindings.length };
@@ -399,30 +409,31 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
           ? { status: "skipped", findingsCount: 0, reason: "no_unsafe_in_diff" }
           : { status: "ok", findingsCount: miriFindings.length };
       }
-      const sensitiveFileFindings = findSensitiveFiles(Object.keys(rawDiffMap)).map((filePath) =>
-        FindingSchema.parse({
-          id: `audit-sensitive-file-${filePath.replace(/[^a-z0-9]+/gi, "-")}`,
-          filePath,
-          startLine: 1,
-          endLine: 1,
-          severity: "Major",
-          type: "Security",
-          epistemicState: "NEEDS-RUNTIME-VERIFICATION",
-          evidenceMechanism: "Security",
-          title: `Sensitive build/toolchain/CI file modified: \`${filePath}\``,
-          body: `PR modifies security-sensitive configuration file \`${filePath}\`. Review carefully for build-script injection, toolchain overrides, CI permission escalation, or policy weakening.`,
-          rootCause: `Modification to sensitive configuration file ${filePath}`,
-          blastRadius: "Build pipeline / toolchain / CI security boundary",
-          reversible: true,
-          dependsOn: null,
-          verificationCommand: `git diff ${diffBaseSha.slice(0, 7)}..${pr.headSha.slice(0, 7)} -- ${filePath}`,
-          traceability: `deterministic sensitive-file detector (${filePath})`,
-          suggestion: null,
-          suggestionVerified: false,
-          agentPrompt: `Manually audit changes to sensitive file \`${filePath}\` for supply-chain, CI, or toolchain security risks.`,
-          confidence: 1.0,
-          source: "audit",
-        }),
+      const sensitiveFileFindings = findSensitiveFiles(extractAllDiffPaths(diffText)).map(
+        (filePath) =>
+          FindingSchema.parse({
+            id: `audit-sensitive-file-${filePath.replace(/[^a-z0-9]+/gi, "-")}`,
+            filePath,
+            startLine: 1,
+            endLine: 1,
+            severity: "Major",
+            type: "Security",
+            epistemicState: "NEEDS-RUNTIME-VERIFICATION",
+            evidenceMechanism: "Security",
+            title: `Sensitive build/toolchain/CI file modified: \`${filePath}\``,
+            body: `PR modifies security-sensitive configuration file \`${filePath}\`. Review carefully for build-script injection, toolchain overrides, CI permission escalation, or policy weakening.`,
+            rootCause: `Modification to sensitive configuration file ${filePath}`,
+            blastRadius: "Build pipeline / toolchain / CI security boundary",
+            reversible: true,
+            dependsOn: null,
+            verificationCommand: `git diff ${diffBaseSha.slice(0, 7)}..${pr.headSha.slice(0, 7)} -- ${filePath}`,
+            traceability: `deterministic sensitive-file detector (${filePath})`,
+            suggestion: null,
+            suggestionVerified: false,
+            agentPrompt: `Manually audit changes to sensitive file \`${filePath}\` for supply-chain, CI, or toolchain security risks.`,
+            confidence: 1.0,
+            source: "audit",
+          }),
       );
 
       const deterministicFindings = [

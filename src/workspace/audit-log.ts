@@ -75,7 +75,6 @@ export class AuditLogger {
           await ensurePeerWorkspaceExcluded(this.repoRoot);
         }
         await mkdir(join(this.getReviewDir(), "runs"), { recursive: true });
-        await writeFile(this.getLatestAuditJsonlPath(), "");
         await writeFile(this.getRunAuditJsonlPath(), "");
       })().catch((err) => {
         this.initPromise = null;

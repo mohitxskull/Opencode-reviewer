@@ -10,10 +10,7 @@ interface ToolEditor {
     name: string;
     description: string;
     input: Record<string, unknown>;
-    execute: (
-      input: Record<string, unknown>,
-      context?: unknown,
-    ) => Promise<{ content: string }>;
+    execute: (input: Record<string, unknown>, context?: unknown) => Promise<{ content: string }>;
   }): void;
 }
 
@@ -24,6 +21,25 @@ interface OpenCodeV2Context {
   readonly tool?: {
     transform(fn: (editor: ToolEditor) => void): Promise<unknown>;
   };
+}
+
+const SAFE_PR_TARGET_REGEX =
+  /^(?:#?\d+|https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/pull\/\d+(?:\/.*)?)$/;
+
+function assertSafePrTarget(pr: unknown): string {
+  const val = String(pr ?? "").trim();
+  if (!val || val.startsWith("-") || !SAFE_PR_TARGET_REGEX.test(val)) {
+    throw new Error(`Invalid PR target "${val}". Expected a PR number or GitHub PR URL.`);
+  }
+  return val;
+}
+
+function assertNonFlagArg(val: string, name: string): string {
+  const trimmed = val.trim();
+  if (trimmed.startsWith("-")) {
+    throw new Error(`Invalid ${name} argument "${val}": must not start with '-'.`);
+  }
+  return trimmed;
 }
 
 async function runPeer(
@@ -85,7 +101,8 @@ export default {
             },
             tools: {
               type: "string",
-              description: "Optional Cargo analyzers to enable: deny,geiger,semver,coverage,miri or all",
+              description:
+                "Optional Cargo analyzers to enable: deny,geiger,semver,coverage,miri or all",
             },
             baseline: {
               type: "boolean",
@@ -131,7 +148,9 @@ export default {
         },
         async execute(args) {
           const cliArgs = ["next", "--json"];
-          if (typeof args.pr === "string" && args.pr) cliArgs.push(args.pr);
+          if (typeof args.pr === "string" && args.pr) {
+            cliArgs.push(assertSafePrTarget(args.pr));
+          }
           const res = await runPeer(cliArgs, directory);
           return { content: res.stdout.trim() || res.stderr.trim() };
         },
@@ -239,10 +258,11 @@ export default {
           additionalProperties: false,
         },
         async execute(args) {
-          const cliArgs = ["analyze", String(args.pr), "--json"];
-          if (typeof args.tools === "string" && args.tools) cliArgs.push("--tools", args.tools);
+          const cliArgs = ["analyze", assertSafePrTarget(args.pr), "--json"];
+          if (typeof args.tools === "string" && args.tools)
+            cliArgs.push("--tools", assertNonFlagArg(args.tools, "tools"));
           if (typeof args.profile === "string" && args.profile)
-            cliArgs.push("--profile", args.profile);
+            cliArgs.push("--profile", assertNonFlagArg(args.profile, "profile"));
           if (args.fresh === true) cliArgs.push("--fresh");
           const res = await runPeer(cliArgs, directory);
           if (res.exitCode !== 0) {
@@ -267,7 +287,8 @@ export default {
             },
             from: {
               type: "string",
-              description: "Path to agent review Markdown/JSON file or directory of cohort .md files",
+              description:
+                "Path to agent review Markdown/JSON file or directory of cohort .md files",
             },
             verdicts: {
               type: "string",
@@ -280,7 +301,8 @@ export default {
             },
             strict: {
               type: "boolean",
-              description: "Fail if any finding blocks are malformed or expected cohort files are missing",
+              description:
+                "Fail if any finding blocks are malformed or expected cohort files are missing",
             },
             profile: {
               type: "string",
@@ -301,18 +323,20 @@ export default {
           additionalProperties: false,
         },
         async execute(args) {
-          const cliArgs = ["finalize", String(args.pr), "--json"];
-          if (typeof args.from === "string" && args.from) cliArgs.push("--from", args.from);
+          const cliArgs = ["finalize", assertSafePrTarget(args.pr), "--json"];
+          if (typeof args.from === "string" && args.from)
+            cliArgs.push("--from", assertNonFlagArg(args.from, "from"));
           if (typeof args.verdicts === "string" && args.verdicts)
-            cliArgs.push("--verdicts", args.verdicts);
-          if (typeof args.stage === "string" && args.stage) cliArgs.push("--stage", args.stage);
+            cliArgs.push("--verdicts", assertNonFlagArg(args.verdicts, "verdicts"));
+          if (typeof args.stage === "string" && args.stage)
+            cliArgs.push("--stage", assertNonFlagArg(args.stage, "stage"));
           if (args.strict === true) cliArgs.push("--strict");
           if (typeof args.profile === "string" && args.profile)
-            cliArgs.push("--profile", args.profile);
+            cliArgs.push("--profile", assertNonFlagArg(args.profile, "profile"));
           if (typeof args.excludeTools === "string" && args.excludeTools)
-            cliArgs.push("--exclude-tools", args.excludeTools);
+            cliArgs.push("--exclude-tools", assertNonFlagArg(args.excludeTools, "excludeTools"));
           if (typeof args.minSeverity === "string" && args.minSeverity)
-            cliArgs.push("--min-severity", args.minSeverity);
+            cliArgs.push("--min-severity", assertNonFlagArg(args.minSeverity, "minSeverity"));
           const res = await runPeer(cliArgs, directory);
           if (res.exitCode !== 0) {
             throw new Error(
@@ -343,7 +367,7 @@ export default {
           additionalProperties: false,
         },
         async execute(args) {
-          const cliArgs = ["publish", String(args.pr), "--json"];
+          const cliArgs = ["publish", assertSafePrTarget(args.pr), "--json"];
           if (args.submit === true) cliArgs.push("--submit");
           const res = await runPeer(cliArgs, directory);
           if (res.exitCode !== 0) {

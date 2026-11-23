@@ -223,10 +223,16 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     if (parsed.positionals[0] === "restore") {
       const res = await restoreInterruptedSession(repoRoot);
-      if (res.restored) {
-        writeOut(`Restored repository HEAD to \`${res.originalRef}\`.`);
-      } else {
-        writeOut("No interrupted peer checkout session found.");
+      if (isJson) {
+        writeOut(JSON.stringify(res, null, 2));
+        return 0;
+      }
+      if (!isQuiet) {
+        if (res.restored) {
+          writeOut(`Restored repository HEAD to \`${res.originalRef}\`.`);
+        } else {
+          writeOut("No interrupted peer checkout session found.");
+        }
       }
       return 0;
     }
@@ -255,6 +261,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         learningStore,
         writeOut,
         writeErr,
+        { json: isJson, quiet: isQuiet },
       );
     }
 

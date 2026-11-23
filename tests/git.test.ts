@@ -282,4 +282,28 @@ describe("Task 02: Git session and checkpoint store", () => {
     expect(loaded?.prNumber).toBe(77);
     expect(loaded?.lastReviewedHeadSha).toBe(headSha);
   });
+
+  test("RC-01 & RC-02: rejects git option injection in SHAs/refs and symlink escapes in .peer/", async () => {
+    const repo = await createTempGitRepo();
+    const { assertSafeGitSha, assertSafeGitRef, assertContainedNonSymlinkDir } =
+      await import("../src/workspace/git.ts");
+
+    expect(() => assertSafeGitSha("--upload-pack=touch /tmp/pwn")).toThrow();
+    expect(() => assertSafeGitSha("../../etc/passwd")).toThrow();
+    expect(() => assertSafeGitRef("--upload-pack=touch /tmp/pwn")).toThrow();
+    expect(() => assertSafeGitRef("refs/heads/main..evil")).toThrow();
+    expect(assertSafeGitSha("dcf6f7e45b784af475641d7a6b1fc7a09e3c2dac")).toBe(
+      "dcf6f7e45b784af475641d7a6b1fc7a09e3c2dac",
+    );
+    expect(assertSafeGitRef("feat/rust-reviewer")).toBe("feat/rust-reviewer");
+
+    const { symlinkSync } = await import("node:fs");
+    const outsideDir = await mkdtemp(join(tmpdir(), "peer-outside-"));
+    tempDirs.push(outsideDir);
+    symlinkSync(outsideDir, join(repo, ".peer"));
+
+    expect(() => assertContainedNonSymlinkDir(repo, join(repo, ".peer", "1", "dcf6f7e"))).toThrow(
+      /Refusing to follow symbolic link/,
+    );
+  });
 });

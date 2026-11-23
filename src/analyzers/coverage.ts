@@ -114,10 +114,7 @@ export async function parseLlvmCovJson(
     });
   }
 
-  const fileDeltas: FileCoverageDelta[] = [];
-  let totalChangedExecutableLines = 0;
-  let totalUncoveredChangedLines = 0;
-
+  const mergedSegmentsByFile = new Map<string, LlvmCovSegment[][]>();
   for (const dataEntry of parsed.data ?? []) {
     for (const fileEntry of dataEntry.files ?? []) {
       if (!fileEntry.filename || !fileEntry.segments) {
@@ -128,73 +125,115 @@ export async function parseLlvmCovJson(
       if (!diffFile || isRustTestOrBenchPath(relPath)) {
         continue;
       }
+      const list = mergedSegmentsByFile.get(relPath) ?? [];
+      list.push(fileEntry.segments);
+      mergedSegmentsByFile.set(relPath, list);
+    }
+  }
 
-      const changedLines = new Set<number>();
-      for (const hunk of diffFile.hunks) {
+  const fileDeltas: FileCoverageDelta[] = [];
+  let totalChangedExecutableLines = 0;
+  let totalUncoveredChangedLines = 0;
+
+  for (const [relPath, segmentLists] of mergedSegmentsByFile.entries()) {
+    const diffFile = diffMap[relPath];
+    if (!diffFile) continue;
+
+    // Extract added lines (`+`) from annotatedLines; fall back to rightSideLines only if annotatedLines is empty
+    const changedLines = new Set<number>();
+    for (const hunk of diffFile.hunks) {
+      let sawAnnotated = false;
+      for (const ann of hunk.annotatedLines) {
+        const m = /^L(\d+)\s+\(\+\):/.exec(ann);
+        if (m?.[1]) {
+          sawAnnotated = true;
+          changedLines.add(Number.parseInt(m[1], 10));
+        } else if (/^L\d+\s+\( \):/.test(ann)) {
+          sawAnnotated = true;
+        }
+      }
+      if (!sawAnnotated) {
         for (const line of hunk.rightSideLines) {
           changedLines.add(line);
         }
       }
-      if (changedLines.size === 0) {
-        continue;
-      }
+    }
+    if (changedLines.size === 0) {
+      continue;
+    }
 
-      // Exclude inline #[cfg(test)] regions using Tree-sitter AST when file exists on disk
-      let testRegions: readonly { startLine: number; endLine: number }[] = [];
-      const diskFile = Bun.file(join(repoRoot, relPath));
-      if (await diskFile.exists()) {
-        try {
-          const ast = await analyzeRustSourceAst(await diskFile.text());
-          testRegions = ast.testRegions;
-        } catch {
-          // Proceed without AST test-region exclusion if file cannot be parsed
-        }
+    // Exclude inline #[cfg(test)] regions using Tree-sitter AST when file exists on disk
+    let testRegions: readonly { startLine: number; endLine: number }[] = [];
+    const diskFile = Bun.file(join(repoRoot, relPath));
+    if (await diskFile.exists()) {
+      try {
+        const ast = await analyzeRustSourceAst(await diskFile.text());
+        testRegions = ast.testRegions;
+      } catch {
+        // Proceed without AST test-region exclusion if file cannot be parsed
       }
+    }
 
-      const lineHitMax = new Map<number, number>();
-      for (const seg of fileEntry.segments) {
+    const lineHitMax = new Map<number, number>();
+    const recordLineHit = (line: number, count: number) => {
+      if (!changedLines.has(line) || isLineInRegions(line, testRegions)) {
+        return;
+      }
+      const prev = lineHitMax.get(line) ?? 0;
+      if (count > prev || !lineHitMax.has(line)) {
+        lineHitMax.set(line, Math.max(prev, count));
+      }
+    };
+
+    for (const segments of segmentLists) {
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        if (!seg) continue;
         const line = seg[0];
         const count = seg[2];
         const hasCount = Boolean(seg[3]);
-        if (!hasCount || typeof line !== "number" || line < 1) {
+        const isGapRegion = Boolean(seg[5]);
+        if (!hasCount || isGapRegion || typeof line !== "number" || line < 1) {
           continue;
         }
-        if (!changedLines.has(line) || isLineInRegions(line, testRegions)) {
-          continue;
-        }
-        const prev = lineHitMax.get(line) ?? 0;
-        if (count > prev || !lineHitMax.has(line)) {
-          lineHitMax.set(line, Math.max(prev, count));
+        recordLineHit(line, count);
+        // Propagate RLE segment count across interior lines up to next segment's start line
+        const nextSeg = segments[i + 1];
+        const nextLine = nextSeg?.[0];
+        if (typeof nextLine === "number" && nextLine > line) {
+          for (let interior = line + 1; interior < nextLine; interior++) {
+            recordLineHit(interior, count);
+          }
         }
       }
-
-      const executableCount = lineHitMax.size;
-      if (executableCount === 0) {
-        continue;
-      }
-
-      const uncoveredLines = Array.from(lineHitMax.entries())
-        .filter(([, count]) => count === 0)
-        .map(([line]) => line)
-        .sort((a, b) => a - b);
-
-      const coveredCount = executableCount - uncoveredLines.length;
-      const pct = Math.round((coveredCount / executableCount) * 1000) / 10;
-
-      totalChangedExecutableLines += executableCount;
-      totalUncoveredChangedLines += uncoveredLines.length;
-
-      fileDeltas.push(
-        FileCoverageDeltaSchema.parse({
-          filePath: relPath,
-          changedExecutableLines: executableCount,
-          coveredChangedLines: coveredCount,
-          uncoveredLines,
-          uncoveredRanges: groupContiguousLines(uncoveredLines),
-          lineCoveragePercent: pct,
-        }),
-      );
     }
+
+    const executableCount = lineHitMax.size;
+    if (executableCount === 0) {
+      continue;
+    }
+
+    const uncoveredLines = Array.from(lineHitMax.entries())
+      .filter(([, count]) => count === 0)
+      .map(([line]) => line)
+      .sort((a, b) => a - b);
+
+    const coveredCount = executableCount - uncoveredLines.length;
+    const pct = Math.round((coveredCount / executableCount) * 1000) / 10;
+
+    totalChangedExecutableLines += executableCount;
+    totalUncoveredChangedLines += uncoveredLines.length;
+
+    fileDeltas.push(
+      FileCoverageDeltaSchema.parse({
+        filePath: relPath,
+        changedExecutableLines: executableCount,
+        coveredChangedLines: coveredCount,
+        uncoveredLines,
+        uncoveredRanges: groupContiguousLines(uncoveredLines),
+        lineCoveragePercent: pct,
+      }),
+    );
   }
 
   fileDeltas.sort((a, b) => b.uncoveredLines.length - a.uncoveredLines.length);
@@ -248,7 +287,9 @@ export async function collectCargoLlvmCovReport(
   if (
     exitCode !== 0 &&
     !stdout.includes('"data"') &&
-    /no such command:\s*`?llvm-cov`?|not found|ENOENT/i.test(combined)
+    /(?:^|\n)error:\s*no such command:\s*`?llvm-cov`?|cargo-llvm-cov:\s*(?:command )?not found/i.test(
+      combined,
+    )
   ) {
     throw new CargoLlvmCovMissingError();
   }

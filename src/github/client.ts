@@ -185,7 +185,7 @@ export class GitHubClient {
       owner,
       repo,
       state: "open",
-      per_page: limit,
+      per_page: Math.min(100, Math.max(1, limit)),
       sort: "updated",
       direction: "desc",
     });
@@ -256,6 +256,14 @@ export class GitHubClient {
   ): Promise<number> {
     const ensuredBody = body.includes(WALKTHROUGH_MARKER) ? body : `${WALKTHROUGH_MARKER}\n${body}`;
 
+    let myLogin: string | null = null;
+    try {
+      const me = await this.octokit.rest.users.getAuthenticated();
+      myLogin = me.data.login;
+    } catch {
+      // GITHUB_TOKEN / App installation tokens return 403 on GET /user; proceed without user filter
+    }
+
     const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
       owner,
       repo,
@@ -263,15 +271,22 @@ export class GitHubClient {
       per_page: 100,
     });
 
-    const existing = comments.find((c) => c.body?.includes(WALKTHROUGH_MARKER));
+    const existing =
+      (myLogin
+        ? comments.find((c) => c.user?.login === myLogin && c.body?.includes(WALKTHROUGH_MARKER))
+        : null) ?? comments.find((c) => c.body?.includes(WALKTHROUGH_MARKER));
     if (existing) {
-      const updated = await this.octokit.rest.issues.updateComment({
-        owner,
-        repo,
-        comment_id: existing.id,
-        body: ensuredBody,
-      });
-      return updated.data.id;
+      try {
+        const updated = await this.octokit.rest.issues.updateComment({
+          owner,
+          repo,
+          comment_id: existing.id,
+          body: ensuredBody,
+        });
+        return updated.data.id;
+      } catch {
+        // If existing marker comment was posted by another user (403), fall through and create our own comment
+      }
     }
 
     const created = await this.octokit.rest.issues.createComment({
@@ -291,27 +306,38 @@ export class GitHubClient {
   // prior PENDING review owned by the same user that carries `PEER_REVIEW_MARKER`
   // before creating a fresh one — leaving manually authored human PENDING drafts untouched.
   public async postPrReview(options: PostPrReviewOptions): Promise<number> {
-    const me = await this.octokit.rest.users.getAuthenticated();
-    const myLogin = me.data.login;
+    let myLogin: string | null = null;
+    try {
+      const me = await this.octokit.rest.users.getAuthenticated();
+      myLogin = me.data.login;
+    } catch (err) {
+      if (!options.submit) {
+        throw err;
+      }
+      // When submit=true (public COMMENT review), GITHUB_TOKEN in Actions cannot call GET /user (403)
+      // and does not create PENDING draft reviews, so we can proceed directly to createReview.
+    }
 
-    const existingReviews = await this.octokit.paginate(this.octokit.rest.pulls.listReviews, {
-      owner: options.owner,
-      repo: options.repo,
-      pull_number: options.prNumber,
-      per_page: 100,
-    });
+    if (myLogin) {
+      const existingReviews = await this.octokit.paginate(this.octokit.rest.pulls.listReviews, {
+        owner: options.owner,
+        repo: options.repo,
+        pull_number: options.prNumber,
+        per_page: 100,
+      });
 
-    for (const review of existingReviews) {
-      if (review.state === "PENDING" && review.user?.login === myLogin) {
-        if (review.body?.includes(PEER_REVIEW_MARKER)) {
-          await this.octokit.rest.pulls.deletePendingReview({
-            owner: options.owner,
-            repo: options.repo,
-            pull_number: options.prNumber,
-            review_id: review.id,
-          });
-        } else {
-          throw new ExistingManualPendingReviewError(review.id, options.prNumber);
+      for (const review of existingReviews) {
+        if (review.state === "PENDING" && review.user?.login === myLogin) {
+          if (review.body?.includes(PEER_REVIEW_MARKER)) {
+            await this.octokit.rest.pulls.deletePendingReview({
+              owner: options.owner,
+              repo: options.repo,
+              pull_number: options.prNumber,
+              review_id: review.id,
+            });
+          } else {
+            throw new ExistingManualPendingReviewError(review.id, options.prNumber);
+          }
         }
       }
     }

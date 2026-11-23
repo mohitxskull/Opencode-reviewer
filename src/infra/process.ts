@@ -1,6 +1,6 @@
 import { registerSignalCleanup } from "./lifecycle.ts";
 
-export const DEFAULT_ANALYZER_TIMEOUT_MS = 10 * 60 * 1000;
+export const DEFAULT_ANALYZER_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_VERIFIER_TIMEOUT_MS = 2 * 60 * 1000;
 
 export interface TrackedCommandOptions {
@@ -16,10 +16,18 @@ export interface TrackedCommandResult {
   readonly timedOut: boolean;
 }
 
+function forceKillProcessTree(proc: ReturnType<typeof Bun.spawn>): void {
+  try {
+    proc.kill("SIGKILL");
+  } catch {
+    // Process may already have exited
+  }
+}
+
 /**
  * Spawns a subprocess with LIFO SIGINT/SIGTERM cleanup registration (so active
  * `cargo` processes are killed before outer `git checkout -f` runs) and an
- * enforced timeout so hung builds/Miri tests never stall indefinitely.
+ * enforced timeout with SIGKILL escalation so hung builds never stall indefinitely.
  */
 export async function runTrackedCommand(
   cmd: readonly string[],
@@ -33,25 +41,25 @@ export async function runTrackedCommand(
   });
 
   let timedOut = false;
+  let killEscalationTimer: ReturnType<typeof setTimeout> | null = null;
   const timeoutMs = options.timeoutMs ?? DEFAULT_ANALYZER_TIMEOUT_MS;
   const timer =
     timeoutMs > 0
       ? setTimeout(() => {
           timedOut = true;
           try {
-            proc.kill();
+            proc.kill("SIGTERM");
           } catch {
             // Process may already have exited
           }
+          killEscalationTimer = setTimeout(() => {
+            forceKillProcessTree(proc);
+          }, 200);
         }, timeoutMs)
       : null;
 
   const unregister = registerSignalCleanup(() => {
-    try {
-      proc.kill();
-    } catch {
-      // Best-effort process cleanup on SIGINT/SIGTERM
-    }
+    forceKillProcessTree(proc);
   });
 
   try {
@@ -71,6 +79,9 @@ export async function runTrackedCommand(
   } finally {
     if (timer) {
       clearTimeout(timer);
+    }
+    if (killEscalationTimer) {
+      clearTimeout(killEscalationTimer);
     }
     unregister();
   }

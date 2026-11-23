@@ -24,7 +24,7 @@ export class MiriMissingError extends Error {
 }
 
 export const MiriDiagnosticSchema = z.object({
-  kind: z.enum(["undefined_behavior", "memory_leak", "other"]),
+  kind: z.enum(["undefined_behavior", "memory_leak"]),
   message: z.string().min(1),
   filePath: z.string().default("src/lib.rs"),
   line: z.number().int().min(1).default(1),
@@ -204,7 +204,7 @@ export async function collectMiriReport(
   if (
     exitCode !== 0 &&
     !combined.includes("Undefined Behavior:") &&
-    /no such command:\s*`?miri`?|toolchain 'nightly' is not installed|component 'miri'|not found|ENOENT/i.test(
+    /(?:^|\n)error:\s*no such command:\s*`?miri`?|toolchain 'nightly' is not installed|component 'miri'[^\n]*not installed|can't find crate for `std`[^\n]*miri/i.test(
       combined,
     )
   ) {

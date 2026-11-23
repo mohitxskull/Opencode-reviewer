@@ -18,7 +18,12 @@ import {
 } from "../analyzers/rust.ts";
 import { CargoAuditMissingError, collectSecurityAdvisories } from "../analyzers/security.ts";
 import { collectCargoSemverViolations, semverViolationsToFindings } from "../analyzers/semver.ts";
-import { filterCodeOnlyDiffMap, findSensitiveFiles, parseUnifiedDiff } from "../domain/diff.ts";
+import {
+  extractAllDiffPaths,
+  filterCodeOnlyDiffMap,
+  findSensitiveFiles,
+  parseUnifiedDiff,
+} from "../domain/diff.ts";
 import {
   type Finding,
   FindingSchema,
@@ -158,19 +163,17 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
   };
 
   const runDenyWithPolicy = async () => {
-    if (modifiedFiles.size === 0) {
+    if (modifiedFiles.size === 0 || !enabledTools.has("deny")) {
       return [];
     }
     const hasConfig = await hasCargoDenyConfig(repoRoot);
     if (!hasConfig) {
-      if (enabledTools.has("deny")) {
-        toolOutcomes.deny = {
-          status: "skipped",
-          findingsCount: 0,
-          reason: "missing_config",
-          remediationCommand: "cargo deny init",
-        };
-      }
+      toolOutcomes.deny = {
+        status: "skipped",
+        findingsCount: 0,
+        reason: "missing_config",
+        remediationCommand: "cargo deny init",
+      };
       return [];
     }
     try {
@@ -226,7 +229,7 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     crateGraph,
   });
 
-  const sensitiveFileFindings = findSensitiveFiles(Object.keys(rawDiffMap)).map((filePath) =>
+  const sensitiveFileFindings = findSensitiveFiles(extractAllDiffPaths(diffText)).map((filePath) =>
     FindingSchema.parse({
       id: `audit-sensitive-file-${filePath.replace(/[^a-z0-9]+/gi, "-")}`,
       filePath,
@@ -262,7 +265,14 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
   const coverageFindings = coverageReport ? coverageReportToFindings(coverageReport) : [];
   const miriFindings = miriReport ? miriReportToFindings(miriReport) : [];
 
-  toolOutcomes.clippy ??= { status: "ok", findingsCount: clippyFindings.length };
+  toolOutcomes.clippy ??=
+    modifiedFiles.size === 0 || !peerConfig.tools.clippy
+      ? {
+          status: "skipped",
+          findingsCount: 0,
+          reason: modifiedFiles.size === 0 ? "no_modified_files" : "not_enabled",
+        }
+      : { status: "ok", findingsCount: clippyFindings.length };
   toolOutcomes.audit ??= { status: "ok", findingsCount: auditFindings.length };
   if (enabledTools.has("deny") && !toolOutcomes.deny) {
     toolOutcomes.deny = { status: "ok", findingsCount: denyFindings.length };
@@ -291,11 +301,15 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     ...coverageFindings,
     ...miriFindings,
     ...astFindings,
-    ...sensitiveFileFindings,
   ];
 
   const partitioned = partitionAndFilterFindings(rawFindings, diffMap, profile);
-  const allActionable = [...partitioned.inlineFindings, ...partitioned.outsideDiffFindings];
+  // Always surface sensitive-file modifications in `allActionable` regardless of profile (`chill`/`quiet`)
+  const allActionable = [
+    ...partitioned.inlineFindings,
+    ...partitioned.outsideDiffFindings,
+    ...sensitiveFileFindings,
+  ];
 
   if (updateBaseline) {
     const baselinePath = await saveBaselineFingerprints(repoRoot, allActionable);

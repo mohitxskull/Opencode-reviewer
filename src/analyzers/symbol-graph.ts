@@ -2,6 +2,7 @@ import { join } from "node:path";
 
 import type { DiffFileMap } from "../domain/models.ts";
 import { isRustTestOrBenchPath } from "../domain/paths.ts";
+import { runTrackedCommand } from "../infra/process.ts";
 import { analyzeRustSourceAst, isLineInRegions, type RustAstAnalysis } from "./ast.ts";
 
 export type RustSymbolKind = "fn" | "struct" | "enum" | "trait";
@@ -234,17 +235,10 @@ export async function buildRustSymbolGraph(
     patternArgs.push("-e", name);
   }
 
-  const proc = Bun.spawn(["git", "grep", "-n", "-w", "--no-color", ...patternArgs, "--", "*.rs"], {
-    cwd: repoRoot,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const [stdoutText, , exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  const { stdout: stdoutText, exitCode } = await runTrackedCommand(
+    ["git", "grep", "-n", "-w", "--no-color", ...patternArgs, "--", "*.rs"],
+    { cwd: repoRoot },
+  );
 
   const prodByKey = new Map<string, SymbolReferenceLocation[]>();
   const testByKey = new Map<string, SymbolReferenceLocation[]>();
@@ -281,7 +275,18 @@ export async function buildRustSymbolGraph(
         continue;
       }
 
-      const fileAst = astByFile.get(filePath);
+      let fileAst = astByFile.get(filePath);
+      if (!fileAst && !isRustTestOrBenchPath(filePath)) {
+        const diskFile = Bun.file(join(repoRoot, filePath));
+        if (await diskFile.exists()) {
+          try {
+            fileAst = await analyzeRustSourceAst(await diskFile.text());
+            astByFile.set(filePath, fileAst);
+          } catch {
+            // Proceed without AST if file cannot be parsed
+          }
+        }
+      }
       const isInlineTestRef = fileAst ? isLineInRegions(lineNo, fileAst.testRegions) : false;
 
       for (const { sym, key, wordRegex, declRegex } of compiledBySymbol) {

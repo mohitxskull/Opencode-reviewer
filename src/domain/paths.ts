@@ -25,15 +25,30 @@ export function matchRepoGlob(pattern: string, filePath: string): boolean {
   const normalizedPath = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
   const normalizedPattern = pattern.trim().replace(/\\/g, "/").replace(/^\.\//, "");
   if (!normalizedPattern) {
-    return true;
+    return false;
   }
 
   const candidates = new Set<string>([normalizedPattern]);
-  if (normalizedPattern.includes("/**/")) {
-    candidates.add(normalizedPattern.replace(/\/\*\*\//g, "/"));
-  }
-  if (normalizedPattern.startsWith("**/")) {
-    candidates.add(normalizedPattern.slice(3));
+  // Iteratively collapse zero-segment `/**/` and leading `**/` so multi-`**` globs like `**/a/**/b` match `a/b`
+  let added = true;
+  while (added) {
+    added = false;
+    for (const c of Array.from(candidates)) {
+      if (c.includes("/**/")) {
+        const next = c.replace("/**/", "/");
+        if (!candidates.has(next)) {
+          candidates.add(next);
+          added = true;
+        }
+      }
+      if (c.startsWith("**/")) {
+        const next = c.slice(3);
+        if (next && !candidates.has(next)) {
+          candidates.add(next);
+          added = true;
+        }
+      }
+    }
   }
   if (normalizedPattern.endsWith("/**")) {
     const prefix = normalizedPattern.slice(0, -3);
