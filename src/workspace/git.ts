@@ -65,7 +65,7 @@ export async function ensurePeerWorkspaceExcluded(repoRoot: string): Promise<voi
       .map((l) => l.trim()),
   );
 
-  const requiredEntries = [".peer/*", "!.peer/learnings.json"];
+  const requiredEntries = [".peer/*", "!.peer/learnings.json", "!.peer/baseline.json"];
   const missing = requiredEntries.filter((e) => !lines.has(e));
   if (missing.length > 0) {
     const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";

@@ -11,6 +11,7 @@ import {
 } from "../domain/models.ts";
 import { GitHubClient, parsePrTarget, resolveGitHubToken } from "../github/client.ts";
 import { type OptionalTool, runAnalyzeStage } from "../pipeline/analyze.ts";
+import { runCheckGate } from "../pipeline/check.ts";
 import { runFinalizeStage } from "../pipeline/finalize.ts";
 import { runPublishStage } from "../pipeline/publish.ts";
 import { formatTerminalReport } from "../render/terminal.ts";
@@ -48,6 +49,7 @@ const COMMANDS = new Set<CliCommand>(["analyze", "finalize", "publish"]);
 const HELP_TEXT = `peer — Agent-Agnostic Rust PR Ground-Truth & Verification Engine
 
 Commands:
+  peer check [--base <ref>]        Local deterministic gate (0 GitHub token, 0 LLM; supports --sarif & baseline)
   peer analyze  [PR]               Stage 1: Deterministic Rust analysis -> .peer/<pr>/<sha>/01-analyze/ (default)
   peer finalize [PR] --from <file> Stage 2/3: Judge merge + cargo check suggestion verifier -> review.md
   peer finalize [PR] --verdicts <f> Stage 3: Apply skeptic verdicts deterministically -> 03-verify/
@@ -63,6 +65,9 @@ Options:
   --repo <path>              Target local Rust git repository (default: cwd)
   --profile <profile>        Strictness profile: quiet | chill | assertive (default: assertive)
   --tools <list|all>         Optional Cargo analyzers: deny,geiger,semver,coverage,miri or all
+  --base <ref>               For 'check': base git ref to diff against (default: main -> master -> HEAD~1)
+  --sarif <path>             For 'check': write SARIF 2.1.0 report to file
+  --update-baseline          For 'check': record current findings into .peer/baseline.json
   --from <file>              For 'finalize': agent review output file (Structured Markdown or JSON)
   --verdicts <file>          For 'finalize': skeptic verdicts file to filter Stage 2 findings
   --stage <review|verify>    For 'finalize': target stage folder (default: review)
@@ -121,6 +126,9 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         repo: { type: "string" },
         profile: { type: "string" },
         tools: { type: "string" },
+        base: { type: "string" },
+        sarif: { type: "string" },
+        "update-baseline": { type: "boolean", default: false },
         from: { type: "string" },
         verdicts: { type: "string" },
         stage: { type: "string" },
@@ -145,6 +153,22 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     const repoRoot = resolveGitTopLevel(resolve(parsed.values.repo ?? process.cwd()));
     const learningStore = new LearningStore(repoRoot);
+
+    if (parsed.positionals[0] === "check") {
+      return await runCheckGate({
+        repoRoot,
+        baseRef: parsed.values.base,
+        profileOverride: parsed.values.profile
+          ? ReviewProfileSchema.parse(parsed.values.profile)
+          : undefined,
+        cliTools: parseToolsOption(parsed.values.tools),
+        sarifPath: parsed.values.sarif,
+        updateBaseline: parsed.values["update-baseline"] ?? false,
+        strict: parsed.values.strict ?? false,
+        writeOut,
+        writeErr,
+      });
+    }
 
     if (parsed.positionals[0] === "restore") {
       const res = await restoreInterruptedSession(repoRoot);

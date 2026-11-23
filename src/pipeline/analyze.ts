@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { collectAstDeterministicFindings } from "../analyzers/ast-detectors.ts";
 import {
   collectCargoLlvmCovReport,
   type CoverageReport,
@@ -270,6 +271,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         lockDiff,
         denyDiagnostics,
         builtGraph,
+        astFindings,
       ] = await Promise.all([
         collectCrateGraph(repoRoot),
         modifiedFiles.size > 0 && peerConfig.tools.clippy
@@ -281,6 +283,9 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         modifiedFiles.size > 0
           ? buildRustSymbolGraph(repoRoot, diffMap)
           : Promise.resolve({ nodes: [] }),
+        modifiedFiles.size > 0
+          ? collectAstDeterministicFindings(repoRoot, diffMap)
+          : Promise.resolve([]),
       ]);
 
       symbolGraph = builtGraph;
@@ -359,6 +364,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         ...semverFindings,
         ...coverageFindings,
         ...miriFindings,
+        ...astFindings,
         ...sensitiveFileFindings,
       ];
 
