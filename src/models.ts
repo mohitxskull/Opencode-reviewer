@@ -229,7 +229,7 @@ export const SecurityAdvisorySchema = z.object({
   cvss: z.string().nullable().default(null),
   patchedVersions: z.array(z.string()).default([]),
   affectedFunctions: z.array(z.string()).default([]),
-  source: z.enum(["cargo-audit", "osv"]).default("cargo-audit"),
+  source: z.literal("cargo-audit").default("cargo-audit"),
 });
 export type SecurityAdvisory = z.infer<typeof SecurityAdvisorySchema>;
 
