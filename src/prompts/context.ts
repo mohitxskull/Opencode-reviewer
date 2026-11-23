@@ -14,6 +14,7 @@ import type {
 } from "../models.ts";
 import { resolveFileArchitecturalLayer } from "../rust.ts";
 import { formatSecurityAdvisoriesPromptSection } from "../security.ts";
+import { type CoverageReport, formatCoveragePromptSection } from "../tools/coverage.ts";
 import { formatGeigerPromptSection, type GeigerReport } from "../tools/geiger.ts";
 import { formatSemverPromptSection, type SemverViolation } from "../tools/semver.ts";
 import {
@@ -37,6 +38,7 @@ export interface ReviewContext {
   readonly securityAdvisories?: readonly SecurityAdvisory[];
   readonly geigerReport?: GeigerReport | null;
   readonly semverViolations?: readonly SemverViolation[];
+  readonly coverageReport?: CoverageReport | null;
   readonly symbolGraph?: RustSymbolGraph;
   readonly learnings?: readonly RepoLearning[];
   readonly auditLogger?: AuditLogger;
@@ -175,6 +177,10 @@ export function buildReviewContextPrompt(
 
   if (context.semverViolations && context.semverViolations.length > 0) {
     sections.push(formatSemverPromptSection(context.semverViolations));
+  }
+
+  if (context.coverageReport) {
+    sections.push(formatCoveragePromptSection(context.coverageReport));
   }
 
   if (context.clippyDiagnostics.length > 0) {
