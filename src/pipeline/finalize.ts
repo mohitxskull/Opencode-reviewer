@@ -13,6 +13,8 @@ import {
   type ReviewBundle,
   ReviewBundleSchema,
   type ReviewProfile,
+  type Severity,
+  SEVERITY_RANK,
   type WalkthroughReport,
 } from "../domain/models.ts";
 import { partitionAndFilterFindings } from "../judge/partition.ts";
@@ -42,6 +44,8 @@ export interface FinalizeStageInput {
   readonly strict?: boolean;
   readonly noCheckout?: boolean;
   readonly profile: ReviewProfile;
+  readonly excludeTools?: ReadonlySet<string>;
+  readonly minSeverity?: Severity;
   readonly configHash?: string;
   readonly runStartMs: number;
   readonly auditLogger: AuditLogger;
@@ -171,6 +175,33 @@ async function resolveAgentInputFiles(fromSpec: string): Promise<string[]> {
   return files;
 }
 
+function shouldIncludeFinding(
+  f: Finding,
+  excludeTools?: ReadonlySet<string>,
+  minSeverity?: Severity,
+): boolean {
+  if (minSeverity && SEVERITY_RANK[f.severity] > SEVERITY_RANK[minSeverity]) {
+    return false;
+  }
+  if (excludeTools && excludeTools.size > 0) {
+    if (excludeTools.has("all") && /^audit-(?:coverage|semver|geiger|deny|miri)-/.test(f.id)) {
+      return false;
+    }
+    for (const tool of excludeTools) {
+      if (f.id.startsWith(`audit-${tool}-`)) {
+        return false;
+      }
+      if (tool === "ast" && f.id.startsWith("audit-ast-")) {
+        return false;
+      }
+      if (tool === "clippy" && f.source === "clippy") {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 export async function runFinalizeStage(input: FinalizeStageInput): Promise<FinalizeStageResult> {
   const {
     repoRoot,
@@ -181,6 +212,8 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     strict = false,
     noCheckout = false,
     profile,
+    excludeTools,
+    minSeverity,
     configHash = "default",
     runStartMs,
     auditLogger,
@@ -217,8 +250,13 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     const droppedIds: string[] = [];
     const lockedDropIgnoredIds: string[] = [];
     const matchedIds = new Set<string>();
-    const beforeCount =
-      reviewBundle.findings.length + (reviewBundle.outsideDiffFindings?.length ?? 0);
+    const eligibleInline = reviewBundle.findings.filter((f) =>
+      shouldIncludeFinding(f, excludeTools, minSeverity),
+    );
+    const eligibleOutside = (reviewBundle.outsideDiffFindings ?? []).filter((f) =>
+      shouldIncludeFinding(f, excludeTools, minSeverity),
+    );
+    const beforeCount = eligibleInline.length + eligibleOutside.length;
 
     const filterList = (list: readonly Finding[]): Finding[] => {
       const kept: Finding[] = [];
@@ -255,8 +293,8 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
 
     const updatedBundle = ReviewBundleSchema.parse({
       ...reviewBundle,
-      findings: filterList(reviewBundle.findings),
-      outsideDiffFindings: filterList(reviewBundle.outsideDiffFindings ?? []),
+      findings: filterList(eligibleInline),
+      outsideDiffFindings: filterList(eligibleOutside),
       consideredAndRejected: [...(reviewBundle.consideredAndRejected ?? []), ...refutedItems],
       generatedAt: new Date().toISOString(),
     });
@@ -422,8 +460,15 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
         `▶ Finalizing agent review (${agentReview.findings.length} agent finding(s) + ${analyzeContext.deterministicFindings.length} deterministic finding(s)) and verifying suggestions with cargo check...`,
       );
 
+      const filteredDeterministic = analyzeContext.deterministicFindings.filter((f) =>
+        shouldIncludeFinding(f, excludeTools, minSeverity),
+      );
+      const filteredAgent = agentReview.findings.filter((f) =>
+        shouldIncludeFinding(f, excludeTools, minSeverity),
+      );
+
       const partitioned = partitionAndFilterFindings(
-        [...analyzeContext.deterministicFindings, ...agentReview.findings],
+        [...filteredDeterministic, ...filteredAgent],
         analyzeContext.diffMap,
         profile,
       );

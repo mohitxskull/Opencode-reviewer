@@ -97,11 +97,11 @@ describe("cargo-llvm-cov integration", () => {
     expect(prompt).toContain("12-13, 15");
 
     const findings = coverageReportToFindings(report);
-    expect(findings.length).toBe(2);
+    expect(findings.length).toBe(1);
     expect(findings[0]?.startLine).toBe(12);
     expect(findings[0]?.endLine).toBe(13);
-    expect(findings[1]?.startLine).toBe(15);
-    expect(findings[1]?.source).toBe("audit");
+    expect(findings[0]?.body).toContain("L12-L13, L15");
+    expect(findings[0]?.source).toBe("audit");
   });
 
   test("returns null when disabled and throws CargoLlvmCovMissingError when missing", async () => {

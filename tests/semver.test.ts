@@ -50,8 +50,10 @@ describe("cargo-semver-checks integration", () => {
     expect(prompt).toContain("src/api.rs:42");
 
     const findings = semverViolationsToFindings(violations);
-    expect(findings.length).toBe(4);
+    expect(findings.length).toBe(3);
     expect(findings[0]?.severity).toBe("Major");
+    expect(findings[0]?.body).toContain("my_crate::api::connect (L42)");
+    expect(findings[0]?.body).toContain("my_crate::api::disconnect (L88)");
     expect(findings[0]?.source).toBe("audit");
   });
 

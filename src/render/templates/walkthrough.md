@@ -14,6 +14,8 @@
 
 {{SUMMARY}}
 
+- **Substantive Review Findings (LLM + Core Compiler/AST/CVE):** {{CORE_REVIEW_COUNT}}{{CORE_BREAKDOWN_SUFFIX}}
+- **Optional Analyzer Diagnostics (coverage / semver / geiger / deny / miri):** {{OPTIONAL_TOOL_COUNT}}
 - **Total Findings:** {{TOTAL_FINDINGS_COUNT}} (Actionable: {{ACTIONABLE_COUNT}}{{BREAKDOWN_SUFFIX}} | Nitpicks: {{NITPICK_COUNT}})
 - **Actionable Inline Comments:** {{INLINE_COUNT}}
 - **Outside Diff Range Comments:** {{OUTSIDE_COUNT}}

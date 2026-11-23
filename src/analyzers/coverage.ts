@@ -276,39 +276,50 @@ export function formatCoveragePromptSection(report: CoverageReport): string {
   return `## Cargo LLVM-Cov (Changed-Line Test Coverage)\n${lines.join("\n")}`;
 }
 
+// Why: Emitting a separate Finding for every contiguous uncovered line range produces
+// 1,000+ rows on a multi-file PR (e.g. 20 tiny uncovered match/error arms per file),
+// drowning out substantive code review findings. Grouping uncovered ranges into at most
+// ONE finding per file keeps coverage actionable and compact.
 export function coverageReportToFindings(report: CoverageReport): Finding[] {
   const findings: Finding[] = [];
 
   for (const file of report.files) {
-    for (const range of file.uncoveredRanges) {
-      findings.push(
-        FindingSchema.parse({
-          id: `audit-coverage-${file.filePath}-${range.startLine}-${range.endLine}`,
-          filePath: file.filePath,
-          startLine: range.startLine,
-          endLine: range.endLine,
-          severity: "Minor",
-          type: "Bug",
-          epistemicState: "NEEDS-RUNTIME-VERIFICATION",
-          evidenceMechanism: "Correctness",
-          title: `Untested changed production code (${range.startLine === range.endLine ? `line ${range.startLine}` : `lines ${range.startLine}-${range.endLine}`})`,
-          body:
-            `\`cargo llvm-cov\` recorded 0 test executions on modified production lines ${range.startLine}..${range.endLine} in \`${file.filePath}\` ` +
-            `(file changed-line coverage: ${file.lineCoveragePercent}%). Add a unit or integration test exercising this branch.`,
-          rootCause: `Missing test coverage for modified production lines in ${file.filePath}`,
-          blastRadius: `Unverified behavior in ${file.filePath}`,
-          reversible: true,
-          dependsOn: null,
-          verificationCommand: "cargo llvm-cov --json",
-          traceability: `cargo-llvm-cov uncovered lines ${range.startLine}..${range.endLine}`,
-          suggestion: null,
-          suggestionVerified: false,
-          agentPrompt: `Add a deterministic test covering lines ${range.startLine}..${range.endLine} in \`${file.filePath}\`, then verify with \`cargo llvm-cov\`.`,
-          confidence: 1.0,
-          source: "audit",
-        }),
-      );
+    const firstRange = file.uncoveredRanges[0];
+    if (!firstRange || file.uncoveredLines.length === 0) {
+      continue;
     }
+    const rangeLabels = file.uncoveredRanges
+      .map((r) => (r.startLine === r.endLine ? `L${r.startLine}` : `L${r.startLine}-L${r.endLine}`))
+      .join(", ");
+    const rangeCount = file.uncoveredRanges.length;
+
+    findings.push(
+      FindingSchema.parse({
+        id: `audit-coverage-${file.filePath}-${firstRange.startLine}-${firstRange.endLine}`,
+        filePath: file.filePath,
+        startLine: firstRange.startLine,
+        endLine: firstRange.endLine,
+        severity: "Minor",
+        type: "Bug",
+        epistemicState: "NEEDS-RUNTIME-VERIFICATION",
+        evidenceMechanism: "Correctness",
+        title: `Untested changed production code in \`${file.filePath}\` (${file.lineCoveragePercent}% coverage, ${file.uncoveredLines.length}/${file.changedExecutableLines} lines uncovered)`,
+        body:
+          `\`cargo llvm-cov\` recorded 0 test executions on ${file.uncoveredLines.length} of ${file.changedExecutableLines} modified executable production lines (${file.lineCoveragePercent}% coverage) across ${rangeCount} range(s) in \`${file.filePath}\`: ${rangeLabels}. ` +
+          `Add unit or integration tests exercising these modified branches.`,
+        rootCause: `Missing test coverage for modified production lines in ${file.filePath} (${rangeLabels})`,
+        blastRadius: `Unverified behavior in ${file.filePath}`,
+        reversible: true,
+        dependsOn: null,
+        verificationCommand: "cargo llvm-cov --json",
+        traceability: `cargo-llvm-cov uncovered lines (${rangeLabels})`,
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: `Add deterministic tests covering the ${file.uncoveredLines.length} uncovered modified lines (${rangeLabels}) in \`${file.filePath}\`, then verify with \`cargo llvm-cov\`.`,
+        confidence: 1.0,
+        source: "audit",
+      }),
+    );
   }
 
   return findings;

@@ -1,6 +1,7 @@
 import {
   type Finding,
   type FindingType,
+  isOptionalAnalyzerFinding,
   PEER_REVIEW_MARKER,
   type ReviewBundle,
   type Severity,
@@ -178,13 +179,21 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
   const allActionable = [...bundle.findings, ...outside];
   const totalFindingsCount = allActionable.length + nitpicks.length;
 
-  const counts: Record<string, number> = {};
-  for (const item of allActionable) {
-    counts[item.severity] = (counts[item.severity] ?? 0) + 1;
-  }
-  const breakdown = Object.entries(counts)
-    .map(([sev, cnt]) => `${SEVERITY_EMOJI[sev as Severity] ?? ""} ${sev}: ${cnt}`)
-    .join(" | ");
+  const coreReviewFindings = allActionable.filter((f) => !isOptionalAnalyzerFinding(f));
+  const optionalToolFindings = allActionable.filter((f) => isOptionalAnalyzerFinding(f));
+
+  const formatSeverityBreakdown = (items: readonly Finding[]): string => {
+    const map: Record<string, number> = {};
+    for (const item of items) {
+      map[item.severity] = (map[item.severity] ?? 0) + 1;
+    }
+    return Object.entries(map)
+      .map(([sev, cnt]) => `${SEVERITY_EMOJI[sev as Severity] ?? ""} ${sev}: ${cnt}`)
+      .join(" | ");
+  };
+
+  const breakdown = formatSeverityBreakdown(allActionable);
+  const coreBreakdown = formatSeverityBreakdown(coreReviewFindings);
 
   const failedCohortsBanner =
     bundle.failedCohorts && bundle.failedCohorts.length > 0
@@ -203,30 +212,56 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
       ].join("\n")
     : "";
 
-  const rootCauseTable =
-    allActionable.length > 0
-      ? [
-          `### 1. Root-Cause Index Table`,
-          `| # | Severity | State | Mechanism | Confidence | Patch | Root Cause | Location | Blast Radius | Reversible? | Depends on |`,
-          `| :---: | :--- | :--- | :--- | :---: | :---: | :--- | :--- | :--- | :---: | :--- |`,
-          ...allActionable.map((f, i) => {
-            const sevIcon = SEVERITY_EMOJI[f.severity];
-            const confPct = `${Math.round(f.confidence * 100)}%`;
-            const patchBadge =
-              f.suggestion !== null && f.suggestionVerified
-                ? "`✓ cargo check`"
-                : f.suggestion !== null
-                  ? "`unverified`"
-                  : "—";
-            const rootCauseText = escapeTableCell(f.rootCause || f.title);
-            const locText = `\`${f.filePath}:${f.startLine}-${f.endLine}\``;
-            const blastText = escapeTableCell(f.blastRadius || "Local module");
-            const revText = f.reversible ? "Yes" : "No";
-            const depText = escapeTableCell(f.dependsOn ?? "—");
-            return `| \`F${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState ?? "VERIFIED-DEFECT"}\` | \`${f.evidenceMechanism ?? "Correctness"}\` | ${confPct} | ${patchBadge} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`;
-          }),
-        ].join("\n")
-      : "";
+  const renderIndexTableRows = (items: readonly Finding[], prefix: string): string[] =>
+    items.map((f, i) => {
+      const sevIcon = SEVERITY_EMOJI[f.severity];
+      const confPct = `${Math.round(f.confidence * 100)}%`;
+      const patchBadge =
+        f.suggestion !== null && f.suggestionVerified
+          ? "`✓ cargo check`"
+          : f.suggestion !== null
+            ? "`unverified`"
+            : "—";
+      const rootCauseText = escapeTableCell(f.rootCause || f.title);
+      const locText = `\`${f.filePath}:${f.startLine}-${f.endLine}\``;
+      const blastText = escapeTableCell(f.blastRadius || "Local module");
+      const revText = f.reversible ? "Yes" : "No";
+      const depText = escapeTableCell(f.dependsOn ?? "—");
+      return `| \`${prefix}${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState ?? "VERIFIED-DEFECT"}\` | \`${f.evidenceMechanism ?? "Correctness"}\` | ${confPct} | ${patchBadge} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`;
+    });
+
+  const tableHeader = [
+    `| # | Severity | State | Mechanism | Confidence | Patch | Root Cause | Location | Blast Radius | Reversible? | Depends on |`,
+    `| :---: | :--- | :--- | :--- | :---: | :---: | :--- | :--- | :--- | :---: | :--- |`,
+  ];
+
+  const rootCauseParts: string[] = [];
+  if (coreReviewFindings.length > 0) {
+    rootCauseParts.push(
+      `### 1. Root-Cause Index Table (Substantive Review Findings: ${coreReviewFindings.length})`,
+      ...tableHeader,
+      ...renderIndexTableRows(coreReviewFindings, "F"),
+    );
+  } else if (optionalToolFindings.length > 0) {
+    rootCauseParts.push(
+      `### 1. Root-Cause Index Table`,
+      `No substantive LLM/compiler/CVE defects found.`,
+    );
+  }
+
+  if (optionalToolFindings.length > 0) {
+    rootCauseParts.push(
+      "",
+      `<details>`,
+      `<summary><strong>1b. Optional Analyzer Diagnostics (${optionalToolFindings.length})</strong> — coverage, semver, geiger, deny, miri</summary>`,
+      "",
+      ...tableHeader,
+      ...renderIndexTableRows(optionalToolFindings, "T"),
+      "",
+      `</details>`,
+    );
+  }
+  const rootCauseTable = rootCauseParts.join("\n");
 
   const sortedChanges = [...walkthrough.changes].sort(
     (a, b) => a.layer - b.layer || a.filePath.localeCompare(b.filePath),
@@ -322,6 +357,9 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
     FAILED_COHORTS_BANNER: failedCohortsBanner,
     BASELINE_SECTION: baselineSection,
     SUMMARY: sanitizeMarkdownText(walkthrough.summary).trim(),
+    CORE_REVIEW_COUNT: String(coreReviewFindings.length),
+    CORE_BREAKDOWN_SUFFIX: coreBreakdown ? ` (${coreBreakdown})` : "",
+    OPTIONAL_TOOL_COUNT: String(optionalToolFindings.length),
     TOTAL_FINDINGS_COUNT: String(totalFindingsCount),
     ACTIONABLE_COUNT: String(allActionable.length),
     BREAKDOWN_SUFFIX: breakdown ? ` — ${breakdown}` : "",
@@ -462,20 +500,39 @@ export function renderPrReviewSummaryBody(bundle: ReviewBundle): string {
 }
 
 export function renderCombinedLocalReviewMarkdown(bundle: ReviewBundle): string {
-  const inlineFindingsBody =
-    bundle.findings.length === 0
-      ? "No inline diff comments for the active review profile."
-      : bundle.findings
+  const coreInline = bundle.findings.filter((f) => !isOptionalAnalyzerFinding(f));
+  const optionalInline = bundle.findings.filter((f) => isOptionalAnalyzerFinding(f));
+
+  const coreBlocks =
+    coreInline.length === 0
+      ? "No substantive inline diff comments for the active review profile."
+      : coreInline
           .map(
             (finding) =>
               `### \`${finding.filePath}:${finding.startLine}-${finding.endLine}\`\n\n${renderInlineFindingComment(finding)}`,
           )
           .join("\n\n");
 
+  const optionalBlocks =
+    optionalInline.length > 0
+      ? [
+          "",
+          "<details>",
+          `<summary><strong>Optional Analyzer Inline Diagnostics (${optionalInline.length})</strong> — coverage, semver, geiger, deny, miri</summary>`,
+          "",
+          ...optionalInline.map(
+            (f) =>
+              `- **[${f.severity} | ${f.type}]** \`${f.id}\` at \`${f.filePath}:${f.startLine}-${f.endLine}\` — ${sanitizeMarkdownText(f.title).trim()}`,
+          ),
+          "",
+          "</details>",
+        ].join("\n")
+      : "";
+
   return fillTemplate(combinedReviewTemplate, {
     WALKTHROUGH_MD: renderWalkthroughComment(bundle),
     REVIEW_SUMMARY_MD: renderPrReviewSummaryBody(bundle),
-    INLINE_COUNT: String(bundle.findings.length),
-    INLINE_FINDINGS_BODY: inlineFindingsBody,
+    INLINE_COUNT: String(coreInline.length),
+    INLINE_FINDINGS_BODY: `${coreBlocks}${optionalBlocks}`,
   });
 }

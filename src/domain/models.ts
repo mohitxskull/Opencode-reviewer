@@ -431,3 +431,33 @@ export function isValidInlineRange(
   }
   return fileMap.hunks.some((hunk) => startLine >= hunk.newStart && endLine <= hunk.newEnd);
 }
+
+export function isOptionalAnalyzerFinding(finding: Pick<Finding, "id">): boolean {
+  return /^audit-(?:coverage|semver|geiger|deny|miri)-/.test(finding.id);
+}
+
+export function countFindingsByOrigin(findings: readonly Finding[]): {
+  readonly substantiveReview: number;
+  readonly llmReview: number;
+  readonly coreDeterministic: number;
+  readonly optionalAnalyzers: number;
+} {
+  let llmReview = 0;
+  let coreDeterministic = 0;
+  let optionalAnalyzers = 0;
+  for (const f of findings) {
+    if (f.source === "soundness" || f.source === "idioms") {
+      llmReview += 1;
+    } else if (isOptionalAnalyzerFinding(f)) {
+      optionalAnalyzers += 1;
+    } else {
+      coreDeterministic += 1;
+    }
+  }
+  return {
+    substantiveReview: llmReview + coreDeterministic,
+    llmReview,
+    coreDeterministic,
+    optionalAnalyzers,
+  };
+}

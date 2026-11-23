@@ -183,36 +183,69 @@ export function formatSemverPromptSection(violations: readonly SemverViolation[]
   return `## Cargo SemVer Checks (Breaking Public API Changes)\n${lines.join("\n")}`;
 }
 
+// Why: A single SemVer lint (e.g. `function_missing` or `auto_trait_impl_removed`) can list
+// dozens of symbols inside the same file. Grouping by `(filePath, lint)` emits one finding
+// per file+lint listing all affected symbols instead of flooding the report with N rows per file.
 export function semverViolationsToFindings(violations: readonly SemverViolation[]): Finding[] {
-  return violations.map((v, idx) =>
-    FindingSchema.parse({
-      id: `audit-semver-${v.lint}-${idx + 1}`,
-      filePath: v.filePath,
-      startLine: v.line,
-      endLine: v.line,
-      severity: v.requiredBump === "minor" ? "Minor" : "Major",
-      type: "Bug",
-      epistemicState: "VERIFIED-DEFECT",
-      evidenceMechanism: "Correctness",
-      title: `cargo-semver-checks (${v.lint}): ${v.headline}`,
-      body: [
-        v.description || v.headline,
-        v.symbol ? `Affected public item: \`${v.symbol}\`` : null,
-        `Required SemVer bump: \`${v.requiredBump}\``,
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-      rootCause: `Breaking public API change detected by cargo-semver-checks (${v.lint})`,
-      blastRadius: "Downstream crate consumers",
-      reversible: true,
-      dependsOn: null,
-      verificationCommand: "cargo semver-checks check-release",
-      traceability: `cargo-semver-checks lint ${v.lint}`,
-      suggestion: null,
-      suggestionVerified: false,
-      agentPrompt: `Resolve SemVer breakage \`${v.lint}\` at \`${v.filePath}:${v.line}\` (${v.headline}${v.symbol ? `: ${v.symbol}` : ""}) or document/bump the crate version accordingly. Verify with \`cargo semver-checks check-release\`.`,
-      confidence: 1.0,
-      source: "audit",
-    }),
-  );
+  const grouped = new Map<string, SemverViolation[]>();
+  for (const v of violations) {
+    const key = `${v.filePath}::${v.lint}`;
+    const list = grouped.get(key) ?? [];
+    list.push(v);
+    grouped.set(key, list);
+  }
+
+  const findings: Finding[] = [];
+  let idx = 0;
+  for (const group of grouped.values()) {
+    const first = group[0];
+    if (!first) continue;
+    idx += 1;
+    const isMajor = group.some((v) => v.requiredBump !== "minor");
+    const requiredBump = isMajor ? "major" : "minor";
+    const symbols = Array.from(
+      new Set(
+        group.map((v) => (v.symbol ? `${v.symbol} (L${v.line})` : `L${v.line}`)).filter(Boolean),
+      ),
+    );
+    const isMulti = group.length > 1;
+    const title = isMulti
+      ? `cargo-semver-checks (${first.lint}): ${first.headline} (${group.length} items in \`${first.filePath}\`)`
+      : `cargo-semver-checks (${first.lint}): ${first.headline}`;
+
+    findings.push(
+      FindingSchema.parse({
+        id: `audit-semver-${first.lint}-${idx}`,
+        filePath: first.filePath,
+        startLine: first.line,
+        endLine: first.line,
+        severity: requiredBump === "minor" ? "Minor" : "Major",
+        type: "Bug",
+        epistemicState: "VERIFIED-DEFECT",
+        evidenceMechanism: "Correctness",
+        title,
+        body: [
+          first.description || first.headline,
+          symbols.length > 0
+            ? `Affected public item(s): ${symbols.map((s) => `\`${s}\``).join(", ")}`
+            : null,
+          `Required SemVer bump: \`${requiredBump}\``,
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+        rootCause: `Breaking public API change detected by cargo-semver-checks (${first.lint}) in ${first.filePath}`,
+        blastRadius: "Downstream crate consumers",
+        reversible: true,
+        dependsOn: null,
+        verificationCommand: "cargo semver-checks check-release",
+        traceability: `cargo-semver-checks lint ${first.lint} (${symbols.join(", ")})`,
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: `Resolve SemVer breakage \`${first.lint}\` in \`${first.filePath}\` (${symbols.join(", ")}) or document/bump the crate version accordingly. Verify with \`cargo semver-checks check-release\`.`,
+        confidence: 1.0,
+        source: "audit",
+      }),
+    );
+  }
+  return findings;
 }

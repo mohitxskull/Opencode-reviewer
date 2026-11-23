@@ -239,6 +239,16 @@ export default {
               type: "string",
               enum: ["quiet", "chill", "assertive"],
             },
+            excludeTools: {
+              type: "string",
+              description:
+                "Comma-separated tool findings to exclude from the finalized bundle/todo (e.g. 'coverage,semver' or 'all')",
+            },
+            minSeverity: {
+              type: "string",
+              enum: ["Critical", "Major", "Minor", "Trivial", "Info"],
+              description: "Minimum severity threshold to keep in finalized bundle/todo",
+            },
           },
           required: ["pr"],
           additionalProperties: false,
@@ -252,6 +262,10 @@ export default {
           if (args.strict === true) cliArgs.push("--strict");
           if (typeof args.profile === "string" && args.profile)
             cliArgs.push("--profile", args.profile);
+          if (typeof args.excludeTools === "string" && args.excludeTools)
+            cliArgs.push("--exclude-tools", args.excludeTools);
+          if (typeof args.minSeverity === "string" && args.minSeverity)
+            cliArgs.push("--min-severity", args.minSeverity);
           const res = await runPeer(cliArgs, directory);
           if (res.exitCode !== 0) {
             throw new Error(

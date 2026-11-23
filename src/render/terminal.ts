@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import type { ReviewBundle } from "../domain/models.ts";
+import { isOptionalAnalyzerFinding, type ReviewBundle } from "../domain/models.ts";
 
 const ALL_OPTIONAL_TOOLS = ["deny", "geiger", "semver", "coverage", "miri"] as const;
 
@@ -63,6 +63,8 @@ export function formatTerminalReport(
   const outside = bundle.outsideDiffFindings ?? [];
   const nitpicks = bundle.nitpickFindings ?? [];
   const allActionable = [...bundle.findings, ...outside];
+  const coreFindings = allActionable.filter((f) => !isOptionalAnalyzerFinding(f));
+  const optionalFindings = allActionable.filter((f) => isOptionalAnalyzerFinding(f));
   const totalActionable = allActionable.length;
   const verifiedCount = allActionable.filter(
     (f) => f.suggestion !== null && f.suggestionVerified,
@@ -70,10 +72,11 @@ export function formatTerminalReport(
 
   lines.push(
     ``,
-    `--- Findings Summary (Total Actionable: ${totalActionable} | Verified Patches: ${verifiedCount} | Inline: ${bundle.findings.length} | Outside Diff: ${outside.length} | Nitpicks: ${nitpicks.length}) ---`,
+    `--- Findings Summary (Substantive Review: ${coreFindings.length} | Optional Analyzers: ${optionalFindings.length} | Verified Patches: ${verifiedCount} | Total Actionable: ${totalActionable} | Nitpicks: ${nitpicks.length}) ---`,
   );
-  if (totalActionable > 0) {
-    const tableRows = allActionable.map((f) => ({
+  const displayList = options.verbose || coreFindings.length === 0 ? allActionable : coreFindings;
+  if (displayList.length > 0) {
+    const tableRows = displayList.map((f) => ({
       ID: f.id,
       Severity: f.severity,
       Type: f.type,
@@ -89,6 +92,11 @@ export function formatTerminalReport(
     lines.push(
       Bun.inspect.table(tableRows, ["ID", "Severity", "Type", "Patch", "Location", "Title"]),
     );
+    if (!options.verbose && optionalFindings.length > 0 && coreFindings.length > 0) {
+      lines.push(
+        `  (+ ${optionalFindings.length} optional analyzer diagnostic(s) from coverage/semver/geiger/deny/miri in review.md; pass --exclude-tools coverage,semver to omit)`,
+      );
+    }
   } else {
     lines.push(`  No actionable findings.`);
   }

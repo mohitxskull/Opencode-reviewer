@@ -3,11 +3,14 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import {
+  countFindingsByOrigin,
   PEER_VERSION,
   type ReviewProfile,
   ReviewProfileSchema,
   type RunManifest,
   RunManifestSchema,
+  type Severity,
+  SeveritySchema,
 } from "../domain/models.ts";
 import { GitHubClient, parsePrTarget, resolveGitHubToken } from "../github/client.ts";
 import { type OptionalTool, runAnalyzeStage } from "../pipeline/analyze.ts";
@@ -76,7 +79,9 @@ Options:
   --sarif <path>             For 'check': write SARIF 2.1.0 report to file
   --update-baseline          For 'check': record current findings into .peer/baseline.json
   --from <file|dir>          For 'finalize': agent review file or directory of cohort review .md files
-  --verdicts <file>          For 'finalize': skeptic verdicts file to filter Stage 2 findings
+  --verdicts <file|dir>      For 'finalize': skeptic verdicts file or directory to filter Stage 2 findings
+  --exclude-tools <list|all> For 'finalize': exclude tool findings (e.g. coverage,semver,geiger,deny,miri,ast or all)
+  --min-severity <level>     For 'finalize': minimum severity to keep (Critical|Major|Minor|Trivial|Info)
   --stage <review|verify>    For 'finalize': target stage folder (default: review)
   --strict                   For 'finalize': fail if any finding blocks are malformed or coerced
   --no-checkout              Run in-place without switching git branches (for CI already on PR head)
@@ -150,6 +155,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         "update-baseline": { type: "boolean", default: false },
         from: { type: "string" },
         verdicts: { type: "string" },
+        "exclude-tools": { type: "string" },
+        "min-severity": { type: "string" },
         stage: { type: "string" },
         strict: { type: "boolean", default: false },
         "no-checkout": { type: "boolean", default: false },
@@ -496,6 +503,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
                 nitpicks: analyzeOut.analyzeBundle.nitpickFindings?.length ?? 0,
                 clippy: analyzeOut.analyzeBundle.clippyDiagnostics.length,
                 securityAdvisories: analyzeOut.analyzeBundle.securityAdvisories?.length ?? 0,
+                byOrigin: countFindingsByOrigin(allActionable),
               },
               countsBySeverity,
               artifacts: {
@@ -536,7 +544,25 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           .map((p) => resolve(p))
           .join(",")
       : undefined;
-    const verdictsPath = parsed.values.verdicts ? resolve(parsed.values.verdicts) : undefined;
+    const verdictsPath = parsed.values.verdicts
+      ? parsed.values.verdicts
+          .split(",")
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .map((p) => resolve(p))
+          .join(",")
+      : undefined;
+    const excludeTools = parsed.values["exclude-tools"]
+      ? new Set(
+          parsed.values["exclude-tools"]
+            .split(",")
+            .map((p) => p.trim().toLowerCase())
+            .filter(Boolean),
+        )
+      : undefined;
+    const minSeverity: Severity | undefined = parsed.values["min-severity"]
+      ? SeveritySchema.parse(parsed.values["min-severity"])
+      : undefined;
     const result = await runFinalizeStage({
       repoRoot,
       commitDir,
@@ -546,6 +572,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       strict,
       noCheckout,
       profile: effectiveProfile,
+      excludeTools,
+      minSeverity,
       configHash,
       runStartMs,
       auditLogger,
@@ -589,6 +617,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
               nitpicks: result.bundle.nitpickFindings?.length ?? 0,
               verifiedSuggestions,
               unverifiedSuggestions,
+              byOrigin: countFindingsByOrigin(allActionable),
             },
             countsBySeverity,
             ...(result.cohortCoverage ? { cohortCoverage: result.cohortCoverage } : {}),
