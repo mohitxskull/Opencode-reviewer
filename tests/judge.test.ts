@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+
 import { clippyToFindings, partitionAndFilterFindings } from "../src/judge.ts";
 import type { ClippyDiagnostic, DiffFileMap, Finding } from "../src/models.ts";
 

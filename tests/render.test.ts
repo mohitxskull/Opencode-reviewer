@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+
 import { type Finding, type ReviewBundle, WALKTHROUGH_MARKER } from "../src/models.ts";
 import {
   renderInlineFindingComment,

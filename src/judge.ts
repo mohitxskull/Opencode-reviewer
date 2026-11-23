@@ -1,4 +1,5 @@
 import { join } from "node:path";
+
 import { snapRangeToHunk } from "./diff.ts";
 import {
   allowsFindingForProfile,
@@ -8,8 +9,8 @@ import {
   type Finding,
   FindingSchema,
   type ReviewProfile,
-  SEVERITY_RANK,
   type SecurityAdvisory,
+  SEVERITY_RANK,
 } from "./models.ts";
 
 export async function advisoriesToFindings(

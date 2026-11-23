@@ -1,4 +1,5 @@
 import parseDiff from "parse-diff";
+
 import type { DiffFileMap, DiffHunk } from "./models.ts";
 
 // Why: LLMs frequently miscount line numbers when reading raw `@@ -a,b +c,d @@`

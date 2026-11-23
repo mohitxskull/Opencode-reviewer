@@ -1,5 +1,6 @@
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+
 import type { SessionPermissionRule } from "./permissions.ts";
 
 export interface ModelSpec {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+
 import type { CrateGraph } from "../src/models.ts";
 import {
   CargoGeigerMissingError,

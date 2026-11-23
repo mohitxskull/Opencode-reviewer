@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
 import { InPlaceCheckoutSession } from "../src/git.ts";
 import type { Finding } from "../src/models.ts";
 import { SuggestionCompilerVerifier } from "../src/verifier.ts";

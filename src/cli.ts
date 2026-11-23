@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+
 import { AuditLogger } from "./audit.ts";
 import { filterCodeOnlyDiffMap, parseUnifiedDiff } from "./diff.ts";
 import {
@@ -57,8 +58,8 @@ import {
 } from "./rust.ts";
 import { type CargoLockDiff, collectCargoLockDiff, collectSecurityAdvisories } from "./security.ts";
 import {
-  type CoverageReport,
   collectCargoLlvmCovReport,
+  type CoverageReport,
   coverageReportToFindings,
 } from "./tools/coverage.ts";
 import { collectCargoDenyDiagnostics, denyDiagnosticsToFindings } from "./tools/deny.ts";

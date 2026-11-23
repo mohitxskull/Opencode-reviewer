@@ -1,7 +1,10 @@
-.PHONY: check lint typecheck test
+.PHONY: check fmt lint typecheck test build
 
 check:
-	bun run lint && bun run typecheck && bun test
+	bun run format:check && bun run lint && bun run typecheck && bun test
+
+fmt:
+	bun run format
 
 lint:
 	bun run lint
@@ -11,3 +14,6 @@ typecheck:
 
 test:
 	bun test
+
+build:
+	bun run build

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+
 import { analyzeRustSourceAst, isLineInRegions } from "../src/ast.ts";
 
 describe("Tree-sitter Rust AST analyzer", () => {

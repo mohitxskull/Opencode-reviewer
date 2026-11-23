@@ -1,4 +1,5 @@
 import { dirname, relative } from "node:path";
+
 import { buildScrubbedCargoEnv } from "./env.ts";
 import {
   type ClippyDiagnostic,

@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
-import { Language, Parser, type Node as SyntaxNode } from "web-tree-sitter";
+
+import { Language, type Node as SyntaxNode, Parser } from "web-tree-sitter";
 
 export type RustAstSymbolKind = "fn" | "struct" | "enum" | "trait";
 
