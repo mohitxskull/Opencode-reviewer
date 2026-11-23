@@ -15,6 +15,7 @@ import { runPublishStage } from "../pipeline/publish.ts";
 import { formatTerminalReport } from "../render/terminal.ts";
 import { loadJsonIfExists } from "../workspace/artifacts.ts";
 import { AuditLogger } from "../workspace/audit-log.ts";
+import { loadPeerConfig } from "../workspace/config.ts";
 import {
   CheckpointStore,
   detectRepoOwnerAndName,
@@ -23,6 +24,7 @@ import {
   resolvePeerCommitDir,
 } from "../workspace/git.ts";
 import { LearningStore } from "../workspace/learnings.ts";
+import { runInitCommand } from "./init.ts";
 import { runLearnCommand } from "./learn.ts";
 
 export interface CliDependencies {
@@ -46,6 +48,7 @@ Commands:
   peer analyze  [PR]               Stage 1: Deterministic Rust analysis -> .peer/<pr>/<sha>/01-analyze/ (default)
   peer finalize [PR] --from <file> Stage 2/3: Judge merge + cargo check suggestion verifier -> review.md
   peer publish  [PR]               Stage 4: Upload latest saved stage (01, 02, or 03) to GitHub PR
+  peer init [--fresh]              Scaffold a peer.toml repository configuration file
   peer learn add "<rule>" [--scope "<glob>"] [--repo <path>]
   peer learn list [--repo <path>]
   peer learn remove <id> [--repo <path>]
@@ -118,6 +121,15 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const repoRoot = resolveGitTopLevel(resolve(parsed.values.repo ?? process.cwd()));
     const learningStore = new LearningStore(repoRoot);
 
+    if (parsed.positionals[0] === "init") {
+      return await runInitCommand(
+        repoRoot,
+        { fresh: parsed.values.fresh ?? false },
+        writeOut,
+        writeErr,
+      );
+    }
+
     if (parsed.positionals[0] === "learn") {
       return await runLearnCommand(
         parsed.positionals.slice(1),
@@ -138,7 +150,6 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     const fresh = parsed.values.fresh ?? false;
     const submitReview = parsed.values.submit ?? false;
     const enabledTools = parseToolsOption(parsed.values.tools);
-    const enabledToolsList = Array.from(enabledTools).sort();
 
     if (submitReview && command !== "publish") {
       writeErr("Error: --submit is only valid with `peer publish`.");
@@ -212,6 +223,18 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
 
     const pr = await githubClient.getPullRequest(owner, repo, prNumber);
+    // Load peer.toml strictly from pr.baseSha (never untrusted pr.headSha)
+    const peerConfig = await loadPeerConfig(repoRoot, pr.baseSha);
+    const effectiveProfile: ReviewProfile = parsed.values.profile ? profile : peerConfig.profile;
+    const effectiveSubmit = submitReview || peerConfig.publish.mode === "comment";
+    const effectiveTools = new Set<OptionalTool>(enabledTools);
+    for (const toolName of OPTIONAL_TOOLS) {
+      if (peerConfig.tools[toolName]) {
+        effectiveTools.add(toolName);
+      }
+    }
+    const effectiveToolsList = Array.from(effectiveTools).sort();
+
     const checkpointStore = new CheckpointStore(repoRoot);
     const runStartMs = Date.now();
     const commitDir = resolvePeerCommitDir(repoRoot, pr.number, pr.headSha);
@@ -226,10 +249,10 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         owner,
         repo,
         pr,
-        submitReview,
+        submitReview: effectiveSubmit,
         allowPartial: false,
         modelLabel: "external-agent",
-        enabledToolsList,
+        enabledToolsList: effectiveToolsList,
         runStartMs,
         existingManifest,
         githubClient,
@@ -245,11 +268,11 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       existingManifest &&
       existingManifest.status === "completed" &&
       existingManifest.headSha === pr.headSha &&
-      existingManifest.profile === profile &&
+      existingManifest.profile === effectiveProfile &&
       existingManifest.completedStages.includes("analyze")
     ) {
       writeOut(
-        `Already analyzed PR #${pr.number} @ ${pr.headSha.slice(0, 7)} (profile=${profile}).\nContext: file://${resolve(commitDir, "01-analyze", "prompt-context.md")}\nReport:  file://${resolve(commitDir, "01-analyze", "report.md")}\nPass --fresh to force a re-run.`,
+        `Already analyzed PR #${pr.number} @ ${pr.headSha.slice(0, 7)} (profile=${effectiveProfile}).\nContext: file://${resolve(commitDir, "01-analyze", "prompt-context.md")}\nReport:  file://${resolve(commitDir, "01-analyze", "report.md")}\nPass --fresh to force a re-run.`,
       );
       return 0;
     }
@@ -271,7 +294,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
           prNumber: pr.number,
           headSha: pr.headSha,
           baseSha: pr.baseSha,
-          enabledTools: enabledToolsList,
+          enabledTools: effectiveToolsList,
           fresh,
         },
       );
@@ -282,10 +305,11 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
         owner,
         repo,
         pr,
-        profile,
+        profile: effectiveProfile,
         fresh,
-        enabledTools,
-        enabledToolsList,
+        enabledTools: effectiveTools,
+        enabledToolsList: effectiveToolsList,
+        peerConfig,
         runStartMs,
         githubClient,
         checkpointStore,
@@ -308,7 +332,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       commitDir,
       fromPath,
       stage: finalizeStage,
-      profile,
+      profile: effectiveProfile,
       runStartMs,
       auditLogger,
     });

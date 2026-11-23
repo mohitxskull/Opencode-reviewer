@@ -97,10 +97,39 @@ peer finalize 42 --from .peer/42/<sha>/agent-verified.md --stage verify
 peer publish 42            # Posts PENDING draft review
 peer publish 42 --submit   # Submits immediately as COMMENT
 
+# Scaffold repository configuration (peer.toml)
+peer init
+
 # Manage persistent repository learnings
 peer learn add "Avoid holding std::sync::Mutex across .await" --scope "src/services/**"
 peer learn list
 peer learn remove <id>
+```
+
+### Repository Configuration (`peer.toml`)
+Run `peer init` to create a `peer.toml` in your repository root. During PR reviews, `peer.toml` is always loaded strictly from `pr.baseSha` (never from untrusted PR head commits), and explicit CLI flags override `peer.toml`:
+
+```toml
+profile = "chill"
+
+[tools]
+clippy = true
+audit = true
+deny = false
+geiger = false
+semver = true
+coverage = false
+miri = true
+
+[diff]
+ignore = ["**/generated/**", "**/*.pb.rs"]
+
+[publish]
+mode = "draft"
+
+[[rules]]
+scope = "src/oms/**"
+rule = "Never hold std::sync::Mutex across .await; use parking_lot::Mutex."
 ```
 
 ### GitHub Authentication Precedence

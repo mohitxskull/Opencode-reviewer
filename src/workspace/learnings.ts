@@ -146,8 +146,16 @@ export class LearningStore {
   public async getMatchingLearnings(
     modifiedFiles: Iterable<string>,
     sharedGitRef?: string,
+    configRules: ReadonlyArray<{ readonly scope?: string | null; readonly rule: string }> = [],
   ): Promise<RepoLearning[]> {
-    const all = await this.list(sharedGitRef);
+    const stored = await this.list(sharedGitRef);
+    const fromConfig: RepoLearning[] = configRules.map((item, idx) => ({
+      id: `peer-toml-${idx + 1}`,
+      rule: item.rule,
+      scope: item.scope ?? null,
+      createdAt: "peer.toml",
+    }));
+    const all = [...fromConfig, ...stored];
     const files = Array.from(modifiedFiles);
     return all.filter((learning) => {
       if (!learning.scope) {

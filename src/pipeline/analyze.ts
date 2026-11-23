@@ -51,6 +51,7 @@ import {
   writeAnalyzeStageArtifacts,
 } from "../workspace/artifacts.ts";
 import type { AuditLogger } from "../workspace/audit-log.ts";
+import { DEFAULT_PEER_CONFIG, type PeerConfig } from "../workspace/config.ts";
 import { type CheckpointStore, tryGitRawSync, withInPlaceCheckout } from "../workspace/git.ts";
 import { LearningStore } from "../workspace/learnings.ts";
 
@@ -66,6 +67,7 @@ export interface AnalyzeStageInput {
   readonly fresh: boolean;
   readonly enabledTools: ReadonlySet<OptionalTool>;
   readonly enabledToolsList: readonly string[];
+  readonly peerConfig?: PeerConfig;
   readonly runStartMs: number;
   readonly githubClient: GitHubClient;
   readonly checkpointStore: CheckpointStore;
@@ -94,6 +96,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     fresh,
     enabledTools,
     enabledToolsList,
+    peerConfig = DEFAULT_PEER_CONFIG,
     runStartMs,
     githubClient,
     checkpointStore,
@@ -184,7 +187,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     }
 
     const rawDiffMap = parseUnifiedDiff(diffText);
-    const diffMap = filterCodeOnlyDiffMap(rawDiffMap);
+    const diffMap = filterCodeOnlyDiffMap(rawDiffMap, peerConfig.diff.ignore);
     let activeDiffMap = diffMap;
     if (isIncremental) {
       const fullPrDiffAttempt = tryGitRawSync(repoRoot, [
@@ -194,7 +197,10 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         `${pr.baseSha}...${pr.headSha}`,
       ]);
       if (fullPrDiffAttempt.ok && fullPrDiffAttempt.stdout.length > 0) {
-        activeDiffMap = filterCodeOnlyDiffMap(parseUnifiedDiff(fullPrDiffAttempt.stdout));
+        activeDiffMap = filterCodeOnlyDiffMap(
+          parseUnifiedDiff(fullPrDiffAttempt.stdout),
+          peerConfig.diff.ignore,
+        );
       }
     }
 
@@ -216,10 +222,10 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       builtGraph,
     ] = await Promise.all([
       collectCrateGraph(repoRoot),
-      modifiedFiles.size > 0
+      modifiedFiles.size > 0 && peerConfig.tools.clippy
         ? collectClippyDiagnostics(repoRoot, modifiedFiles, diffMap)
         : Promise.resolve([]),
-      modifiedFiles.size > 0
+      modifiedFiles.size > 0 && peerConfig.tools.audit
         ? collectSecurityAdvisories(repoRoot, { baseSha: pr.baseSha })
         : Promise.resolve([]),
       collectCargoLockDiff(repoRoot, pr.baseSha),
@@ -355,6 +361,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
     const learnings = await new LearningStore(repoRoot).getMatchingLearnings(
       modifiedFiles,
       pr.baseSha,
+      peerConfig.rules,
     );
     const promptContextMd = buildReviewContextPrompt({
       repoRoot,

@@ -30,15 +30,41 @@ export function isReviewableRustCodeFile(filePath: string): boolean {
     return false;
   }
   const baseName = normalized.split("/").pop() ?? "";
-  return normalized.endsWith(".rs") || baseName === "Cargo.toml";
+  return normalized.endsWith(".rs") || baseName === "Cargo.toml" || normalized === "peer.toml";
+}
+
+function matchesAnyIgnoreGlob(filePath: string, ignoreGlobs: readonly string[]): boolean {
+  if (ignoreGlobs.length === 0) {
+    return false;
+  }
+  const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  // Never allow [diff].ignore to hide changes to peer.toml itself
+  if (normalized === "peer.toml") {
+    return false;
+  }
+  for (const pattern of ignoreGlobs) {
+    const cleaned = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
+    const glob = new Bun.Glob(cleaned);
+    if (glob.match(normalized)) {
+      return true;
+    }
+    if (cleaned.endsWith("/**")) {
+      const prefix = cleaned.slice(0, -3);
+      if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function filterCodeOnlyDiffMap(
   diffMap: Readonly<Record<string, DiffFileMap>>,
+  ignoreGlobs: readonly string[] = [],
 ): Record<string, DiffFileMap> {
   const filtered: Record<string, DiffFileMap> = {};
   for (const [filePath, fileMap] of Object.entries(diffMap)) {
-    if (isReviewableRustCodeFile(filePath)) {
+    if (isReviewableRustCodeFile(filePath) && !matchesAnyIgnoreGlob(filePath, ignoreGlobs)) {
       filtered[filePath] = fileMap;
     }
   }
