@@ -40,6 +40,7 @@ import {
   type AnalyzeStageContext,
   AnalyzeStageContextSchema,
   FindingSchema,
+  PEER_VERSION,
   type PullRequestMetadata,
   type ReviewBundle,
   ReviewBundleSchema,
@@ -125,9 +126,21 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       )
     : null;
 
+  const sameTools = (a: readonly string[], b: readonly string[]): boolean => {
+    if (a.length !== b.length) return false;
+    const sa = [...a].sort();
+    const sb = [...b].sort();
+    return sa.every((v, i) => v === sb[i]);
+  };
+
   if (
     analyzeContext &&
-    (analyzeContext.headSha !== pr.headSha || analyzeContext.profile !== profile)
+    (analyzeContext.headSha !== pr.headSha ||
+      analyzeContext.pr.baseSha !== pr.baseSha ||
+      analyzeContext.profile !== profile ||
+      analyzeContext.configHash !== configHash ||
+      analyzeContext.peerVersion !== PEER_VERSION ||
+      !sameTools(analyzeContext.enabledTools, enabledToolsList))
   ) {
     analyzeContext = null;
   }
@@ -386,6 +399,8 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         clippyDiagnostics,
         securityAdvisories,
         enabledTools: enabledToolsList,
+        configHash,
+        peerVersion: PEER_VERSION,
         deterministicFindings,
         generatedAt: new Date().toISOString(),
       });

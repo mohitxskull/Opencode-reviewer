@@ -15,3 +15,41 @@ export function isRustTestOrBenchPath(filePath: string): boolean {
     norm.endsWith("_tests.rs")
   );
 }
+
+/**
+ * Matches a repository-relative file path against a user/config glob pattern
+ * safely (never throws on malformed patterns) and handles zero-segment `**`
+ * forms (`a/**\/b`, `**\/b`, `a/**`).
+ */
+export function matchRepoGlob(pattern: string, filePath: string): boolean {
+  const normalizedPath = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  const normalizedPattern = pattern.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalizedPattern) {
+    return true;
+  }
+
+  const candidates = new Set<string>([normalizedPattern]);
+  if (normalizedPattern.includes("/**/")) {
+    candidates.add(normalizedPattern.replace(/\/\*\*\//g, "/"));
+  }
+  if (normalizedPattern.startsWith("**/")) {
+    candidates.add(normalizedPattern.slice(3));
+  }
+  if (normalizedPattern.endsWith("/**")) {
+    const prefix = normalizedPattern.slice(0, -3);
+    if (normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`)) {
+      return true;
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      if (new Bun.Glob(candidate).match(normalizedPath)) {
+        return true;
+      }
+    } catch {
+      // Ignore malformed user glob patterns rather than crashing review
+    }
+  }
+  return false;
+}

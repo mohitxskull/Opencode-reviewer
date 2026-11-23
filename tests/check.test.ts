@@ -129,7 +129,24 @@ describe("v0.3 local deterministic gate (peer check + baseline + SARIF + AST det
     expect(code2).toBe(0);
     expect(await Bun.file(join(dir, ".peer", "baseline.json")).exists()).toBe(true);
 
-    // Re-running `peer check` now passes (0 new findings, all baselined)
+    // F-01: Poisoning .peer/baseline.json on the PR branch MUST NOT bypass the gate (baseline is loaded from baseSha)
+    const outPoison: string[] = [];
+    const codePoison = await runCli(["check", "--base", "main", "--repo", dir], {
+      stdout: (t) => outPoison.push(t),
+    });
+    expect(codePoison).toBe(1);
+    expect(outPoison.join("\n")).toContain("New `unsafe` block/item without `// SAFETY:`");
+
+    // Once the baseline is committed on the trusted base branch (`main`), re-running `peer check` passes
+    const baselineBytes = await Bun.file(join(dir, ".peer", "baseline.json")).text();
+    await rm(join(dir, ".peer", "baseline.json"), { force: true });
+    runGit(dir, ["checkout", "main"]);
+    await mkdir(join(dir, ".peer"), { recursive: true });
+    await writeFile(join(dir, ".peer", "baseline.json"), baselineBytes);
+    runGit(dir, ["add", "-f", ".peer/baseline.json"]);
+    runGit(dir, ["commit", "-m", "chore: commit baseline on main"]);
+    runGit(dir, ["checkout", "feat-gate"]);
+
     const out3: string[] = [];
     const code3 = await runCli(["check", "--base", "main", "--repo", dir], {
       stdout: (t) => out3.push(t),

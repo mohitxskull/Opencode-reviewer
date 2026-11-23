@@ -175,18 +175,24 @@ export class SuggestionCompilerVerifier {
     ).length;
     let suggestionIndex = 0;
 
-    // If the baseline already has compile errors, snapshot the baseline error set per crate
-    // so we still verify suggestions and only reject those introducing NEW errors.
-    const baselineErrorCache = new Map<string, Set<string>>();
-    const getBaselineErrors = async (pkgKey: string, pkgName?: string): Promise<Set<string>> => {
+    // If the baseline already has compile errors, snapshot the baseline error counts per crate
+    // so we still verify suggestions and reject those introducing NEW errors or increasing counts.
+    const baselineErrorCache = new Map<string, Map<string, number>>();
+    const getBaselineErrors = async (
+      pkgKey: string,
+      pkgName?: string,
+    ): Promise<Map<string, number>> => {
       const cached = baselineErrorCache.get(pkgKey);
       if (cached) {
         return cached;
       }
       const baseRes = await this.checkRunner(realRepoRoot, pkgName);
-      const set = new Set(baseRes.errorMessages ?? (baseRes.ok ? [] : [baseRes.errorSummary]));
-      baselineErrorCache.set(pkgKey, set);
-      return set;
+      const counts = new Map<string, number>();
+      for (const msg of baseRes.errorMessages ?? (baseRes.ok ? [] : [baseRes.errorSummary])) {
+        counts.set(msg, (counts.get(msg) ?? 0) + 1);
+      }
+      baselineErrorCache.set(pkgKey, counts);
+      return counts;
     };
 
     for (const finding of findings) {
@@ -271,9 +277,25 @@ export class SuggestionCompilerVerifier {
       }
 
       let passed = checkResult.ok;
-      if (!passed && baselineErrors && baselineErrors.size > 0 && checkResult.errorMessages) {
-        const newErrors = checkResult.errorMessages.filter((msg) => !baselineErrors.has(msg));
-        if (newErrors.length === 0) {
+      if (
+        !passed &&
+        baselineErrors &&
+        baselineErrors.size > 0 &&
+        checkResult.errorMessages &&
+        checkResult.errorMessages.length > 0
+      ) {
+        const candidateCounts = new Map<string, number>();
+        for (const msg of checkResult.errorMessages) {
+          candidateCounts.set(msg, (candidateCounts.get(msg) ?? 0) + 1);
+        }
+        let introducedNewError = false;
+        for (const [msg, count] of candidateCounts.entries()) {
+          if (count > (baselineErrors.get(msg) ?? 0)) {
+            introducedNewError = true;
+            break;
+          }
+        }
+        if (!introducedNewError) {
           passed = true;
         }
       }

@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { type SecurityAdvisory, SecurityAdvisorySchema } from "../domain/models.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { runTrackedCommand } from "../infra/process.ts";
 import { tryGitRawSync } from "../workspace/git.ts";
 
 export class CargoAuditMissingError extends Error {
@@ -117,18 +118,10 @@ async function defaultCargoAuditRunner(
   const args = lockfilePath
     ? ["audit", "--json", "--no-fetch", "--file", lockfilePath]
     : ["audit", "--json"];
-  const proc = Bun.spawn(["cargo", ...args], {
+  return await runTrackedCommand(["cargo", ...args], {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
 }
 
 function advisoryKey(adv: SecurityAdvisory): string {

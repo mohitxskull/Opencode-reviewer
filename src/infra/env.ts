@@ -35,22 +35,43 @@ const ALLOWED_CARGO_ENV_KEYS = [
   "no_proxy",
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
+  // Explicit non-secret sccache settings only (never forward SCCACHE_* cloud credentials)
+  "SCCACHE_DIR",
+  "SCCACHE_CACHE_SIZE",
+  "SCCACHE_IDLE_TIMEOUT",
+  "SCCACHE_SERVER_PORT",
+  // Windows system keys required for rustup/WinSock/TLS when running peer-windows-x64.exe
+  "SYSTEMROOT",
+  "SystemRoot",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+  "USERPROFILE",
+  "LOCALAPPDATA",
+  "APPDATA",
+  "PROGRAMFILES",
+  "NUMBER_OF_PROCESSORS",
+  "SystemDrive",
 ] as const;
 
-const ALLOWED_CARGO_ENV_PREFIXES = ["CARGO_HTTP_", "CARGO_NET_", "SCCACHE_"] as const;
+const ALLOWED_CARGO_ENV_PREFIXES = ["CARGO_HTTP_", "CARGO_NET_"] as const;
+
+// Defense-in-depth denylist so even future allowlist additions can never leak secrets
+const SECRET_ENV_KEY_PATTERN = /(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|CONNECTION_STRING|AUTH)/i;
 
 // Why: Running `cargo metadata`, `cargo clippy`, or `cargo check` on an untrusted
 // PR commit executes its `build.rs` and proc-macros. Inheriting full `process.env`
-// would leak `PEER_GITHUB_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, and cloud keys.
-// Passing an explicit allowlisted environment prevents credential exfiltration
-// while preserving corporate proxies, TLS certs, and sccache/Cargo network settings.
+// would leak `PEER_GITHUB_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, and cloud keys
+// (including `SCCACHE_AZURE_CONNECTION_STRING` / `SCCACHE_REDIS_PASSWORD`).
+// Passing an explicit allowlisted environment + secret denylist prevents exfiltration
+// while preserving corporate proxies, TLS certs, local sccache, and Windows system vars.
 export function buildScrubbedCargoEnv(
   sourceEnv: Readonly<Record<string, string | undefined>> = process.env,
 ): Record<string, string> {
   const scrubbed: Record<string, string> = {};
   for (const key of ALLOWED_CARGO_ENV_KEYS) {
     const val = sourceEnv[key];
-    if (typeof val === "string" && val.length > 0) {
+    if (typeof val === "string" && val.length > 0 && !SECRET_ENV_KEY_PATTERN.test(key)) {
       scrubbed[key] = val;
     }
   }
@@ -58,6 +79,7 @@ export function buildScrubbedCargoEnv(
     if (
       typeof val === "string" &&
       val.length > 0 &&
+      !SECRET_ENV_KEY_PATTERN.test(key) &&
       ALLOWED_CARGO_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
     ) {
       scrubbed[key] = val;

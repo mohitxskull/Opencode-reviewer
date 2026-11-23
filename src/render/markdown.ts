@@ -146,7 +146,7 @@ function renderGroupedCollapsibleSection(
     lines.push(
       "",
       "<details>",
-      `<summary><code>${filePath}</code> (${fileFindings.length})</summary>`,
+      `<summary><code>${sanitizeMarkdownText(filePath)}</code> (${fileFindings.length})</summary>`,
       "<blockquote>",
     );
     for (const f of fileFindings) {
@@ -217,7 +217,7 @@ export function renderWalkthroughComment(bundle: ReviewBundle): string {
             const blastText = escapeTableCell(f.blastRadius || "Local module");
             const revText = f.reversible ? "Yes" : "No";
             const depText = escapeTableCell(f.dependsOn ?? "—");
-            return `| \`F${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState}\` | \`${f.evidenceMechanism}\` | ${confPct} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`;
+            return `| \`F${i + 1}\` | ${sevIcon} ${f.severity} | \`${f.epistemicState ?? "VERIFIED-DEFECT"}\` | \`${f.evidenceMechanism ?? "Correctness"}\` | ${confPct} | ${rootCauseText} | ${locText} | ${blastText} | ${revText} | ${depText} |`;
           }),
         ].join("\n")
       : "";

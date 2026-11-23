@@ -34,8 +34,6 @@ function hasSafetyCommentAbove(lines: readonly string[], startLine: number): boo
   return false;
 }
 
-const PANIC_PATTERN = /\.(unwrap|expect)\s*\(|\b(panic|todo|unimplemented)!\s*\(/;
-
 export async function collectAstDeterministicFindings(
   repoRoot: string,
   diffMap: Readonly<Record<string, DiffFileMap>>,
@@ -109,6 +107,7 @@ export async function collectAstDeterministicFindings(
     }
 
     // 2. Detect newly added production panic paths (.unwrap/.expect/panic!/todo!/unimplemented!)
+    // via Tree-sitter AST nodes (never fooled by string literals, URLs, or block comments).
     // Why: Grouping multiple panic calls inside the same enclosing function prevents
     // spamming N nearly identical inline comments on one function (e.g. a writer helper).
     interface PanicHit {
@@ -120,25 +119,25 @@ export async function collectAstDeterministicFindings(
     const panicGroups = new Map<string, { fnName: string | null; hits: PanicHit[] }>();
     const fnSymbols = ast.symbols.filter((s) => s.kind === "fn" && !s.isTest);
 
-    for (const lineNo of Array.from(addedLines).sort((a, b) => a - b)) {
-      if (isLineInRegions(lineNo, ast.testRegions)) {
+    const seenPanicKey = new Set<string>();
+    const sortedPanicCalls = [...ast.panicCalls].sort((a, b) => a.line - b.line);
+    for (const call of sortedPanicCalls) {
+      if (
+        call.isTest ||
+        !addedLines.has(call.line) ||
+        isLineInRegions(call.line, ast.testRegions)
+      ) {
         continue;
       }
-      const lineText = (lines[lineNo - 1] ?? "").trim();
-      if (lineText.startsWith("//") || lineText.startsWith("/*") || lineText.startsWith("*")) {
+      const dedupKey = `${call.line}:${call.op}`;
+      if (seenPanicKey.has(dedupKey)) {
         continue;
       }
-      const codeBeforeComment = lineText.split("//")[0] ?? "";
-      const match = PANIC_PATTERN.exec(codeBeforeComment);
-      if (!match) {
-        continue;
-      }
-      const matchedOp = match[1] ? `.${match[1]}()` : `${match[2]}!()`;
-      const isStubMacro = match[2] === "todo" || match[2] === "unimplemented";
+      seenPanicKey.add(dedupKey);
 
       let enclosingFn: (typeof fnSymbols)[number] | null = null;
       for (const sym of fnSymbols) {
-        if (lineNo >= sym.startLine && lineNo <= sym.endLine) {
+        if (call.line >= sym.startLine && call.line <= sym.endLine) {
           if (
             !enclosingFn ||
             sym.endLine - sym.startLine < enclosingFn.endLine - enclosingFn.startLine
@@ -150,14 +149,18 @@ export async function collectAstDeterministicFindings(
 
       const groupKey = enclosingFn
         ? `${enclosingFn.name}:${enclosingFn.startLine}`
-        : `line:${lineNo}`;
+        : `line:${call.line}`;
       const existing = panicGroups.get(groupKey);
       if (existing) {
-        existing.hits.push({ lineNo, matchedOp, isStubMacro });
+        existing.hits.push({
+          lineNo: call.line,
+          matchedOp: call.op,
+          isStubMacro: call.isStubMacro,
+        });
       } else {
         panicGroups.set(groupKey, {
           fnName: enclosingFn?.name ?? null,
-          hits: [{ lineNo, matchedOp, isStubMacro }],
+          hits: [{ lineNo: call.line, matchedOp: call.op, isStubMacro: call.isStubMacro }],
         });
       }
     }

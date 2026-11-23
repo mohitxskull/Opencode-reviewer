@@ -91,7 +91,7 @@ function stripBackticksAndQuotes(val: string): string {
   return s;
 }
 
-function normalizeSeverity(raw: string | undefined): Severity {
+function normalizeSeverity(raw: string | undefined, warnings?: string[]): Severity {
   const v = (raw ?? "").trim().toLowerCase();
   if (v === "critical" || v === "blocker" || v === "p0") return "Critical";
   if (v === "major" || v === "high" || v === "error" || v === "p1") return "Major";
@@ -103,6 +103,9 @@ function normalizeSeverity(raw: string | undefined): Severity {
   }
   if (v === "info" || v === "note") return "Info";
   if (v === "none") return "None";
+  if (v) {
+    warnings?.push(`Unknown severity "${raw?.trim()}" coerced to Minor.`);
+  }
   return "Minor";
 }
 
@@ -291,7 +294,10 @@ function parsePipeBulletTriples(sectionText: string | undefined): Array<[string,
   return results;
 }
 
-function parseSingleFindingBlock(blockText: string): LensFindingsOutput["findings"][number] | null {
+function parseSingleFindingBlock(
+  blockText: string,
+  warnings?: string[],
+): LensFindingsOutput["findings"][number] | null {
   // Split block into header metadata and #### sub-sections (respecting code fences)
   const lines = blockText.replace(/\r\n/g, "\n").split("\n");
   const subSections = new Map<string, string>();
@@ -398,7 +404,7 @@ function parseSingleFindingBlock(blockText: string): LensFindingsOutput["finding
     filePath,
     startLine: lineRange.startLine,
     endLine: lineRange.endLine,
-    severity: normalizeSeverity(meta.get("severity")),
+    severity: normalizeSeverity(meta.get("severity"), warnings),
     type: normalizeFindingType(meta.get("type")),
     epistemicState: normalizeEpistemicState(meta.get("state") ?? meta.get("epistemic_state")),
     evidenceMechanism: normalizeEvidenceMechanism(
@@ -430,6 +436,13 @@ function parseSingleFindingBlock(blockText: string): LensFindingsOutput["finding
 // parse deterministically into Zod-validated models, while keeping a seamless JSON
 // fallback for any model or test fixture that returns JSON.
 export function parseLensFindingsOutput(rawText: string): LensFindingsOutput {
+  return parseLensFindingsWithWarnings(rawText).output;
+}
+
+export function parseLensFindingsWithWarnings(rawText: string): {
+  output: LensFindingsOutput;
+  warnings: string[];
+} {
   const trimmed = rawText.trim();
   if (!trimmed) {
     throw new LensOutputParseError("Empty response from findings lens.");
@@ -440,7 +453,7 @@ export function parseLensFindingsOutput(rawText: string): LensFindingsOutput {
   if (jsonObj !== null) {
     const validated = LensFindingsOutputSchema.safeParse(jsonObj);
     if (validated.success) {
-      return validated.data;
+      return { output: validated.data, warnings: [] };
     }
   }
 
@@ -487,12 +500,19 @@ export function parseLensFindingsOutput(rawText: string): LensFindingsOutput {
     findingBlocks.push(currentBlock.join("\n"));
   }
 
+  const warnings: string[] = [];
   const findings: LensFindingsOutput["findings"] = [];
   for (const block of findingBlocks) {
-    const parsedFinding = parseSingleFindingBlock(block);
+    const parsedFinding = parseSingleFindingBlock(block, warnings);
     if (parsedFinding !== null) {
       findings.push(parsedFinding);
     }
+  }
+
+  if (findingBlocks.length > findings.length) {
+    warnings.push(
+      `Dropped ${findingBlocks.length - findings.length} malformed ### FINDING block(s) out of ${findingBlocks.length} (check required File/Lines/Title/Body fields).`,
+    );
   }
 
   // Why: If the LLM emitted one or more `### FINDING` blocks and EVERY single one
@@ -528,12 +548,15 @@ export function parseLensFindingsOutput(rawText: string): LensFindingsOutput {
     impact,
   }));
 
-  return LensFindingsOutputSchema.parse({
-    findings,
-    consideredAndRejected,
-    deletionsProposed,
-    openQuestions,
-  });
+  return {
+    output: LensFindingsOutputSchema.parse({
+      findings,
+      consideredAndRejected,
+      deletionsProposed,
+      openQuestions,
+    }),
+    warnings,
+  };
 }
 
 export function parseWalkthroughOutput(rawText: string): WalkthroughReport {

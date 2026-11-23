@@ -204,7 +204,9 @@ export async function runCheckGate(input: CheckGateInput): Promise<number> {
     return 0;
   }
 
-  const baseline = await loadBaselineFingerprints(repoRoot);
+  // Load baseline strictly from trusted baseSha when comparing a branch/PR against base
+  const baselineRef = baseSha !== headSha ? baseSha : undefined;
+  const baseline = await loadBaselineFingerprints(repoRoot, baselineRef);
   const { newFindings, baselinedCount } = filterFindingsByBaseline(allActionable, baseline);
 
   // Persist local check report under .peer/local/<short-sha>/

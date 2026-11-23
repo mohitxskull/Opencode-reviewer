@@ -19,10 +19,18 @@ export interface RustLineRegion {
   readonly endLine: number;
 }
 
+export interface RustAstPanicCall {
+  readonly line: number;
+  readonly op: string;
+  readonly isStubMacro: boolean;
+  readonly isTest: boolean;
+}
+
 export interface RustAstAnalysis {
   readonly symbols: readonly RustAstSymbol[];
   readonly testRegions: readonly RustLineRegion[];
   readonly unsafeRegions: readonly RustLineRegion[];
+  readonly panicCalls: readonly RustAstPanicCall[];
 }
 
 let parserPromise: Promise<Parser> | null = null;
@@ -88,23 +96,26 @@ function hasUnsafeModifier(node: SyntaxNode): boolean {
   return false;
 }
 
-const TEST_ATTR_REGEX = /\b(?:cfg\s*\(\s*test\s*\)|(?:\w+::)*test\b)/;
+// Anchor strictly to attribute syntax so #[serde(rename = "test")] or #[doc = "test"] never match
+const TEST_ATTR_REGEX =
+  /^#\[\s*(?:cfg\s*\(\s*test\s*\)|(?:[A-Za-z_]\w*::)*test(?:\s*\([^)]*\))?)\s*\]$/;
 
 // Why: Regexes miss methods whose `fn` line is outside a diff hunk, get fooled
 // by comments/strings, and cannot distinguish inline `#[cfg(test)] mod tests`
 // callers inside `src/*.rs` from production callers. Parsing Rust files with
 // `web-tree-sitter` + `tree-sitter-rust` gives exact AST symbol spans, `unsafe`
-// regions, and `#[cfg(test)]` boundaries in milliseconds with zero native addons.
+// regions, panic calls, and `#[cfg(test)]` boundaries in milliseconds with zero native addons.
 export async function analyzeRustSourceAst(source: string): Promise<RustAstAnalysis> {
   const parser = await getRustParser();
   const tree = parser.parse(source);
   if (!tree) {
-    return { symbols: [], testRegions: [], unsafeRegions: [] };
+    return { symbols: [], testRegions: [], unsafeRegions: [], panicCalls: [] };
   }
 
   const symbols: RustAstSymbol[] = [];
   const testRegions: RustLineRegion[] = [];
   const unsafeRegions: RustLineRegion[] = [];
+  const panicCalls: RustAstPanicCall[] = [];
 
   const visit = (node: SyntaxNode, inTestContext: boolean): void => {
     const startLine = node.startPosition.row + 1;
@@ -125,6 +136,33 @@ export async function analyzeRustSourceAst(source: string): Promise<RustAstAnaly
       (node.type === "trait_item" && hasUnsafeModifier(node))
     ) {
       unsafeRegions.push({ startLine, endLine });
+    }
+
+    if (node.type === "call_expression") {
+      const fnNode = node.childForFieldName("function");
+      if (fnNode?.type === "field_expression") {
+        const fieldNode = fnNode.childForFieldName("field");
+        if (fieldNode?.text === "unwrap" || fieldNode?.text === "expect") {
+          panicCalls.push({
+            line: fieldNode.startPosition.row + 1,
+            op: `.${fieldNode.text}()`,
+            isStubMacro: false,
+            isTest: isTestNode,
+          });
+        }
+      }
+    } else if (node.type === "macro_invocation") {
+      const macroNode = node.childForFieldName("macro");
+      const rawMacro = macroNode?.text ?? "";
+      const macroName = rawMacro.split("::").pop() ?? "";
+      if (macroName === "panic" || macroName === "todo" || macroName === "unimplemented") {
+        panicCalls.push({
+          line: (macroNode ?? node).startPosition.row + 1,
+          op: `${macroName}!()`,
+          isStubMacro: macroName === "todo" || macroName === "unimplemented",
+          isTest: isTestNode,
+        });
+      }
     }
 
     const kindMap: Record<string, RustAstSymbolKind | undefined> = {
@@ -162,10 +200,13 @@ export async function analyzeRustSourceAst(source: string): Promise<RustAstAnaly
     }
   };
 
-  visit(tree.rootNode, false);
-  tree.delete();
+  try {
+    visit(tree.rootNode, false);
+  } finally {
+    tree.delete();
+  }
 
-  return { symbols, testRegions, unsafeRegions };
+  return { symbols, testRegions, unsafeRegions, panicCalls };
 }
 
 export function isLineInRegions(line: number, regions: readonly RustLineRegion[]): boolean {

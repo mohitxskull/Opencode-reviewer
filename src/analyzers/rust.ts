@@ -13,6 +13,7 @@ import {
 import { isRustTestOrBenchPath } from "../domain/paths.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
 import { parseJsonlObjects } from "../infra/jsonl.ts";
+import { runTrackedCommand } from "../infra/process.ts";
 
 export function collectRustToolchainBaseline(repoRoot: string): ReviewBaselineHeader {
   const env = buildScrubbedCargoEnv();
@@ -60,18 +61,13 @@ interface CargoMetadataPayload {
 }
 
 export async function collectCrateGraph(repoRoot: string): Promise<CrateGraph> {
-  const proc = Bun.spawn(["cargo", "metadata", "--format-version", "1", "--no-deps"], {
-    cwd: repoRoot,
-    env: buildScrubbedCargoEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const [stdoutText, , exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  const { stdout: stdoutText, exitCode } = await runTrackedCommand(
+    ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+    {
+      cwd: repoRoot,
+      env: buildScrubbedCargoEnv(),
+    },
+  );
 
   if (exitCode !== 0) {
     return CrateGraphSchema.parse({
@@ -310,21 +306,17 @@ export async function collectClippyDiagnostics(
     return [];
   }
 
-  const proc = Bun.spawn(
+  const {
+    stdout: stdoutText,
+    stderr: stderrText,
+    exitCode,
+  } = await runTrackedCommand(
     ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json"],
     {
       cwd: repoRoot,
       env: buildScrubbedCargoEnv(),
-      stdout: "pipe",
-      stderr: "pipe",
     },
   );
-
-  const [stdoutText, stderrText, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
 
   const parsedLines = parseJsonlObjects<CargoJsonLine>(stdoutText);
   const diagnostics: ClippyDiagnostic[] = [];

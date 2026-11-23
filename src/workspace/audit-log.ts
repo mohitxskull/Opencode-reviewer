@@ -30,9 +30,9 @@ function formatElapsed(ms: number): string {
 
 // Why: Long-running multi-cohort Rust PR reviews need both real-time terminal
 // visibility (so the developer sees which stage, cohort, or `cargo check`
-// verification is currently executing) and an immutable, append-only JSONL audit
-// trail on disk (`.git/peer/reviews/pr-<num>/audit.jsonl` and `runs/run-<id>.jsonl`)
-// flushed after every event for post-mortem inspection and debugging.
+// verification is currently executing) and a serialized JSONL audit trail on disk
+// (`.peer/<pr>/<short-sha>/audit.jsonl` for the latest run and `runs/run-<id>.jsonl`
+// per run) flushed after every event for post-mortem inspection and debugging.
 export class AuditLogger {
   public readonly repoRoot: string;
   public readonly prNumber: number;
@@ -41,6 +41,7 @@ export class AuditLogger {
   private readonly startTimeMs: number;
   private readonly onProgress?: (formattedLine: string) => void;
   private initPromise: Promise<void> | null = null;
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(options: AuditLoggerOptions) {
     this.repoRoot = options.repoRoot;
@@ -105,10 +106,14 @@ export class AuditLogger {
     };
 
     const jsonLine = `${JSON.stringify(record)}\n`;
-    await Promise.all([
-      appendFile(this.getLatestAuditJsonlPath(), jsonLine),
-      appendFile(this.getRunAuditJsonlPath(), jsonLine),
-    ]);
+    const writeOp = this.writeChain.then(async () => {
+      await Promise.all([
+        appendFile(this.getLatestAuditJsonlPath(), jsonLine),
+        appendFile(this.getRunAuditJsonlPath(), jsonLine),
+      ]);
+    });
+    this.writeChain = writeOp.catch(() => {});
+    await writeOp;
 
     if (this.onProgress && message.trim().length > 0) {
       this.onProgress(`[${formatElapsed(elapsedMs)}] ${message}`);

@@ -40,7 +40,7 @@ echo "Downloading ${ARCHIVE} (${VERSION})..."
 curl -fsSL "${BASE_URL}/${ARCHIVE}" -o "${TMP_DIR}/${ARCHIVE}"
 curl -fsSL "${BASE_URL}/SHA256SUMS.txt" -o "${TMP_DIR}/SHA256SUMS.txt"
 
-EXPECTED_SHA="$(grep " ${ARCHIVE}\$" "${TMP_DIR}/SHA256SUMS.txt" | awk '{print $1}')"
+EXPECTED_SHA="$(awk -v f="${ARCHIVE}" '$2 == f { print $1; exit }' "${TMP_DIR}/SHA256SUMS.txt")"
 if [ -z "${EXPECTED_SHA}" ]; then
   echo "Failed to find checksum for ${ARCHIVE} in SHA256SUMS.txt" >&2
   exit 1

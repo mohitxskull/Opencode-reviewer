@@ -1,12 +1,18 @@
 import { z } from "zod";
 
-import { type CrateGraph, type Finding, FindingSchema } from "../domain/models.ts";
+import {
+  AnalyzerExecutionError,
+  type CrateGraph,
+  type Finding,
+  FindingSchema,
+} from "../domain/models.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { runTrackedCommand } from "../infra/process.ts";
 
 export class CargoGeigerMissingError extends Error {
   constructor() {
     super(
-      "`cargo-geiger` is required when `--geiger` is enabled, but it is not installed. Install it with: cargo install cargo-geiger",
+      "`cargo-geiger` is required when `--tools geiger` is enabled, but it is not installed. Install it with: cargo install cargo-geiger",
     );
     this.name = "CargoGeigerMissingError";
   }
@@ -156,18 +162,10 @@ async function defaultCargoGeigerRunner(
   if (!Bun.which("cargo-geiger")) {
     throw new CargoGeigerMissingError();
   }
-  const proc = Bun.spawn(["cargo", "geiger", "--output-format", "Json"], {
+  return await runTrackedCommand(["cargo", "geiger", "--output-format", "Json"], {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
 }
 
 export async function collectCargoGeigerReport(
@@ -188,6 +186,10 @@ export async function collectCargoGeigerReport(
     /no such command:\s*`?geiger`?|not found|ENOENT/i.test(combined)
   ) {
     throw new CargoGeigerMissingError();
+  }
+
+  if (exitCode !== 0 && !stdout.includes('"packages"')) {
+    throw new AnalyzerExecutionError("cargo geiger", exitCode, stderr || stdout);
   }
 
   return parseCargoGeigerJson(stdout, options.crateGraph);

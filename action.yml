@@ -38,7 +38,7 @@ runs:
       env:
         PEER_VERSION: ${{ inputs.version }}
       run: |
-        curl -fsSL https://raw.githubusercontent.com/mohitxskull/Opencode-reviewer/main/install.sh | sh
+        sh "${{ github.action_path }}/install.sh"
         echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
 
     - name: Run peer check

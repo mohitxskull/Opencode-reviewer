@@ -18,7 +18,8 @@ import {
 import { partitionAndFilterFindings } from "../judge/partition.ts";
 import { SuggestionCompilerVerifier } from "../judge/verifier.ts";
 import {
-  parseLensFindingsOutput,
+  LensOutputParseError,
+  parseLensFindingsWithWarnings,
   parseSkepticVerdicts,
   parseWalkthroughOutput,
 } from "../llm/parser.ts";
@@ -49,25 +50,6 @@ export interface FinalizeStageResult {
   readonly warnings: string[];
 }
 
-function collectMarkdownParseWarnings(rawText: string, parsedCount: number): string[] {
-  const warnings: string[] = [];
-  const blockMatches = rawText.match(/^###\s+FINDING\b/gim) ?? [];
-  if (blockMatches.length > parsedCount) {
-    warnings.push(
-      `Dropped ${blockMatches.length - parsedCount} malformed ### FINDING block(s) out of ${blockMatches.length} (check required File/Lines/Title/Body fields).`,
-    );
-  }
-  const sevLines = rawText.match(/^-\s*Severity\s*:\s*(.+)$/gim) ?? [];
-  const validSevs = new Set(["critical", "major", "minor", "trivial", "info", "none"]);
-  for (const line of sevLines) {
-    const rawSev = line.split(":").slice(1).join(":").trim().toLowerCase();
-    if (rawSev && !validSevs.has(rawSev)) {
-      warnings.push(`Unknown severity "${rawSev}" coerced to Minor.`);
-    }
-  }
-  return warnings;
-}
-
 function parseAgentReviewInput(
   rawText: string,
   fallbackWalkthrough: WalkthroughReport,
@@ -80,14 +62,33 @@ function parseAgentReviewInput(
   warnings: string[];
 } {
   let walkthrough = fallbackWalkthrough;
+  let parsedWalkthrough = false;
   try {
     walkthrough = parseWalkthroughOutput(rawText);
+    parsedWalkthrough = true;
   } catch {
     // Walkthrough section is optional when agent only submits findings
   }
 
-  const parsedFindings = parseLensFindingsOutput(rawText);
-  const findings: Finding[] = parsedFindings.findings.map((f) => {
+  let parsedFindings: ReturnType<typeof parseLensFindingsWithWarnings>;
+  try {
+    parsedFindings = parseLensFindingsWithWarnings(rawText);
+  } catch (err) {
+    // Allow standalone walkthrough.md files inside `--from <dir>` that have no `## FINDINGS` section
+    if (parsedWalkthrough && err instanceof LensOutputParseError) {
+      return {
+        walkthrough,
+        findings: [],
+        consideredAndRejected: [],
+        deletionsProposed: [],
+        openQuestions: [],
+        warnings: [],
+      };
+    }
+    throw err;
+  }
+
+  const findings: Finding[] = parsedFindings.output.findings.map((f) => {
     const fp = computeFindingFingerprint(f);
     const inferredSource = f.type === "Idioms" || f.type === "Refactor" ? "idioms" : "soundness";
     return FindingSchema.parse({
@@ -97,14 +98,13 @@ function parseAgentReviewInput(
       source: inferredSource,
     });
   });
-  const warnings = collectMarkdownParseWarnings(rawText, findings.length);
   return {
     walkthrough,
     findings,
-    consideredAndRejected: parsedFindings.consideredAndRejected,
-    deletionsProposed: parsedFindings.deletionsProposed,
-    openQuestions: parsedFindings.openQuestions,
-    warnings,
+    consideredAndRejected: parsedFindings.output.consideredAndRejected,
+    deletionsProposed: parsedFindings.output.deletionsProposed,
+    openQuestions: parsedFindings.output.openQuestions,
+    warnings: parsedFindings.warnings,
   };
 }
 

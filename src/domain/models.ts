@@ -1,5 +1,20 @@
 import { z } from "zod";
 
+import packageJson from "../../package.json";
+
+export class AnalyzerExecutionError extends Error {
+  readonly tool: string;
+  readonly exitCode: number;
+
+  constructor(tool: string, exitCode: number, stderr: string) {
+    const snippet = stderr.trim().slice(0, 400) || "(no stderr)";
+    super(`\`${tool}\` exited with code ${exitCode} without valid output: ${snippet}`);
+    this.name = "AnalyzerExecutionError";
+    this.tool = tool;
+    this.exitCode = exitCode;
+  }
+}
+
 // Why: GitHub's multi-line PR review comment API (start_line..line on side="RIGHT")
 // rejects comments whose start_line and line belong to different diff hunks with
 // 422 Unprocessable Entity. Requiring both lines to reside inside the same DiffHunk
@@ -145,28 +160,35 @@ export type Finding = z.infer<typeof FindingSchema>;
 
 export const LensFindingsOutputSchema = z.object({
   findings: z.array(
-    z.object({
-      filePath: z.string().min(1),
-      startLine: z.number().int().min(1),
-      endLine: z.number().int().min(1),
-      severity: SeveritySchema,
-      type: FindingTypeSchema,
-      epistemicState: EpistemicStateSchema.default("VERIFIED-DEFECT"),
-      evidenceMechanism: EvidenceMechanismSchema.default("Correctness"),
-      title: z.string().min(1),
-      body: z.string().min(1),
-      rootCause: z.string().default(""),
-      blastRadius: z.string().default("Local module"),
-      reversible: z.boolean().default(true),
-      dependsOn: z.string().nullable().default(null),
-      verificationCommand: z
-        .string()
-        .default("cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings"),
-      traceability: z.string().default(""),
-      suggestion: z.string().nullable().default(null),
-      agentPrompt: z.string().min(1),
-      confidence: z.number().min(0).max(1).default(0.9),
-    }),
+    z
+      .object({
+        filePath: z.string().min(1),
+        startLine: z.number().int().min(1),
+        endLine: z.number().int().min(1),
+        severity: SeveritySchema,
+        type: FindingTypeSchema,
+        epistemicState: EpistemicStateSchema.default("VERIFIED-DEFECT"),
+        evidenceMechanism: EvidenceMechanismSchema.default("Correctness"),
+        title: z.string().min(1),
+        body: z.string().min(1),
+        rootCause: z.string().default(""),
+        blastRadius: z.string().default("Local module"),
+        reversible: z.boolean().default(true),
+        dependsOn: z.string().nullable().default(null),
+        verificationCommand: z
+          .string()
+          .default(
+            "cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
+          ),
+        traceability: z.string().default(""),
+        suggestion: z.string().nullable().default(null),
+        agentPrompt: z.string().min(1),
+        confidence: z.number().min(0).max(1).default(0.9),
+      })
+      .refine((val) => val.startLine <= val.endLine, {
+        message: "startLine must be less than or equal to endLine",
+        path: ["startLine"],
+      }),
   ),
   consideredAndRejected: z.array(ConsideredAndRejectedItemSchema).default([]),
   deletionsProposed: z.array(DeletionProposedItemSchema).default([]),
@@ -262,7 +284,7 @@ export const ReviewCheckpointSchema = z.object({
 });
 export type ReviewCheckpoint = z.infer<typeof ReviewCheckpointSchema>;
 
-export const PEER_VERSION = "0.3.0";
+export const PEER_VERSION: string = packageJson.version;
 
 export const PipelineStageSchema = z.enum(["analyze", "review", "verify", "publish"]);
 export type PipelineStage = z.infer<typeof PipelineStageSchema>;
@@ -307,6 +329,8 @@ export const AnalyzeStageContextSchema = z.object({
   clippyDiagnostics: z.array(ClippyDiagnosticSchema),
   securityAdvisories: z.array(SecurityAdvisorySchema),
   enabledTools: z.array(z.string()).default([]),
+  configHash: z.string(),
+  peerVersion: z.string(),
   deterministicFindings: z.array(FindingSchema).default([]),
   generatedAt: z.string(),
 });

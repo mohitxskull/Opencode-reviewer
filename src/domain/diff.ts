@@ -1,6 +1,7 @@
 import parseDiff from "parse-diff";
 
 import type { DiffFileMap, DiffHunk } from "./models.ts";
+import { matchRepoGlob } from "./paths.ts";
 
 // Why: LLMs frequently miscount line numbers when reading raw `@@ -a,b +c,d @@`
 // unified diff hunks containing interleaved `-` and `+` lines. Pre-rendering
@@ -16,8 +17,8 @@ export function formatAnnotatedDiffLine(
 
 // Why: Reviewing .md documentation, plans, review reports, Cargo.lock, and CI YAML
 // wastes tens of thousands of tokens on non-Rust prose and causes review lenses
-// to lose focus on actual Rust code invariants. Only Rust source files (*.rs)
-// and Cargo manifests (Cargo.toml) are eligible for Rust PR review.
+// to lose focus on actual Rust code invariants. Only Rust source files (*.rs),
+// Cargo manifests (Cargo.toml), and peer.toml are eligible for Rust PR review.
 export function isReviewableRustCodeFile(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
   if (
@@ -41,6 +42,7 @@ export function isSensitiveRepoFile(filePath: string): boolean {
     normalized === "rust-toolchain.toml" ||
     normalized === "rust-toolchain" ||
     normalized === "deny.toml" ||
+    normalized === ".peer/baseline.json" ||
     normalized.startsWith(".github/workflows/") ||
     normalized.endsWith(".proto")
   );
@@ -65,20 +67,7 @@ function matchesAnyIgnoreGlob(filePath: string, ignoreGlobs: readonly string[]):
   if (normalized === "peer.toml") {
     return false;
   }
-  for (const pattern of ignoreGlobs) {
-    const cleaned = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
-    const glob = new Bun.Glob(cleaned);
-    if (glob.match(normalized)) {
-      return true;
-    }
-    if (cleaned.endsWith("/**")) {
-      const prefix = cleaned.slice(0, -3);
-      if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return ignoreGlobs.some((pattern) => matchRepoGlob(pattern, normalized));
 }
 
 export function filterCodeOnlyDiffMap(

@@ -22,6 +22,7 @@ import {
   CheckpointStore,
   detectRepoOwnerAndName,
   ensureCleanWorkingTree,
+  ensureCommitFetched,
   resolveGitTopLevel,
   resolvePeerCommitDir,
   restoreInterruptedSession,
@@ -239,7 +240,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       }
     }
 
-    if (command !== "publish" && !noCheckout) {
+    const isVerdictsOnlyFinalize = command === "finalize" && Boolean(parsed.values.verdicts);
+    if (command !== "publish" && !noCheckout && !isVerdictsOnlyFinalize) {
       await ensureCleanWorkingTree(repoRoot);
     }
 
@@ -294,6 +296,8 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
 
     const pr = await githubClient.getPullRequest(owner, repo, prNumber);
+    // Ensure baseSha is present locally so `git show <baseSha>:...` never silently falls back on stale clones
+    ensureCommitFetched(repoRoot, pr.baseSha, pr.baseRefName);
     // Load peer.toml strictly from pr.baseSha (never untrusted pr.headSha)
     const peerConfig = await loadPeerConfig(repoRoot, pr.baseSha);
     const configHash = computePeerConfigHash(peerConfig);
@@ -404,7 +408,14 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
     }
 
     // command === "finalize"
-    const fromPath = parsed.values.from ? resolve(parsed.values.from) : undefined;
+    const fromPath = parsed.values.from
+      ? parsed.values.from
+          .split(",")
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .map((p) => resolve(p))
+          .join(",")
+      : undefined;
     const verdictsPath = parsed.values.verdicts ? resolve(parsed.values.verdicts) : undefined;
     const result = await runFinalizeStage({
       repoRoot,

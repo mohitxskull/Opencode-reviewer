@@ -3,12 +3,14 @@ import { join } from "node:path";
 import { z } from "zod";
 
 import {
+  AnalyzerExecutionError,
   type CrateGraph,
   type DiffFileMap,
   type Finding,
   FindingSchema,
 } from "../domain/models.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { runTrackedCommand } from "../infra/process.ts";
 import { analyzeRustSourceAst, isLineInRegions } from "./ast.ts";
 import { resolveFileArchitecturalLayer } from "./rust.ts";
 
@@ -100,18 +102,20 @@ export function parseMiriOutput(rawOutput: string): MiriDiagnostic[] {
     const message = match[1].trim();
     let filePath = "src/lib.rs";
     let lineNum = 1;
+    let foundLoc = false;
     let help: string | null = null;
 
-    // Look ahead up to 12 lines for location arrow (--> path:line:col) and = help:
+    // Look ahead up to 15 lines for location arrow (--> path:line:col) and = help:
     for (let j = i + 1; j < Math.min(lines.length, i + 15); j++) {
       const nextLine = lines[j] ?? "";
       if (/^error:/.test(nextLine) || /^----\s+/.test(nextLine)) {
         break;
       }
       const locMatch = nextLine.match(/^\s*-->\s+([^:\s]+):(\d+):(\d+)/);
-      if (locMatch?.[1] && filePath === "src/lib.rs" && lineNum === 1) {
+      if (locMatch?.[1] && !foundLoc) {
         filePath = locMatch[1].replace(/^\.\//, "");
         lineNum = Math.max(1, Number.parseInt(locMatch[2] ?? "1", 10) || 1);
+        foundLoc = true;
       }
       const helpMatch = nextLine.match(/^\s*=\s*help:\s*(.+)$/);
       if (helpMatch?.[1] && !help) {
@@ -153,18 +157,10 @@ async function defaultCargoMiriRunner(
   for (const pkg of packages) {
     args.push("-p", pkg);
   }
-  const proc = Bun.spawn(args, {
+  return await runTrackedCommand(args, {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
 }
 
 export async function collectMiriReport(
@@ -215,11 +211,16 @@ export async function collectMiriReport(
     throw new MiriMissingError();
   }
 
+  const diagnostics = parseMiriOutput(combined);
+  if (exitCode !== 0 && diagnostics.length === 0 && !/test result:\s*ok\b/i.test(combined)) {
+    throw new AnalyzerExecutionError("cargo +nightly miri test", exitCode, stderr || stdout);
+  }
+
   return MiriReportSchema.parse({
     modifiedUnsafeFiles,
     testedCrates,
     skippedReason: null,
-    diagnostics: parseMiriOutput(combined),
+    diagnostics,
   });
 }
 

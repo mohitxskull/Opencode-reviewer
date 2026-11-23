@@ -1,9 +1,17 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 
 import { z } from "zod";
 
 import { computeFindingFingerprint, type Finding } from "../domain/models.ts";
+import { tryGitRawSync } from "./git.ts";
+
+export class CorruptBaselineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CorruptBaselineError";
+  }
+}
 
 export const PeerBaselineSchema = z.object({
   version: z.literal(1).default(1),
@@ -20,17 +28,48 @@ export function findingBaselineKey(finding: Finding): string {
   return computeFindingFingerprint(finding);
 }
 
-export async function loadBaselineFingerprints(repoRoot: string): Promise<Set<string>> {
-  const file = Bun.file(resolveBaselinePath(repoRoot));
-  if (!(await file.exists())) {
-    return new Set();
+// Why: A PR head commit is untrusted and could edit `.peer/baseline.json` in the
+// same PR to silence all CI gate findings. When `gitRef` (baseSha) is provided,
+// always read `.peer/baseline.json` from the trusted base branch via `git show`.
+export async function loadBaselineFingerprints(
+  repoRoot: string,
+  gitRef?: string,
+): Promise<Set<string>> {
+  let rawText: string | null = null;
+  let sourceLabel = resolveBaselinePath(repoRoot);
+
+  if (gitRef) {
+    sourceLabel = `${gitRef.slice(0, 7)}:.peer/baseline.json`;
+    const fromGit = tryGitRawSync(repoRoot, ["show", `${gitRef}:.peer/baseline.json`]);
+    if (!fromGit.ok || fromGit.stdout.trim().length === 0) {
+      return new Set();
+    }
+    rawText = fromGit.stdout;
+  } else {
+    const file = Bun.file(sourceLabel);
+    if (!(await file.exists())) {
+      return new Set();
+    }
+    rawText = await file.text();
   }
+
+  let rawJson: unknown;
   try {
-    const parsed = PeerBaselineSchema.parse(await file.json());
-    return new Set(parsed.fingerprints);
-  } catch {
-    return new Set();
+    rawJson = JSON.parse(rawText);
+  } catch (err) {
+    throw new CorruptBaselineError(
+      `Corrupt baseline JSON at ${sourceLabel}: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
+
+  const parsed = PeerBaselineSchema.safeParse(rawJson);
+  if (!parsed.success) {
+    const details = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    throw new CorruptBaselineError(`Invalid baseline schema at ${sourceLabel}: ${details}`);
+  }
+  return new Set(parsed.data.fingerprints);
 }
 
 export async function saveBaselineFingerprints(
@@ -45,7 +84,9 @@ export async function saveBaselineFingerprints(
     updatedAt: new Date().toISOString(),
     fingerprints,
   };
-  await Bun.write(path, `${JSON.stringify(payload, null, 2)}\n`);
+  const tmpPath = `${path}.${process.pid}.${Bun.randomUUIDv7()}.tmp`;
+  await Bun.write(tmpPath, `${JSON.stringify(payload, null, 2)}\n`);
+  await rename(tmpPath, path);
   return path;
 }
 

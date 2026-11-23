@@ -2,15 +2,21 @@ import { isAbsolute, join, relative } from "node:path";
 
 import { z } from "zod";
 
-import { type DiffFileMap, type Finding, FindingSchema } from "../domain/models.ts";
+import {
+  AnalyzerExecutionError,
+  type DiffFileMap,
+  type Finding,
+  FindingSchema,
+} from "../domain/models.ts";
 import { isRustTestOrBenchPath } from "../domain/paths.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { runTrackedCommand } from "../infra/process.ts";
 import { analyzeRustSourceAst, isLineInRegions } from "./ast.ts";
 
 export class CargoLlvmCovMissingError extends Error {
   constructor() {
     super(
-      "`cargo-llvm-cov` is required when `--coverage` is enabled, but it is not installed. Install it with: cargo install cargo-llvm-cov",
+      "`cargo-llvm-cov` is required when `--tools coverage` is enabled, but it is not installed. Install it with: cargo install cargo-llvm-cov",
     );
     this.name = "CargoLlvmCovMissingError";
   }
@@ -216,18 +222,10 @@ async function defaultCargoLlvmCovRunner(
   for (const pkg of packages) {
     args.push("-p", pkg);
   }
-  const proc = Bun.spawn(args, {
+  return await runTrackedCommand(args, {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
 }
 
 export async function collectCargoLlvmCovReport(
@@ -253,6 +251,10 @@ export async function collectCargoLlvmCovReport(
     /no such command:\s*`?llvm-cov`?|not found|ENOENT/i.test(combined)
   ) {
     throw new CargoLlvmCovMissingError();
+  }
+
+  if (exitCode !== 0 && !stdout.includes('"data"')) {
+    throw new AnalyzerExecutionError("cargo llvm-cov", exitCode, stderr || stdout);
   }
 
   return await parseLlvmCovJson(stdout, repoRoot, diffMap);

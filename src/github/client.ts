@@ -23,7 +23,7 @@ export class ExistingManualPendingReviewError extends Error {
 
   constructor(reviewId: number, prNumber: number) {
     super(
-      `Found an existing manual PENDING draft review (id=${reviewId}) on PR #${prNumber} that was not created by peer. Submit or discard your manual draft review on GitHub before running 'peer --post'.`,
+      `Found an existing manual PENDING draft review (id=${reviewId}) on PR #${prNumber} that was not created by peer. Submit or discard your manual draft review on GitHub before running 'peer publish'.`,
     );
     this.name = "ExistingManualPendingReviewError";
     this.reviewId = reviewId;
@@ -43,14 +43,6 @@ async function defaultKeychainTokenReader(): Promise<string | null> {
     // Headless Linux without libsecret daemon — fall through cleanly
     return null;
   }
-}
-
-export async function saveGitHubTokenToKeychain(token: string): Promise<void> {
-  await Bun.secrets.set({
-    service: PEER_SECRET_SERVICE,
-    name: PEER_GITHUB_SECRET_NAME,
-    value: token.trim(),
-  });
 }
 
 async function defaultGhAuthTokenRunner(): Promise<string> {
@@ -294,7 +286,7 @@ export class GitHubClient {
   // Why: On GitHub REST API v3, omitting the `event` parameter in
   // `octokit.rest.pulls.createReview` creates a PENDING (draft) review visible
   // only to the authenticated developer until they review and submit it in the
-  // GitHub UI (or pass --submit-review). Because GitHub allows only one PENDING
+  // GitHub UI (or pass --submit). Because GitHub allows only one PENDING
   // review per user per PR (returning HTTP 422 on a second POST), we delete any
   // prior PENDING review owned by the same user that carries `PEER_REVIEW_MARKER`
   // before creating a fresh one — leaving manually authored human PENDING drafts untouched.

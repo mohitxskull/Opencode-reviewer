@@ -43,8 +43,14 @@ export async function advisoriesToFindings(
     const escaped = crateName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const regex = new RegExp(`^\\s*${escaped}\\s*=`);
     for (const [relManifest, lines] of manifestLines.entries()) {
+      let inDepsSection = false;
       for (let i = 0; i < lines.length; i++) {
-        if (regex.test(lines[i] ?? "")) {
+        const trimmed = (lines[i] ?? "").trim();
+        if (trimmed.startsWith("[")) {
+          inDepsSection = /dependencies\]$/i.test(trimmed) || /\.dependencies\./i.test(trimmed);
+          continue;
+        }
+        if (inDepsSection && regex.test(lines[i] ?? "")) {
           return { filePath: relManifest, line: i + 1 };
         }
       }
@@ -206,12 +212,17 @@ function shouldMergeOverlapping(existing: Finding, candidate: Finding): boolean 
   ) {
     return false;
   }
-  // Always merge overlapping clippy + lens pairs (same compiler/LLM issue)
+  // Merge overlapping clippy + lens pairs only when they target the same category or tight span
   const oneIsClippy =
     (existing.source === "clippy" && candidate.source !== "clippy") ||
     (existing.source !== "clippy" && candidate.source === "clippy");
   if (oneIsClippy) {
-    return true;
+    const sameType = existing.type === candidate.type;
+    const maxSpan = Math.max(
+      existing.endLine - existing.startLine,
+      candidate.endLine - candidate.startLine,
+    );
+    return sameType || maxSpan <= 5;
   }
   // For two LLM findings on overlapping lines, only merge if they describe the same root cause
   const aKey = normalizedCauseKey(existing);

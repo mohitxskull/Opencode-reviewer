@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { matchRepoGlob } from "../domain/paths.ts";
 import { tryGitRawSync } from "./git.ts";
 
 export interface RepoInstruction {
@@ -29,32 +30,6 @@ async function readRepoTextFile(
   }
   const text = await file.text();
   return text.trim().length > 0 ? text : null;
-}
-
-function matchesGlobScope(scope: string, filePath: string): boolean {
-  const normalizedPath = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
-  const normalizedScope = scope.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-  if (!normalizedScope) {
-    return true;
-  }
-  const candidates = new Set<string>([normalizedScope]);
-  if (normalizedScope.includes("/**/")) {
-    candidates.add(normalizedScope.replace(/\/\*\*\//g, "/"));
-  }
-  if (normalizedScope.startsWith("**/")) {
-    candidates.add(normalizedScope.slice(3));
-  }
-  for (const pattern of candidates) {
-    try {
-      const glob = new Bun.Glob(pattern);
-      if (glob.match(normalizedPath)) {
-        return true;
-      }
-    } catch {
-      // Ignore malformed user glob patterns rather than crashing analysis
-    }
-  }
-  return false;
 }
 
 export function parseCodeRabbitYamlInstructions(
@@ -153,7 +128,7 @@ export function matchRepoInstructions(
     if (!item.scope) {
       return true;
     }
-    return paths.some((fp) => matchesGlobScope(item.scope as string, fp));
+    return paths.some((fp) => matchRepoGlob(item.scope as string, fp));
   });
 }
 

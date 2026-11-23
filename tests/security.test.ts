@@ -175,6 +175,10 @@ describe("Deterministic CVE & RustSec advisory collector", () => {
       SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt",
       RUSTC_WRAPPER: "sccache",
       SCCACHE_DIR: "/tmp/sccache",
+      SCCACHE_AZURE_CONNECTION_STRING: "DefaultEndpointsProtocol=https;AccountKey=secret",
+      SCCACHE_REDIS_PASSWORD: "redis-password",
+      SYSTEMROOT: "C:\\Windows",
+      USERPROFILE: "C:\\Users\\dev",
       CARGO_NET_OFFLINE: "true",
       CARGO_HTTP_MULTIPLEXING: "false",
       PEER_GITHUB_TOKEN: "ghp_super_secret",
@@ -190,6 +194,10 @@ describe("Deterministic CVE & RustSec advisory collector", () => {
     expect(scrubbed.SSL_CERT_FILE).toBe("/etc/ssl/certs/ca-certificates.crt");
     expect(scrubbed.RUSTC_WRAPPER).toBe("sccache");
     expect(scrubbed.SCCACHE_DIR).toBe("/tmp/sccache");
+    expect(scrubbed.SCCACHE_AZURE_CONNECTION_STRING).toBeUndefined();
+    expect(scrubbed.SCCACHE_REDIS_PASSWORD).toBeUndefined();
+    expect(scrubbed.SYSTEMROOT).toBe("C:\\Windows");
+    expect(scrubbed.USERPROFILE).toBe("C:\\Users\\dev");
     expect(scrubbed.CARGO_NET_OFFLINE).toBe("true");
     expect(scrubbed.CARGO_HTTP_MULTIPLEXING).toBe("false");
     expect(scrubbed.PEER_GITHUB_TOKEN).toBeUndefined();

@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
+import { matchRepoGlob } from "../domain/paths.ts";
 import { resolvePeerStateDir, tryGitRawSync } from "./git.ts";
 
 export class CorruptLearningStoreError extends Error {
@@ -29,21 +30,10 @@ const LearningFilePayloadSchema = z.object({
 
 export function scopeGlobMatchesFile(scopeGlob: string, filePath: string): boolean {
   const normalizedPattern = scopeGlob.replace(/\\/g, "/").replace(/^\.\//, "");
-  const normalizedPath = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
   if (normalizedPattern === "*" || normalizedPattern === "**") {
     return true;
   }
-  const glob = new Bun.Glob(normalizedPattern);
-  if (glob.match(normalizedPath)) {
-    return true;
-  }
-  if (normalizedPattern.endsWith("/**")) {
-    const prefix = normalizedPattern.slice(0, -3);
-    if (normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`)) {
-      return true;
-    }
-  }
-  return false;
+  return matchRepoGlob(normalizedPattern, filePath);
 }
 
 // Why: Persistent repository learnings prevent the reviewer from re-litigating

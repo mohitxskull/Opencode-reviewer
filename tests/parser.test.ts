@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   LensOutputParseError,
   parseLensFindingsOutput,
+  parseLensFindingsWithWarnings,
   parseSkepticVerdicts,
   parseWalkthroughOutput,
 } from "../src/llm/parser.ts";
@@ -268,5 +269,28 @@ Trailing inline code span must keep its closing backtick.
     expect(parsed.findings[0]?.title).toBe(
       "Replace unused `_px_dec` binding with `let _ = latest_price;`",
     );
+  });
+
+  test("F-04: parseLensFindingsWithWarnings accepts severity aliases with 0 warnings and ignores ### FINDING inside code fences", () => {
+    const md = `## FINDINGS
+
+### FINDING
+- file: src/lib.rs
+- lines: 10-12
+- severity: High
+- type: Bug
+- title: Real bug with alias severity
+
+#### Explanation
+Example markdown:
+\`\`\`markdown
+### FINDING
+- file: fake.rs
+\`\`\`
+`;
+    const { output, warnings } = parseLensFindingsWithWarnings(md);
+    expect(warnings).toEqual([]);
+    expect(output.findings.length).toBe(1);
+    expect(output.findings[0]?.severity).toBe("Major");
   });
 });

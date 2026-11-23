@@ -62,4 +62,27 @@ describe("Tree-sitter Rust AST analyzer", () => {
     expect(isLineInRegions(25, ast.testRegions)).toBe(true);
     expect(isLineInRegions(9, ast.testRegions)).toBe(false);
   });
+
+  test('F-09: TEST_ATTR_REGEX ignores #[serde(rename = "test")] and panicCalls catches URL .unwrap() while ignoring string literals', async () => {
+    const rustCode = [
+      '#[serde(rename = "test")]',
+      "pub fn prod_fn() {",
+      '    let msg = "never call .unwrap() in prod";',
+      '    let _u = Url::parse("https://example.com").unwrap();',
+      '    /* x.expect("block comment") */',
+      "    unsafe { std::hint::unreachable_unchecked() }",
+      "}",
+      "",
+    ].join("\n");
+
+    const ast = await analyzeRustSourceAst(rustCode);
+    const prod = ast.symbols.find((s) => s.name === "prod_fn");
+    expect(prod?.isTest).toBe(false);
+    expect(ast.testRegions).toEqual([]);
+    expect(ast.unsafeRegions).toEqual([{ startLine: 6, endLine: 6 }]);
+    // Line 4 (.unwrap() after https://) IS detected; line 3 (string) and line 5 (block comment) are NOT
+    expect(ast.panicCalls).toEqual([
+      { line: 4, op: ".unwrap()", isStubMacro: false, isTest: false },
+    ]);
+  });
 });

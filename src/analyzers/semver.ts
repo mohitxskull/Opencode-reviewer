@@ -1,12 +1,13 @@
 import { z } from "zod";
 
-import { type Finding, FindingSchema } from "../domain/models.ts";
+import { AnalyzerExecutionError, type Finding, FindingSchema } from "../domain/models.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
+import { runTrackedCommand } from "../infra/process.ts";
 
 export class CargoSemverChecksMissingError extends Error {
   constructor() {
     super(
-      "`cargo-semver-checks` is required when `--semver` is enabled, but it is not installed. Install it with: cargo install cargo-semver-checks",
+      "`cargo-semver-checks` is required when `--tools semver` is enabled, but it is not installed. Install it with: cargo install cargo-semver-checks",
     );
     this.name = "CargoSemverChecksMissingError";
   }
@@ -58,7 +59,7 @@ export function parseCargoSemverOutput(rawOutput: string): SemverViolation[] {
         ? "minor"
         : bumpMatch?.[1]?.toLowerCase() === "major"
           ? "major"
-          : "major";
+          : "unknown";
 
     const failedInMatch = block.match(/Failed in:\s*([\s\S]*?)(?:\n\n|$)/);
     const failedLines = failedInMatch?.[1]
@@ -129,18 +130,13 @@ async function defaultCargoSemverRunner(
   if (!Bun.which("cargo-semver-checks")) {
     throw new CargoSemverChecksMissingError();
   }
-  const proc = Bun.spawn(["cargo", "semver-checks", "check-release", "--baseline-rev", baseSha], {
-    cwd: repoRoot,
-    env: buildScrubbedCargoEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
+  return await runTrackedCommand(
+    ["cargo", "semver-checks", "check-release", "--baseline-rev", baseSha],
+    {
+      cwd: repoRoot,
+      env: buildScrubbedCargoEnv(),
+    },
+  );
 }
 
 export async function collectCargoSemverViolations(
@@ -163,7 +159,11 @@ export async function collectCargoSemverViolations(
     throw new CargoSemverChecksMissingError();
   }
 
-  return parseCargoSemverOutput(combined);
+  const parsed = parseCargoSemverOutput(combined);
+  if (exitCode !== 0 && parsed.length === 0) {
+    throw new AnalyzerExecutionError("cargo semver-checks", exitCode, stderr || stdout);
+  }
+  return parsed;
 }
 
 export function formatSemverPromptSection(violations: readonly SemverViolation[]): string {
@@ -184,7 +184,7 @@ export function semverViolationsToFindings(violations: readonly SemverViolation[
       filePath: v.filePath,
       startLine: v.line,
       endLine: v.line,
-      severity: v.requiredBump === "major" ? "Major" : "Minor",
+      severity: v.requiredBump === "minor" ? "Minor" : "Major",
       type: "Bug",
       epistemicState: "VERIFIED-DEFECT",
       evidenceMechanism: "Correctness",

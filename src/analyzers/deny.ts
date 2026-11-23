@@ -2,9 +2,10 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
-import { type Finding, FindingSchema } from "../domain/models.ts";
+import { AnalyzerExecutionError, type Finding, FindingSchema } from "../domain/models.ts";
 import { buildScrubbedCargoEnv } from "../infra/env.ts";
 import { parseJsonlObjects } from "../infra/jsonl.ts";
+import { runTrackedCommand } from "../infra/process.ts";
 
 export class CargoDenyMissingError extends Error {
   constructor() {
@@ -81,18 +82,10 @@ async function defaultCargoDenyRunner(
   if (!Bun.which("cargo-deny")) {
     throw new CargoDenyMissingError();
   }
-  const proc = Bun.spawn(["cargo", "deny", "check", "--format", "json"], {
+  return await runTrackedCommand(["cargo", "deny", "check", "--format", "json"], {
     cwd: repoRoot,
     env: buildScrubbedCargoEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
 }
 
 export async function collectCargoDenyDiagnostics(
@@ -117,7 +110,16 @@ export async function collectCargoDenyDiagnostics(
     throw new CargoDenyMissingError();
   }
 
-  return parseCargoDenyJsonLines(combined);
+  const parsed = parseCargoDenyJsonLines(combined);
+  if (
+    exitCode !== 0 &&
+    parsed.length === 0 &&
+    !combined.includes('"type":"summary"') &&
+    !combined.includes('"type": "summary"')
+  ) {
+    throw new AnalyzerExecutionError("cargo deny", exitCode, stderr || stdout);
+  }
+  return parsed;
 }
 
 export function denyDiagnosticsToFindings(diagnostics: readonly CargoDenyDiagnostic[]): Finding[] {

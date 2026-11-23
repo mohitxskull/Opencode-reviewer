@@ -69,7 +69,9 @@ export async function ensurePeerWorkspaceExcluded(repoRoot: string): Promise<voi
   const missing = requiredEntries.filter((e) => !lines.has(e));
   if (missing.length > 0) {
     const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-    await Bun.write(excludePath, `${existing}${prefix}${missing.join("\n")}\n`);
+    const tmpExclude = `${excludePath}.${process.pid}.${Bun.randomUUIDv7()}.tmp`;
+    await Bun.write(tmpExclude, `${existing}${prefix}${missing.join("\n")}\n`);
+    await rename(tmpExclude, excludePath);
   }
 }
 
@@ -221,13 +223,21 @@ export async function restoreInterruptedSession(
   if (!(await file.exists())) {
     return { restored: false };
   }
-  const parsed = (await file.json()) as PersistedCheckoutSession;
-  if (!parsed?.originalRef) {
+  let raw: unknown;
+  try {
+    raw = await file.json();
+  } catch (err) {
+    throw new Error(
+      `Corrupt checkout session record at ${sessionPath} (${err instanceof Error ? err.message : String(err)}). Inspect \`git status\` / \`git reflog\` and restore your branch manually, then delete ${sessionPath}.`,
+    );
+  }
+  const parsed = raw as Partial<PersistedCheckoutSession> | null;
+  if (!parsed || typeof parsed.originalRef !== "string" || parsed.originalRef.trim().length === 0) {
     rmSync(sessionPath, { force: true });
     return { restored: false };
   }
   runGitSync(repoRoot, ["checkout", "-f", parsed.originalRef]);
-  if (!parsed.hadCargoLockOnEntry) {
+  if (parsed.hadCargoLockOnEntry === false) {
     const trackedCheck = tryGitSync(repoRoot, ["ls-files", "--error-unmatch", "Cargo.lock"]);
     if (!trackedCheck.ok) {
       rmSync(join(repoRoot, "Cargo.lock"), { force: true });
@@ -235,6 +245,30 @@ export async function restoreInterruptedSession(
   }
   rmSync(sessionPath, { force: true });
   return { restored: true, originalRef: parsed.originalRef };
+}
+
+/**
+ * Ensures a commit SHA (such as `pr.baseSha`) is present in the local git object store
+ * before reading base-branch config/learnings/lockfiles via `git show <sha>:<path>`.
+ */
+export function ensureCommitFetched(
+  repoRoot: string,
+  commitSha: string,
+  refName?: string,
+  remoteName = "origin",
+): boolean {
+  const exists = tryGitSync(repoRoot, ["cat-file", "-e", `${commitSha}^{commit}`]);
+  if (exists.ok) {
+    return true;
+  }
+  if (refName) {
+    tryGitSync(repoRoot, ["fetch", "--no-tags", remoteName, refName]);
+    if (tryGitSync(repoRoot, ["cat-file", "-e", `${commitSha}^{commit}`]).ok) {
+      return true;
+    }
+  }
+  tryGitSync(repoRoot, ["fetch", "--no-tags", remoteName, commitSha]);
+  return tryGitSync(repoRoot, ["cat-file", "-e", `${commitSha}^{commit}`]).ok;
 }
 
 // Why: We check out the PR commit in-place (after verifying `git status --porcelain`
