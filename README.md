@@ -71,15 +71,27 @@ make build    # Compiles standalone binary -> dist/peer
 
 Copy `dist/peer` into your `PATH` (e.g. `cp dist/peer ~/.local/bin/peer`).
 
-### Agent Plugins
+### Install Into Your Coding CLI
 
-- **Antigravity:**
-  ```bash
-  agy plugin install ./plugins/antigravity
-  ```
-  Installs the `peer-review` skill ([plugins/antigravity/skills/peer-review/SKILL.md](plugins/antigravity/skills/peer-review/SKILL.md)) and all 5 Rust lens reference prompts.
-- **OpenCode:**
-  Copy or symlink [plugins/opencode/index.ts](plugins/opencode/index.ts) into `.opencode/plugins/peer.ts` (or `~/.config/opencode/plugins/peer.ts`) to expose `peer_analyze`, `peer_finalize`, and `peer_publish` tools inside OpenCode.
+1. **Install the `peer` binary** (no Bun/Node required for prebuilt releases, or `make build` from source):
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/mohitxskull/Opencode-reviewer/main/install.sh | sh
+   ```
+2. **Add the `peer-review` skill/plugin to your coding CLI** (all coding-CLI integrations live under [`plugins/`](plugins/)):
+   - **Antigravity:**
+     ```bash
+     agy plugin install ./plugins/peer
+     ```
+   - **Claude Code:**
+     ```bash
+     /plugin install ./plugins/peer
+     ```
+   - **Cursor, Codex, OpenCode, or any Agent Skills CLI (`npx skills`):**
+     ```bash
+     npx skills add mohitxskull/Opencode-reviewer --skill peer-review
+     ```
+   - **OpenCode native tools plugin:**
+     Copy or symlink [plugins/opencode/index.ts](plugins/opencode/index.ts) into `.opencode/plugins/peer.ts` (or `~/.config/opencode/plugins/peer.ts`) to expose `peer_doctor`, `peer_prompt`, `peer_check`, `peer_analyze`, `peer_finalize`, and `peer_publish`.
 
 ## CLI Usage
 

@@ -383,5 +383,20 @@ describe("End-to-end agent-agnostic peer CLI pipeline", () => {
     expect(doctorCode).toBe(0);
     expect(out.join("\n")).toContain("peer doctor");
     expect(out.join("\n")).toContain("cargo-audit");
+
+    // peer prompt returns embedded lens prompts and rejects unknown names
+    out.length = 0;
+    const promptCode = await runCli(["prompt", "soundness"], {
+      stdout: (t) => out.push(t),
+    });
+    expect(promptCode).toBe(0);
+    expect(out.join("\n")).toContain("FINDING");
+
+    err.length = 0;
+    const badPromptCode = await runCli(["prompt", "nonexistent"], {
+      stderr: (t) => err.push(t),
+    });
+    expect(badPromptCode).toBe(1);
+    expect(err.join("\n")).toContain('Unknown prompt "nonexistent"');
   });
 });

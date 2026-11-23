@@ -30,6 +30,7 @@ import { LearningStore } from "../workspace/learnings.ts";
 import { runDoctorCommand } from "./doctor.ts";
 import { runInitCommand } from "./init.ts";
 import { runLearnCommand } from "./learn.ts";
+import { runPromptCommand } from "./prompt.ts";
 
 export interface CliDependencies {
   readonly githubClient?: GitHubClient;
@@ -55,6 +56,7 @@ Commands:
   peer finalize [PR] --verdicts <f> Stage 3: Apply skeptic verdicts deterministically -> 03-verify/
   peer publish  [PR]               Stage 4: Upload latest saved stage (01, 02, or 03) to GitHub PR
   peer doctor                      Check local Rust toolchain & analyzer readiness
+  peer prompt <name|list>          Print embedded Rust lens prompt (walkthrough|soundness|idioms|skeptic|format)
   peer restore                     Restore original branch after an interrupted checkout (e.g. SIGKILL)
   peer init [--fresh]              Scaffold a peer.toml repository configuration file
   peer learn add "<rule>" [--scope "<glob>"] [--repo <path>]
@@ -151,6 +153,10 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
 
     if (parsed.positionals[0] === "doctor") {
       return await runDoctorCommand(writeOut);
+    }
+
+    if (parsed.positionals[0] === "prompt") {
+      return runPromptCommand(parsed.positionals.slice(1), writeOut, writeErr);
     }
 
     const repoRoot = resolveGitTopLevel(resolve(parsed.values.repo ?? process.cwd()));

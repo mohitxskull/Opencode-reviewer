@@ -6,7 +6,8 @@ import skepticMd from "./skeptic.md" with { type: "text" };
 import soundnessMd from "./soundness.md" with { type: "text" };
 import walkthroughMd from "./walkthrough.md" with { type: "text" };
 
-const FINDINGS_FORMAT = findingsFormatMd.trim();
+export const FINDINGS_FORMAT_PROMPT = findingsFormatMd.trim();
+const FINDINGS_FORMAT = FINDINGS_FORMAT_PROMPT;
 
 export const WALKTHROUGH_LENS_PROMPT = walkthroughMd.trim();
 export const SKEPTIC_VERIFIER_PROMPT = skepticMd.trim();
