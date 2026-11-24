@@ -68,30 +68,44 @@ function hasPanicInvariantDocOrWhyAbove(
   callLine: number,
   fnStartLine?: number,
 ): boolean {
-  // Check up to 3 lines above the call (staying inside the enclosing function) for `// Why` or `// INVARIANT:`,
-  // and up to 8 doc-comment lines immediately above the enclosing fn for `/// # Panics`.
+  // Check up to 3 lines above the call (staying inside the enclosing function) for standard Rust
+  // invariant/panic rationale comments or Clippy allow/expect attributes, and up to 12 doc-comment
+  // lines immediately above the enclosing fn for `/// # Panics` or `#[expect(clippy::missing_panics_doc)]`.
   const minCallIdx = fnStartLine !== undefined ? Math.max(0, fnStartLine - 1) : 0;
   const callFrom = Math.max(minCallIdx, callLine - 4);
   const callTo = Math.min(lines.length - 1, callLine - 1);
   for (let i = callFrom; i <= callTo; i++) {
-    if (/\/\/[/!]?\s*(?:Why\b|INVARIANT\s*:|#\s*Panics\b)/i.test(lines[i] ?? "")) {
+    const lineText = lines[i] ?? "";
+    if (
+      /\/\/[/!]?\s*(?:Why\b|Reason\s*:|INVARIANT\s*:|SAFETY\s*:|PANICS?\s*:|#\s*Panics\b)/i.test(
+        lineText,
+      ) ||
+      /#!?\[\s*(?:allow|expect)\s*\([^)]*clippy::(?:unwrap_used|expect_used|missing_panics_doc|panicking_unwrap)\b/i.test(
+        lineText,
+      )
+    ) {
       return true;
     }
   }
   if (fnStartLine !== undefined) {
-    // Walk backwards from fnStartLine - 2 while lines are doc comments or attributes
-    for (let i = fnStartLine - 2; i >= Math.max(0, fnStartLine - 12); i--) {
+    // Walk backwards from fnStartLine - 2 while lines are comments, doc comments, or attribute lines
+    for (let i = fnStartLine - 2; i >= Math.max(0, fnStartLine - 15); i--) {
       const trimmed = (lines[i] ?? "").trim();
       if (
-        !trimmed.startsWith("///") &&
-        !trimmed.startsWith("//!") &&
+        /\/\/[/!]\s*#\s*Panics\b|clippy::(?:unwrap_used|expect_used|missing_panics_doc|panicking_unwrap)\b/i.test(
+          trimmed,
+        )
+      ) {
+        return true;
+      }
+      if (
+        !trimmed.startsWith("//") &&
         !trimmed.startsWith("#[") &&
+        !trimmed.startsWith("]") &&
+        !trimmed.startsWith("reason") &&
         trimmed.length > 0
       ) {
         break;
-      }
-      if (/\/\/[/!]\s*#\s*Panics\b/i.test(trimmed)) {
-        return true;
       }
     }
   }
