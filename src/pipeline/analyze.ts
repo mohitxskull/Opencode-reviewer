@@ -47,6 +47,7 @@ import {
   type AnalyzeStageContext,
   AnalyzeStageContextSchema,
   FindingSchema,
+  isOptionalAnalyzerFinding,
   PEER_VERSION,
   type PullRequestMetadata,
   type ReviewBundle,
@@ -64,6 +65,7 @@ import { planAllSubsystemCohorts } from "../llm/cohorts.ts";
 import { buildCohortContextPrompt, buildReviewContextPrompt } from "../llm/context.ts";
 import {
   loadJsonIfExists,
+  loadPriorPrReviewBundle,
   loadRawJsonIfExists,
   writeAnalyzeStageArtifacts,
 } from "../workspace/artifacts.ts";
@@ -607,14 +609,28 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         generatedAt: analyzeContext.generatedAt,
       });
 
-      const [learnings, repoInstructions] = await Promise.all([
+      const [learnings, repoInstructions, priorBundle] = await Promise.all([
         new LearningStore(repoRoot).getMatchingLearnings(
           modifiedFiles,
           pr.baseSha,
           peerConfig.rules,
         ),
         loadRepoInstructions(repoRoot, pr.baseSha),
+        loadPriorPrReviewBundle(repoRoot, pr.number, pr.headSha),
       ]);
+      const priorSubstantiveFindings = priorBundle
+        ? [...priorBundle.findings, ...(priorBundle.outsideDiffFindings ?? [])].filter(
+            (f) => !isOptionalAnalyzerFinding(f),
+          )
+        : [];
+      const priorReview =
+        priorBundle && priorSubstantiveFindings.length > 0
+          ? {
+              headSha: priorBundle.headSha,
+              generatedAt: priorBundle.generatedAt,
+              findings: priorSubstantiveFindings,
+            }
+          : null;
       const cohorts = planAllSubsystemCohorts(diffMap, crateGraph);
       const reviewCtx = {
         repoRoot,
@@ -636,6 +652,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         learnings,
         repoInstructions,
         cohorts,
+        priorReview,
         auditLogger,
       };
       const promptContextMd = buildReviewContextPrompt(reviewCtx);

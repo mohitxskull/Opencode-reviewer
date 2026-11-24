@@ -31,6 +31,7 @@ interface CargoDenyJsonLine {
     severity?: string;
     code?: string;
     message?: string;
+    labels?: Array<{ message?: string; span?: string }>;
     notes?: string[];
     graphs?: Array<{ Krate?: { name?: string; version?: string } }>;
   };
@@ -49,8 +50,12 @@ export function parseCargoDenyJsonLines(rawOutput: string): CargoDenyDiagnostic[
     if (sev !== "error" && sev !== "warning") {
       continue;
     }
-    const code = parsed.fields.code ?? "cargo-deny";
-    const message = parsed.fields.message ?? "cargo-deny violation";
+    const rawCode = (parsed.fields.code ?? "").trim();
+    const code = rawCode.length > 0 ? rawCode : "cargo-deny";
+    const rawMsg = (parsed.fields.message ?? "").trim();
+    const labelMsg =
+      parsed.fields.labels?.map((l) => (l.message ?? "").trim()).find((m) => m.length > 0) ?? "";
+    const message = rawMsg || labelMsg || `cargo-deny ${code} violation`;
     const crateName = parsed.fields.graphs?.[0]?.Krate?.name ?? null;
     const key = `${code}:${crateName ?? ""}:${message}`;
     if (seen.has(key)) {

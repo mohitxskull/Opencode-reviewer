@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import type { RustSymbolGraph } from "../analyzers/symbol-graph.ts";
@@ -8,13 +8,18 @@ import {
   PEER_VERSION,
   type PipelineStage,
   type ReviewBundle,
+  ReviewBundleSchema,
   type RunManifest,
   RunManifestSchema,
   type ToolOutcomeDetail,
 } from "../domain/models.ts";
 import { renderCombinedLocalReviewMarkdown, renderWalkthroughComment } from "../render/markdown.ts";
 import { buildReviewTodoQueue, renderReviewTodoMarkdown } from "../render/todo.ts";
-import { ensurePeerWorkspaceExcluded, resolvePeerCommitDir } from "./git.ts";
+import {
+  ensurePeerWorkspaceExcluded,
+  resolvePeerCommitDir,
+  resolvePeerWorkspaceDir,
+} from "./git.ts";
 
 export interface WriteArtifactsMeta {
   readonly model?: string;
@@ -369,4 +374,51 @@ export async function loadRawJsonIfExists<T>(filePath: string): Promise<T | null
   } catch {
     return null;
   }
+}
+
+/**
+ * Finds the most recently generated Stage 3 (`03-verify/bundle.json`) or Stage 2 (`02-review/bundle.json`)
+ * review bundle from an earlier commit under `.peer/<prNumber>/` so follow-up runs on the same PR
+ * can automatically inject a Prior PR Review Findings ledger into `prompt-context.md` and cohort packets.
+ */
+export async function loadPriorPrReviewBundle(
+  repoRoot: string,
+  prNumber: number,
+  currentHeadSha: string,
+): Promise<ReviewBundle | null> {
+  const prDir = join(resolvePeerWorkspaceDir(repoRoot), String(prNumber));
+  const currentShort = currentHeadSha.slice(0, 7).toLowerCase();
+  let entries: string[];
+  try {
+    entries = await readdir(prDir);
+  } catch {
+    return null;
+  }
+
+  let latestBundle: ReviewBundle | null = null;
+  let latestTimestamp = -1;
+
+  for (const entry of entries) {
+    if (entry.toLowerCase() === currentShort || !/^[0-9a-f]{7,40}$/i.test(entry)) {
+      continue;
+    }
+    const candidateDir = join(prDir, entry);
+    const bundle =
+      (await loadJsonIfExists(
+        join(candidateDir, "03-verify", "bundle.json"),
+        ReviewBundleSchema,
+      )) ??
+      (await loadJsonIfExists(join(candidateDir, "02-review", "bundle.json"), ReviewBundleSchema));
+    if (!bundle || bundle.headSha.toLowerCase() === currentHeadSha.toLowerCase()) {
+      continue;
+    }
+    const ts = Date.parse(bundle.generatedAt);
+    const score = Number.isFinite(ts) ? ts : 0;
+    if (score >= latestTimestamp) {
+      latestTimestamp = score;
+      latestBundle = bundle;
+    }
+  }
+
+  return latestBundle;
 }

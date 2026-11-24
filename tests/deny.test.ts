@@ -45,19 +45,32 @@ describe("Tool #2: cargo-deny supply-chain & policy checker", () => {
           graphs: [{ Krate: { name: "syn", version: "1.0.109" } }],
         },
       }),
+      JSON.stringify({
+        type: "diagnostic",
+        fields: {
+          severity: "warning",
+          code: "gather-failure",
+          message: "",
+          labels: [{ message: "low confidence in the license text", span: "0.51" }],
+          graphs: [{ Krate: { name: "implied-vol", version: "2.1.0" } }],
+        },
+      }),
     ].join("\n");
 
     const diags = parseCargoDenyJsonLines(sampleJsonl);
-    expect(diags.length).toBe(2);
+    expect(diags.length).toBe(3);
     expect(diags[0]?.code).toBe("license-not-encountered");
     expect(diags[0]?.crateName).toBe("gpl-crate");
     expect(diags[1]?.severity).toBe("warning");
+    expect(diags[2]?.code).toBe("gather-failure");
+    expect(diags[2]?.message).toBe("low confidence in the license text");
 
     const findings = denyDiagnosticsToFindings(diags);
-    expect(findings.length).toBe(2);
+    expect(findings.length).toBe(3);
     expect(findings[0]?.severity).toBe("Major");
     expect(findings[0]?.verificationCommand).toBe("cargo deny check");
     expect(findings[1]?.severity).toBe("Minor");
+    expect(findings[2]?.title).toContain("low confidence in the license text");
   });
 
   test("collectCargoDenyDiagnostics skips when deny.toml is absent unless force=true, and throws CargoDenyMissingError when missing", async () => {

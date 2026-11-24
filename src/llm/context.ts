@@ -17,6 +17,7 @@ import type {
   ClippyDiagnostic,
   CrateGraph,
   DiffFileMap,
+  Finding,
   PullRequestMetadata,
   SecurityAdvisory,
 } from "../domain/models.ts";
@@ -28,6 +29,12 @@ import {
 } from "../workspace/instructions.ts";
 import { formatLearningsPromptSection, type RepoLearning } from "../workspace/learnings.ts";
 import { type FileCohort, scoreFileReviewPriority } from "./cohorts.ts";
+
+export interface PriorReviewContext {
+  readonly headSha: string;
+  readonly generatedAt: string;
+  readonly findings: readonly Finding[];
+}
 
 export interface ReviewContext {
   readonly repoRoot: string;
@@ -49,6 +56,7 @@ export interface ReviewContext {
   readonly learnings?: readonly RepoLearning[];
   readonly repoInstructions?: readonly RepoInstruction[];
   readonly cohorts?: readonly FileCohort[];
+  readonly priorReview?: PriorReviewContext | null;
   readonly auditLogger?: AuditLogger;
 }
 
@@ -78,6 +86,20 @@ export function buildReviewContextPrompt(context: ReviewContext): string {
 
   if (context.learnings && context.learnings.length > 0) {
     sections.push(formatLearningsPromptSection(context.learnings));
+  }
+
+  if (context.priorReview && context.priorReview.findings.length > 0) {
+    const prevShort = context.priorReview.headSha.slice(0, 7);
+    const priorLines = context.priorReview.findings.map(
+      (f) =>
+        `- \`${f.id}\` [${f.severity}] \`${f.filePath}:${f.startLine}-${f.endLine}\` — ${f.title}` +
+        (f.rootCause && f.rootCause !== f.title ? ` (root cause: ${f.rootCause})` : ""),
+    );
+    sections.push(
+      `## Prior PR Review Findings (from earlier commit \`${prevShort}\`, ${context.priorReview.findings.length} substantive finding(s))\n` +
+        `Each cohort packet below automatically includes the prior findings for its files. Subagents must verify whether commit \`${context.headSha.slice(0, 7)}\` cleanly resolved them (recording verified fixes under \`## CONSIDERED_AND_REJECTED\`) or left an incomplete fix / regression (reporting remaining defects under \`## FINDINGS\`):\n` +
+        priorLines.join("\n"),
+    );
   }
 
   if (context.cohorts && context.cohorts.length > 0) {
@@ -237,6 +259,29 @@ export function buildCohortContextPrompt(
 
   if (context.learnings && context.learnings.length > 0) {
     sections.push(formatLearningsPromptSection(context.learnings));
+  }
+
+  if (context.priorReview && context.priorReview.findings.length > 0) {
+    const isFirstCohort = context.cohorts?.[0]?.id === cohort.id;
+    const allCohortFiles = new Set((context.cohorts ?? []).flatMap((c) => c.filePaths));
+    const cohortPriorFindings = context.priorReview.findings.filter(
+      (f) => cohortSet.has(f.filePath) || (isFirstCohort && !allCohortFiles.has(f.filePath)),
+    );
+    if (cohortPriorFindings.length > 0) {
+      const prevShort = context.priorReview.headSha.slice(0, 7);
+      const priorLines = cohortPriorFindings.map(
+        (f) =>
+          `- \`${f.id}\` [${f.severity} | ${f.type}] \`${f.filePath}:${f.startLine}-${f.endLine}\` — **${f.title}**\n` +
+          `  - Prior Root Cause: ${f.rootCause || f.title}`,
+      );
+      sections.push(
+        `## Prior PR Review Findings in This Cohort (from commit \`${prevShort}\`)\n` +
+          `Verify each prior finding below against the current code and diff hunks:\n` +
+          `- If **cleanly resolved**, record it under \`## CONSIDERED_AND_REJECTED\` (\`- \\\`<file>:<line>\\\` | Previously reported \\\`<id>\\\` (<title>) | Fixed: <concise code evidence>\`).\n` +
+          `- If **still unfixed, only partially fixed, or introduced a regression**, report the residual defect under \`## FINDINGS\`.\n\n` +
+          priorLines.join("\n"),
+      );
+    }
   }
 
   if (context.symbolGraph && context.symbolGraph.nodes.length > 0) {

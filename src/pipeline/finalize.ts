@@ -36,7 +36,7 @@ import {
   writeVerifyStageArtifacts,
 } from "../workspace/artifacts.ts";
 import type { AuditLogger } from "../workspace/audit-log.ts";
-import { withInPlaceCheckout } from "../workspace/git.ts";
+import { type CheckpointStore, withInPlaceCheckout } from "../workspace/git.ts";
 
 export interface FinalizeStageInput {
   readonly repoRoot: string;
@@ -52,6 +52,7 @@ export interface FinalizeStageInput {
   readonly verifierTimeoutMs?: number;
   readonly configHash?: string;
   readonly runStartMs: number;
+  readonly checkpointStore?: CheckpointStore;
   readonly auditLogger: AuditLogger;
 }
 
@@ -372,6 +373,15 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
         toolOutcomes: existingManifest?.toolOutcomes,
       },
     );
+    if ((updatedBundle.failedCohorts?.length ?? 0) === 0) {
+      await input.checkpointStore?.save({
+        prNumber: updatedBundle.pr.number,
+        baseSha: updatedBundle.pr.baseSha,
+        lastReviewedHeadSha: updatedBundle.headSha,
+        reviewedAt: updatedBundle.generatedAt,
+        profile: updatedBundle.profile,
+      });
+    }
 
     return { bundle: updatedBundle, warnings, verdictSummary, reconciliation };
   }
@@ -574,6 +584,16 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
       durationMs: Date.now() - runStartMs,
       enabledTools: analyzeContext.enabledTools,
       toolOutcomes: existingManifest?.toolOutcomes,
+    });
+  }
+
+  if ((bundle.failedCohorts?.length ?? 0) === 0) {
+    await input.checkpointStore?.save({
+      prNumber: bundle.pr.number,
+      baseSha: bundle.pr.baseSha,
+      lastReviewedHeadSha: bundle.headSha,
+      reviewedAt: bundle.generatedAt,
+      profile: bundle.profile,
     });
   }
 

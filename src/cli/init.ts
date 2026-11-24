@@ -41,6 +41,8 @@ const SAFE_OSI_LICENSES = new Set([
   "0BSD",
   "CC0-1.0",
   "MPL-2.0",
+  "LGPL-3.0-only",
+  "LGPL-3.0-or-later",
   "BSL-1.0",
   "Unlicense",
   "OpenSSL",

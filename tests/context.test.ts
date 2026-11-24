@@ -99,4 +99,49 @@ describe("Review context prompt builders", () => {
     expect(packet).toContain("Review Cohort Packet: `cohort-01-components-raftstore-src`");
     expect(packet).toContain("L0011 (+):     let guard = mutex.lock().unwrap();");
   });
+
+  test("injects Prior PR Review Findings ledger into orchestrator prompt and matching cohort packet", () => {
+    const cohort = SAMPLE_CONTEXT.cohorts?.[0];
+    if (!cohort) throw new Error("Expected cohort");
+    const ctxWithPrior: ReviewContext = {
+      ...SAMPLE_CONTEXT,
+      priorReview: {
+        headSha: "13b6f153f8af773bd42befdfd2eb3f47399168c2",
+        generatedAt: "2026-11-24T03:39:59.035Z",
+        findings: [
+          {
+            id: "fp-34fb1d8f9a57",
+            filePath: "components/raftstore/src/lib.rs",
+            startLine: 11,
+            endLine: 11,
+            severity: "Major",
+            type: "Concurrency",
+            title: "Mutex guard held across await",
+            body: "Body",
+            rootCause: "std::sync::MutexGuard lives across await point",
+            suggestion: null,
+            suggestionVerified: false,
+            agentPrompt: "Fix",
+            confidence: 0.95,
+            source: "soundness",
+          },
+        ],
+      },
+    };
+
+    const mainPrompt = buildReviewContextPrompt(ctxWithPrior);
+    expect(mainPrompt).toContain(
+      "## Prior PR Review Findings (from earlier commit `13b6f15`, 1 substantive finding(s))",
+    );
+    expect(mainPrompt).toContain("`fp-34fb1d8f9a57` [Major]");
+
+    const cohortPacket = buildCohortContextPrompt(ctxWithPrior, cohort);
+    expect(cohortPacket).toContain(
+      "## Prior PR Review Findings in This Cohort (from commit `13b6f15`)",
+    );
+    expect(cohortPacket).toContain("`fp-34fb1d8f9a57` [Major | Concurrency]");
+    expect(cohortPacket).toContain(
+      "Prior Root Cause: std::sync::MutexGuard lives across await point",
+    );
+  });
 });
