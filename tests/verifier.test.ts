@@ -281,4 +281,92 @@ describe("Task 06: Transactional suggestion compiler verifier (cargo check)", ()
     expect(runGit(["rev-parse", "HEAD"])).toBe(baseSha);
     expect(sha256Bytes(await Bun.file(filePath).bytes())).toBe(origHash);
   });
+
+  test("heals enclosing-function boundary overlap in applyLineReplacement and skips 'none' suggestions", async () => {
+    const { applyLineReplacement } = await import("../src/judge/verifier.ts");
+    const source = [
+      "fn mark_order_unresolved(",
+      "    state: &Mutex<EngineState>,",
+      "    cid: Option<&str>,",
+      "    exchange_order_id: Option<u64>,",
+      "    exchange_order_ref: Option<&str>,",
+      ") {",
+      "    let mut guard = state.lock();",
+      "    if let Some(c) = cid {",
+      "        guard.resolution.mark_cid_unresolved(c);",
+      "    } else if let Some(oid) = exchange_order_id {",
+      "        guard.resolution.mark_order_id_unresolved(oid);",
+      "    } else if let Some(oref) = exchange_order_ref {",
+      "        guard.resolution.mark_order_ref_unresolved(oref);",
+      "    }",
+      "    guard.resolution.request_position_sync();",
+      "}",
+      "",
+    ].join("\n");
+
+    // Agent anchored lines 5-14 (the modified parameter through the `else if` block)
+    // but pasted the entire enclosing function (lines 1-16) into the suggestion.
+    const fullFunctionSuggestion = [
+      "fn mark_order_unresolved(",
+      "    state: &Mutex<EngineState>,",
+      "    cid: Option<&str>,",
+      "    exchange_order_id: Option<u64>,",
+      "    _exchange_order_ref: Option<&str>,",
+      ") {",
+      "    let mut guard = state.lock();",
+      "    if let Some(c) = cid {",
+      "        guard.resolution.mark_cid_unresolved(c);",
+      "    } else if let Some(oid) = exchange_order_id {",
+      "        guard.resolution.mark_order_id_unresolved(oid);",
+      "    }",
+      "    guard.resolution.request_position_sync();",
+      "}",
+    ].join("\n");
+
+    const res = applyLineReplacement(source, 5, 14, fullFunctionSuggestion);
+    expect(res).not.toBeNull();
+    expect(res?.patchedText).toBe(`${fullFunctionSuggestion}\n`);
+    expect(res?.normalizedSuggestion).toBe(
+      [
+        "    _exchange_order_ref: Option<&str>,",
+        ") {",
+        "    let mut guard = state.lock();",
+        "    if let Some(c) = cid {",
+        "        guard.resolution.mark_cid_unresolved(c);",
+        "    } else if let Some(oid) = exchange_order_id {",
+        "        guard.resolution.mark_order_id_unresolved(oid);",
+        "    }",
+      ].join("\n"),
+    );
+
+    // Also verify that "none" suggestions never invoke checkRunner
+    let calls = 0;
+    const verifier = new SuggestionCompilerVerifier({
+      checkRunner: async () => {
+        calls += 1;
+        return { ok: true, errorSummary: "" };
+      },
+    });
+    const { dir } = await createTempCargoCrate();
+    const out = await verifier.verifySuggestions(dir, [
+      {
+        id: "f-none",
+        filePath: "src/lib.rs",
+        startLine: 1,
+        endLine: 1,
+        severity: "Minor",
+        type: "Idioms",
+        title: "No single-hunk suggestion",
+        body: "Body",
+        suggestion: "none",
+        suggestionVerified: false,
+        agentPrompt: "Fix",
+        confidence: 0.9,
+        source: "idioms",
+      },
+    ]);
+    expect(calls).toBe(0);
+    expect(out[0]?.suggestion).toBeNull();
+    expect(out[0]?.suggestionVerified).toBe(false);
+  });
 });

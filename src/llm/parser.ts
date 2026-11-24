@@ -215,7 +215,20 @@ function parseKeyValueLines(text: string): Map<string, string> {
   return fields;
 }
 
+function isPlaceholderNoSuggestion(text: string): boolean {
+  const trimmed = text.trim();
+  return (
+    trimmed.length === 0 ||
+    /^(?:none|null|n\/a|-|—|_none_\.?|\(none\)|no\s+(?:single-hunk\s+)?suggestion\.?)$/i.test(
+      trimmed,
+    )
+  );
+}
+
 function extractFirstCodeFenceVerbatim(text: string): string | null {
+  if (isPlaceholderNoSuggestion(text)) {
+    return null;
+  }
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   let startIdx = -1;
   for (let i = 0; i < lines.length; i++) {
@@ -232,7 +245,7 @@ function extractFirstCodeFenceVerbatim(text: string): string | null {
     const line = lines[i] ?? "";
     if (/^\s*```\s*$/.test(line)) {
       const joined = codeLines.join("\n");
-      return joined.trim().length > 0 ? joined : null;
+      return !isPlaceholderNoSuggestion(joined) ? joined : null;
     }
     codeLines.push(line);
   }

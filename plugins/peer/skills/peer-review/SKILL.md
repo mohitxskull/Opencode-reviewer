@@ -15,7 +15,7 @@ license: MIT
 Use `peer` as the deterministic Rust ground-truth & verification engine while using your own LLM capabilities and parallel subagents for deep code reasoning.
 
 ## Step 0: Preflight & Stage Discovery (Agent-First JSON Mode)
-Pass `--json` (or `--quiet` for single-line JSON) on any `peer` command so you consume structured JSON directly instead of grepping Markdown tables:
+If you are running inside OpenCode with the `peer` plugin loaded, prefer the native `peer_doctor`, `peer_init`, `peer_next`, `peer_analyze`, `peer_finalize`, `peer_publish`, `peer_check`, and `peer_learn` tools (which automatically pass `--json`). Otherwise, pass `--json` (or `--quiet` for single-line JSON) on any `peer` CLI command so you consume structured JSON directly instead of grepping Markdown tables:
 ```bash
 peer doctor --json
 peer next [PR_NUMBER] --json
@@ -40,9 +40,9 @@ peer next [PR_NUMBER] --json
   Stop after reporting unless they ask for an LLM review.
 
 ## Step 1: Collect Deterministic Rust Ground Truth & Cohort Packets
-Run Stage 1 on the target PR:
+Run Stage 1 on the target PR (omit `--tools` when `peer.toml` is already configured so `peer.toml` selects the workspace's enabled tools; only pass `--tools ...` to explicitly override):
 ```bash
-peer analyze <PR_NUMBER_OR_URL> --json [--tools deny,geiger,semver,coverage,miri|all]
+peer analyze <PR_NUMBER_OR_URL> --json
 ```
 This returns structured JSON (`counts`, `countsBySeverity`, `enabledTools`, `toolOutcomes`, `artifacts`, `nextCommand`) and writes `.peer/<pr>/<short-sha>/01-analyze/`:
 - `prompt-context.md` — Compact orchestrator index (PR overview, repo review instructions from `AGENTS.md`/`CLAUDE.md`/`peer.toml`/`.peer/learnings.json`, crate layers, symbol graph, deterministic diagnostics, and the **Review Cohorts** index — without duplicating raw diff hunks).
@@ -61,6 +61,7 @@ This returns structured JSON (`counts`, `countsBySeverity`, `enabledTools`, `too
    - Each entry in `01-analyze/cohorts/index.json` provides `packetPath`, `outputPath` (`.peer/<pr>/<short-sha>/reviews/<cohort-id>.md`), and a ready-to-pass `subagentBrief`.
    - For small PRs (1 cohort), read `packetPath` and write `outputPath` directly.
    - For multi-cohort PRs, **fan out parallel read-only subagents** (one per entry in `cohorts/index.json`, passing its `subagentBrief`).
+   - **Strictly read-only subagents:** Subagents must **NEVER** run `cargo test`, `cargo check`, or `cargo clippy` in the shell — Stage 1 already collected compiler/analyzer ground truth, and running `cargo` inside parallel subagents contends on the `target/` lock and invalidates the build cache before `peer finalize`.
    - **Context discipline:** Each subagent writes its Structured Markdown findings directly to `outputPath` and returns **ONLY the file path + a 1-line finding count** (never paste full findings back into the main session).
    - Write the walkthrough to `.peer/<pr>/<short-sha>/reviews/walkthrough.md`.
 4. Finalize all cohort review files in one command:

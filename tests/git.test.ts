@@ -89,10 +89,14 @@ describe("Task 02: Git session and checkpoint store", () => {
   test("ensureCleanWorkingTree rejects staged, unstaged, and untracked files while ignoring .git/peer", async () => {
     const repo = await createTempGitRepo();
 
-    // Writing inside .git/peer/ must not make the working tree dirty
+    // Writing inside .git/peer/ or untracked onboarding files (peer.toml, deny.toml) must not make the working tree dirty
     await mkdir(join(repo, ".git", "peer", "reviews", "pr-1"), { recursive: true });
     await writeFile(join(repo, ".git", "peer", "reviews", "pr-1", "checkpoint.json"), "{}");
+    await writeFile(join(repo, "peer.toml"), 'profile = "assertive"\n');
+    await writeFile(join(repo, "deny.toml"), "[advisories]\n");
     await ensureCleanWorkingTree(repo);
+    await rm(join(repo, "peer.toml"));
+    await rm(join(repo, "deny.toml"));
 
     // 1. Untracked file in working tree
     const untrackedPath = join(repo, "untracked.rs");

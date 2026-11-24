@@ -257,7 +257,7 @@ async function defaultCargoLlvmCovRunner(
   if (!Bun.which("cargo-llvm-cov")) {
     throw new CargoLlvmCovMissingError();
   }
-  const args = ["cargo", "llvm-cov", "--json"];
+  const args = ["cargo", "llvm-cov", "--json", "--lib", "--bins"];
   for (const pkg of packages) {
     args.push("-p", pkg);
   }

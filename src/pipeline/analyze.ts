@@ -1,3 +1,4 @@
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import { collectAstDeterministicFindings } from "../analyzers/ast-detectors.ts";
@@ -355,23 +356,106 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
       // Why: Heavy optional Cargo analyzers (`geiger`, `semver-checks`, `llvm-cov`, `miri`) all
       // acquire the workspace Cargo build lock (`target/`) and compile rustdoc/instrumented binaries.
       // Running them sequentially prevents lock contention and ensures each tool gets its own full
-      // timeout window instead of starving while waiting for another Cargo invocation.
-      geigerReport = await collectCargoGeigerReport(repoRoot, {
-        enabled: enabledTools.has("geiger"),
-        crateGraph,
-      });
-      semverViolations = await collectCargoSemverViolations(repoRoot, {
-        enabled: enabledTools.has("semver"),
-        baseSha: pr.baseSha,
-      });
-      coverageReport = await collectCargoLlvmCovReport(repoRoot, diffMap, {
-        enabled: enabledTools.has("coverage"),
-        packages: Array.from(modifiedCrates),
-      });
-      miriReport = await collectMiriReport(repoRoot, diffMap, {
-        enabled: enabledTools.has("miri"),
-        crateGraph,
-      });
+      // timeout window instead of starving while waiting for another Cargo invocation. We also
+      // checkpoint each completed tool output into `01-analyze/tools/` immediately so an interrupted
+      // run can resume without re-running expensive completed tools.
+      const partialToolsDir = join(commitDir, "01-analyze", "tools");
+      await mkdir(partialToolsDir, { recursive: true });
+      const partialMetaPath = join(partialToolsDir, "_checkpoint.json");
+      const partialMeta = !fresh
+        ? await loadRawJsonIfExists<{ headSha: string; baseSha: string; configHash: string }>(
+            partialMetaPath,
+          )
+        : null;
+      const canReusePartialTools =
+        partialMeta !== null &&
+        partialMeta.headSha === pr.headSha &&
+        partialMeta.baseSha === pr.baseSha &&
+        partialMeta.configHash === configHash;
+      if (!canReusePartialTools) {
+        await Bun.write(
+          partialMetaPath,
+          JSON.stringify({ headSha: pr.headSha, baseSha: pr.baseSha, configHash }, null, 2),
+        );
+      }
+
+      if (enabledTools.has("geiger")) {
+        const cachedGeiger = canReusePartialTools
+          ? await loadRawJsonIfExists<GeigerReport>(join(partialToolsDir, "geiger.json"))
+          : null;
+        if (cachedGeiger) {
+          geigerReport = cachedGeiger;
+        } else {
+          geigerReport = await collectCargoGeigerReport(repoRoot, {
+            enabled: true,
+            crateGraph,
+          });
+          if (geigerReport) {
+            await Bun.write(
+              join(partialToolsDir, "geiger.json"),
+              JSON.stringify(geigerReport, null, 2),
+            );
+          }
+        }
+      }
+
+      if (enabledTools.has("semver")) {
+        const cachedSemver = canReusePartialTools
+          ? await loadRawJsonIfExists<SemverViolation[]>(join(partialToolsDir, "semver.json"))
+          : null;
+        if (cachedSemver) {
+          semverViolations = cachedSemver;
+        } else {
+          semverViolations = await collectCargoSemverViolations(repoRoot, {
+            enabled: true,
+            baseSha: pr.baseSha,
+          });
+          await Bun.write(
+            join(partialToolsDir, "semver.json"),
+            JSON.stringify(semverViolations, null, 2),
+          );
+        }
+      }
+
+      if (enabledTools.has("coverage")) {
+        const cachedCov = canReusePartialTools
+          ? await loadRawJsonIfExists<CoverageReport>(join(partialToolsDir, "coverage.json"))
+          : null;
+        if (cachedCov) {
+          coverageReport = cachedCov;
+        } else {
+          coverageReport = await collectCargoLlvmCovReport(repoRoot, diffMap, {
+            enabled: true,
+            packages: Array.from(modifiedCrates),
+          });
+          if (coverageReport) {
+            await Bun.write(
+              join(partialToolsDir, "coverage.json"),
+              JSON.stringify(coverageReport, null, 2),
+            );
+          }
+        }
+      }
+
+      if (enabledTools.has("miri")) {
+        const cachedMiri = canReusePartialTools
+          ? await loadRawJsonIfExists<MiriReport>(join(partialToolsDir, "miri.json"))
+          : null;
+        if (cachedMiri) {
+          miriReport = cachedMiri;
+        } else {
+          miriReport = await collectMiriReport(repoRoot, diffMap, {
+            enabled: true,
+            crateGraph,
+          });
+          if (miriReport) {
+            await Bun.write(
+              join(partialToolsDir, "miri.json"),
+              JSON.stringify(miriReport, null, 2),
+            );
+          }
+        }
+      }
 
       const clippyFindings = clippyToFindings(clippyDiagnostics, diffMap);
       const auditFindings = await advisoriesToFindings(securityAdvisories, repoRoot, crateGraph);

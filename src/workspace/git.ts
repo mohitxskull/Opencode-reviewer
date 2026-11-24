@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, rmSync } from "node:fs";
+import { lstatSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -242,6 +242,20 @@ export function detectRepoOwnerAndName(
   return parseGitHubOwnerRepo(remoteUrl);
 }
 
+function isAllowedUntrackedPeerOnboardingLine(porcelainLine: string): boolean {
+  if (!porcelainLine.startsWith("?? ")) {
+    return false;
+  }
+  const relPath = porcelainLine.slice(3).trim().replace(/\\/g, "/");
+  return (
+    relPath === "peer.toml" ||
+    relPath === "deny.toml" ||
+    relPath === ".github/workflows/peer.yml" ||
+    relPath === ".peer" ||
+    relPath.startsWith(".peer/")
+  );
+}
+
 export async function ensureCleanWorkingTree(repoRoot: string): Promise<void> {
   const output = runGitSync(repoRoot, ["status", "--porcelain", "--untracked-files=normal"]);
   if (output.length === 0) {
@@ -250,7 +264,7 @@ export async function ensureCleanWorkingTree(repoRoot: string): Promise<void> {
   const lines = output
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length > 0 && !isAllowedUntrackedPeerOnboardingLine(line));
   if (lines.length > 0) {
     throw new DirtyWorkingTreeError(lines);
   }
@@ -346,8 +360,10 @@ export class InPlaceCheckoutSession {
   private readonly options: CheckoutOptions;
   private originalRef: string | null = null;
   private hadCargoLockOnEntry = true;
+  private didSwitchCommit = false;
   private restored = false;
   private unregisterCleanup: (() => void) | null = null;
+  private preservedUntrackedFiles: Array<{ relPath: string; bytes: Uint8Array }> = [];
 
   constructor(options: CheckoutOptions) {
     this.options = options;
@@ -357,11 +373,42 @@ export class InPlaceCheckoutSession {
     await ensureCleanWorkingTree(this.options.repoRoot);
     this.hadCargoLockOnEntry = await Bun.file(join(this.options.repoRoot, "Cargo.lock")).exists();
 
+    const currentHeadSha = runGitSync(this.options.repoRoot, ["rev-parse", "--verify", "HEAD"]);
     const symRef = tryGitSync(this.options.repoRoot, ["symbolic-ref", "--short", "-q", "HEAD"]);
     if (symRef.ok && symRef.stdout.length > 0) {
       this.originalRef = symRef.stdout;
     } else {
-      this.originalRef = runGitSync(this.options.repoRoot, ["rev-parse", "--verify", "HEAD"]);
+      this.originalRef = currentHeadSha;
+    }
+
+    const safeTargetSha = assertSafeGitSha(this.options.targetSha, "targetSha");
+
+    // Fast path: when HEAD is already at targetSha, skip detaching/restoring HEAD so untracked
+    // onboarding files (`peer.toml`, `deny.toml`) and warm build state stay completely undisturbed.
+    if (currentHeadSha.toLowerCase() === safeTargetSha.toLowerCase()) {
+      this.didSwitchCommit = false;
+      return;
+    }
+    this.didSwitchCommit = true;
+
+    // Snapshot untracked onboarding files (`peer.toml`, `deny.toml`) so a branch switch never
+    // fails on checkout collision and always restores them on exit.
+    for (const relPath of ["peer.toml", "deny.toml"]) {
+      const trackedInHead = tryGitSync(this.options.repoRoot, [
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        relPath,
+      ]);
+      if (!trackedInHead.ok) {
+        const file = Bun.file(join(this.options.repoRoot, relPath));
+        if (await file.exists()) {
+          this.preservedUntrackedFiles.push({
+            relPath,
+            bytes: await file.bytes(),
+          });
+        }
+      }
     }
 
     this.unregisterCleanup = registerSignalCleanup(() => {
@@ -369,7 +416,6 @@ export class InPlaceCheckoutSession {
     });
 
     // Persist original ref atomically before detaching HEAD so `peer restore` can recover after SIGKILL
-    const safeTargetSha = assertSafeGitSha(this.options.targetSha, "targetSha");
     try {
       const stateDir = resolvePeerStateDir(this.options.repoRoot);
       await mkdir(stateDir, { recursive: true });
@@ -404,6 +450,18 @@ export class InPlaceCheckoutSession {
         ]);
       }
 
+      // If targetSha tracks peer.toml/deny.toml, temporarily remove our untracked copy before checkout
+      for (const item of this.preservedUntrackedFiles) {
+        const trackedInTarget = tryGitSync(this.options.repoRoot, [
+          "cat-file",
+          "-e",
+          `${safeTargetSha}:${item.relPath}`,
+        ]);
+        if (trackedInTarget.ok) {
+          rmSync(join(this.options.repoRoot, item.relPath), { force: true });
+        }
+      }
+
       runGitSync(this.options.repoRoot, ["checkout", "--detach", safeTargetSha]);
     } catch (err) {
       this.restoreOriginalRefSync();
@@ -426,11 +484,18 @@ export class InPlaceCheckoutSession {
   }
 
   private restoreOriginalRefSync(): void {
-    if (this.restored || !this.originalRef) {
+    if (this.restored || !this.originalRef || !this.didSwitchCommit) {
       return;
     }
     this.restored = true;
     runGitSync(this.options.repoRoot, ["checkout", "-f", this.originalRef]);
+    for (const item of this.preservedUntrackedFiles) {
+      try {
+        writeFileSync(join(this.options.repoRoot, item.relPath), item.bytes);
+      } catch {
+        // Ignore write error on restore
+      }
+    }
     if (!this.hadCargoLockOnEntry) {
       const trackedCheck = tryGitSync(this.options.repoRoot, [
         "ls-files",

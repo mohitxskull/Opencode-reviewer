@@ -14,6 +14,8 @@ import {
   type ReviewBundle,
   ReviewBundleSchema,
   type ReviewProfile,
+  type RunManifest,
+  RunManifestSchema,
   type Severity,
   SEVERITY_RANK,
   type WalkthroughReport,
@@ -47,6 +49,7 @@ export interface FinalizeStageInput {
   readonly profile: ReviewProfile;
   readonly excludeTools?: ReadonlySet<string>;
   readonly minSeverity?: Severity;
+  readonly verifierTimeoutMs?: number;
   readonly configHash?: string;
   readonly runStartMs: number;
   readonly auditLogger: AuditLogger;
@@ -350,6 +353,10 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
       unmatchedVerdictIds,
     };
 
+    const existingManifest = await loadJsonIfExists<RunManifest>(
+      join(commitDir, "run.json"),
+      RunManifestSchema,
+    );
     await writeVerifyStageArtifacts(
       repoRoot,
       updatedBundle,
@@ -361,6 +368,8 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
         model: "external-agent",
         configHash,
         durationMs: Date.now() - runStartMs,
+        enabledTools: existingManifest?.enabledTools,
+        toolOutcomes: existingManifest?.toolOutcomes,
       },
     );
 
@@ -490,7 +499,9 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
       const baselineErrorCount = analyzeContext.clippyDiagnostics.filter(
         (d) => d.level === "error",
       ).length;
-      const verifier = new SuggestionCompilerVerifier();
+      const verifier = new SuggestionCompilerVerifier({
+        timeoutMs: input.verifierTimeoutMs,
+      });
       const verifiedInline = await verifier.verifySuggestions(
         repoRoot,
         partitioned.inlineFindings,
@@ -536,6 +547,10 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
     },
   );
 
+  const existingManifest = await loadJsonIfExists<RunManifest>(
+    join(commitDir, "run.json"),
+    RunManifestSchema,
+  );
   if (stage === "verify") {
     await writeVerifyStageArtifacts(
       repoRoot,
@@ -549,6 +564,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
         configHash,
         durationMs: Date.now() - runStartMs,
         enabledTools: analyzeContext.enabledTools,
+        toolOutcomes: existingManifest?.toolOutcomes,
       },
     );
   } else {
@@ -557,6 +573,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
       configHash,
       durationMs: Date.now() - runStartMs,
       enabledTools: analyzeContext.enabledTools,
+      toolOutcomes: existingManifest?.toolOutcomes,
     });
   }
 

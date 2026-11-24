@@ -593,6 +593,7 @@ export async function runCli(argv: readonly string[], deps: CliDependencies = {}
       profile: effectiveProfile,
       excludeTools,
       minSeverity,
+      verifierTimeoutMs: peerConfig.timeouts.verifier_secs * 1000,
       configHash,
       runStartMs,
       auditLogger,

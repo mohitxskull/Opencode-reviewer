@@ -99,7 +99,9 @@ Wrap \`job()\` in \`catch_unwind\` at \`src/services/common/ledger.rs\` lines 79
 \`order_id.clone()\` allocates on the hot path where \`&str\` suffices.
 
 #### Suggestion
+\`\`\`rust
 none
+\`\`\`
 
 #### Agent Prompt
 Pass \`&order_id\` by reference in \`src/oms/kernel.rs\` line 42.

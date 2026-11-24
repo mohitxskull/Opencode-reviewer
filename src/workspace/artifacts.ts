@@ -115,7 +115,7 @@ export async function writeAnalyzeStageArtifacts(
         outputPath,
         fileCount: c.filePaths.length,
         filePaths: c.filePaths,
-        subagentBrief: `Read ${packetPath}, audit every diff hunk for Rust soundness/concurrency/idiom defects, write Structured Markdown findings to ${outputPath}, and return ONLY the output file path + finding count.`,
+        subagentBrief: `Read ${packetPath}, audit every diff hunk for Rust soundness/concurrency/idiom defects (strictly read-only: use file read/search tools only; do NOT run cargo test, cargo check, or cargo clippy in the shell), write Structured Markdown findings to ${outputPath}, and return ONLY the output file path + finding count.`,
       };
     });
     writes.push(Bun.write(join(cohortsDir, "index.json"), JSON.stringify(indexPayload, null, 2)));
@@ -212,7 +212,7 @@ export async function writeReviewStageArtifacts(
       outputPath,
       findingCount: groupFindings.length,
       findingIds: groupFindings.map((f) => f.id),
-      subagentBrief: `Read ${packetPath}, independently verify or refute each finding against the repository source code, write KEEP/DROP verdict lines to ${outputPath}, and return ONLY the output file path + KEEP/DROP counts.`,
+      subagentBrief: `Read ${packetPath}, independently verify or refute each finding against the repository source code (strictly read-only: use file read/search tools only; do NOT run cargo test or cargo check in the shell), write KEEP/DROP verdict lines to ${outputPath}, and return ONLY the output file path + KEEP/DROP counts.`,
     });
 
     const packetLines = [

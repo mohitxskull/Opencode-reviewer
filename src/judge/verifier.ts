@@ -71,12 +71,32 @@ async function defaultCargoCheckRunner(
   return { ok, errorSummary, errorMessages };
 }
 
-function applyLineReplacement(
+function isPlaceholderSuggestion(text: string | null | undefined): boolean {
+  if (!text) {
+    return true;
+  }
+  const trimmed = text.trim();
+  return (
+    trimmed.length === 0 ||
+    /^(?:none|null|n\/a|-|—|_none_\.?|\(none\)|no\s+(?:single-hunk\s+)?suggestion\.?)$/i.test(
+      trimmed,
+    )
+  );
+}
+
+/**
+ * Applies a line-range replacement and automatically heals adjacent boundary overlap
+ * when an agent anchors a diff-hunk subset (e.g. L805-L816) but includes a few lines
+ * of unchanged enclosing function header/footer (e.g. L801-L804 and L817-L818) in the
+ * suggestion block. Returns both the patched file text and the trimmed suggestion that
+ * cleanly replaces `[startLine, endLine]`.
+ */
+export function applyLineReplacement(
   originalText: string,
   startLine: number,
   endLine: number,
   suggestionText: string,
-): string | null {
+): { patchedText: string; normalizedSuggestion: string } | null {
   const lineEnding = originalText.includes("\r\n") ? "\r\n" : "\n";
   const hasTrailingNewline = originalText.endsWith("\n");
   const rawLines = originalText.replace(/\r\n/g, "\n").split("\n");
@@ -89,7 +109,63 @@ function applyLineReplacement(
   }
 
   const cleanedSuggestion = suggestionText.replace(/\r\n/g, "\n").replace(/\n$/, "");
-  const replacementLines = cleanedSuggestion.split("\n");
+  let replacementLines = cleanedSuggestion.split("\n");
+
+  // Heal leading overlap: check if replacementLines[0..k] duplicates rawLines[startLine-1-k..startLine-1]
+  const maxLead = Math.min(12, startLine - 1, Math.max(0, replacementLines.length - 1));
+  let leadOverlap = 0;
+  for (let k = maxLead; k >= 1; k--) {
+    let matches = true;
+    let hasNonEmpty = false;
+    for (let j = 0; j < k; j++) {
+      const fileLine = (rawLines[startLine - 1 - k + j] ?? "").trim();
+      const sugLine = (replacementLines[j] ?? "").trim();
+      if (fileLine.length > 0) {
+        hasNonEmpty = true;
+      }
+      if (fileLine !== sugLine) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches && hasNonEmpty) {
+      leadOverlap = k;
+      break;
+    }
+  }
+  if (leadOverlap > 0) {
+    replacementLines = replacementLines.slice(leadOverlap);
+  }
+
+  // Heal trailing overlap: check if replacementLines[len-k..len] duplicates rawLines[endLine..endLine+k]
+  const maxTrail = Math.min(
+    12,
+    rawLines.length - endLine,
+    Math.max(0, replacementLines.length - 1),
+  );
+  let trailOverlap = 0;
+  for (let k = maxTrail; k >= 1; k--) {
+    let matches = true;
+    let hasNonEmpty = false;
+    for (let j = 0; j < k; j++) {
+      const fileLine = (rawLines[endLine + j] ?? "").trim();
+      const sugLine = (replacementLines[replacementLines.length - k + j] ?? "").trim();
+      if (fileLine.length > 0) {
+        hasNonEmpty = true;
+      }
+      if (fileLine !== sugLine) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches && hasNonEmpty) {
+      trailOverlap = k;
+      break;
+    }
+  }
+  if (trailOverlap > 0) {
+    replacementLines = replacementLines.slice(0, replacementLines.length - trailOverlap);
+  }
 
   const updatedLines = [
     ...rawLines.slice(0, startLine - 1),
@@ -98,7 +174,10 @@ function applyLineReplacement(
   ];
 
   const joined = updatedLines.join(lineEnding);
-  return hasTrailingNewline ? `${joined}${lineEnding}` : joined;
+  return {
+    patchedText: hasTrailingNewline ? `${joined}${lineEnding}` : joined,
+    normalizedSuggestion: replacementLines.join("\n"),
+  };
 }
 
 async function resolveContainedTargetPath(
@@ -139,6 +218,7 @@ async function resolveContainedTargetPath(
 
 export interface SuggestionVerifierOptions {
   readonly checkRunner?: CargoCheckRunner;
+  readonly timeoutMs?: number;
 }
 
 // Why: Re-joining decoded UTF-8 lines can normalize CRLF/LF or trailing newline
@@ -149,9 +229,13 @@ export interface SuggestionVerifierOptions {
 // guarantees bit-for-bit restoration before any branch switch.
 export class SuggestionCompilerVerifier {
   private readonly checkRunner: CargoCheckRunner;
+  private readonly hasCustomRunner: boolean;
 
   constructor(options: SuggestionVerifierOptions = {}) {
-    this.checkRunner = options.checkRunner ?? defaultCargoCheckRunner;
+    this.hasCustomRunner = Boolean(options.checkRunner);
+    const timeoutMs = options.timeoutMs ?? DEFAULT_VERIFIER_TIMEOUT_MS;
+    this.checkRunner =
+      options.checkRunner ?? ((repoRoot, pkg) => defaultCargoCheckRunner(repoRoot, pkg, timeoutMs));
   }
 
   public async verifySuggestions(
@@ -166,12 +250,12 @@ export class SuggestionCompilerVerifier {
     const results: Finding[] = [];
     const realRepoRoot = await realpath(repoRoot);
     const totalWithSuggestions = findings.filter(
-      (f) => f.suggestion !== null && f.suggestion.trim().length > 0,
+      (f) => !isPlaceholderSuggestion(f.suggestion),
     ).length;
     let suggestionIndex = 0;
 
-    // If the baseline already has compile errors, snapshot the baseline error counts per crate
-    // so we still verify suggestions and reject those introducing NEW errors or increasing counts.
+    // Warm Cargo target artifacts once per crate (when using the real cargo check runner or when
+    // baselineErrorCount > 0) so Suggestion 1/N never fails due to cold 3rd-party dependency compilation.
     const baselineErrorCache = new Map<string, Map<string, number>>();
     const getBaselineErrors = async (
       pkgKey: string,
@@ -191,7 +275,7 @@ export class SuggestionCompilerVerifier {
     };
 
     for (const finding of findings) {
-      if (finding.suggestion === null || finding.suggestion.trim().length === 0) {
+      if (isPlaceholderSuggestion(finding.suggestion) || finding.suggestion === null) {
         results.push(
           FindingSchema.parse({
             ...finding,
@@ -219,14 +303,14 @@ export class SuggestionCompilerVerifier {
       const targetFile = Bun.file(targetPath);
       const originalBytes = await targetFile.bytes();
       const originalText = new TextDecoder().decode(originalBytes);
-      const patchedText = applyLineReplacement(
+      const replacementResult = applyLineReplacement(
         originalText,
         finding.startLine,
         finding.endLine,
         finding.suggestion,
       );
 
-      if (patchedText === null) {
+      if (replacementResult === null) {
         results.push(
           FindingSchema.parse({
             ...finding,
@@ -236,6 +320,7 @@ export class SuggestionCompilerVerifier {
         );
         continue;
       }
+      const { patchedText, normalizedSuggestion } = replacementResult;
 
       // Scope `cargo check` to the owning crate via `-p <crate>` when CrateGraph resolves it
       let packageName: string | undefined;
@@ -247,7 +332,7 @@ export class SuggestionCompilerVerifier {
       }
 
       const baselineErrors =
-        (options.baselineErrorCount ?? 0) > 0
+        !this.hasCustomRunner || (options.baselineErrorCount ?? 0) > 0
           ? await getBaselineErrors(packageName ?? "__workspace__", packageName)
           : null;
 
@@ -316,6 +401,7 @@ export class SuggestionCompilerVerifier {
         results.push(
           FindingSchema.parse({
             ...finding,
+            suggestion: normalizedSuggestion,
             suggestionVerified: true,
           }),
         );
