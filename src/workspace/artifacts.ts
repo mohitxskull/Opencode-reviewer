@@ -18,6 +18,7 @@ import { buildReviewTodoQueue, renderReviewTodoMarkdown } from "../render/todo.t
 import {
   ensurePeerWorkspaceExcluded,
   resolvePeerCommitDir,
+  resolvePeerReviewsDir,
   resolvePeerWorkspaceDir,
 } from "./git.ts";
 
@@ -256,10 +257,14 @@ export async function writeReviewStageArtifacts(
     Bun.write(join(skepticDir, "index.json"), JSON.stringify(skepticIndex, null, 2)),
   );
 
+  const gitPrDir = resolvePeerReviewsDir(repoRoot, bundle.pr.number);
+  await mkdir(gitPrDir, { recursive: true });
+
   await Promise.all([
     Bun.write(join(stageDir, "report.md"), reportMd),
     Bun.write(join(stageDir, "walkthrough.md"), walkthroughMd),
     Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
+    Bun.write(join(gitPrDir, "latest-bundle.json"), JSON.stringify(bundle, null, 2)),
     Bun.write(join(commitDir, "review.md"), reportMd),
     Bun.write(join(commitDir, "todo.md"), todoMd),
     Bun.write(join(commitDir, "todo.json"), JSON.stringify(todoJson, null, 2)),
@@ -293,12 +298,16 @@ export async function writeVerifyStageArtifacts(
     latestStage: "verify",
   });
 
+  const gitPrDir = resolvePeerReviewsDir(repoRoot, bundle.pr.number);
+  await mkdir(gitPrDir, { recursive: true });
+
   await Promise.all([
     Bun.write(join(stageDir, "report.md"), reportMd),
     Bun.write(join(commitDir, "todo.md"), todoMd),
     Bun.write(join(commitDir, "todo.json"), JSON.stringify(todoJson, null, 2)),
     Bun.write(join(stageDir, "skeptic.json"), JSON.stringify(skepticSummary, null, 2)),
     Bun.write(join(stageDir, "bundle.json"), JSON.stringify(bundle, null, 2)),
+    Bun.write(join(gitPrDir, "latest-bundle.json"), JSON.stringify(bundle, null, 2)),
     Bun.write(join(commitDir, "review.md"), reportMd),
     Bun.write(join(commitDir, "run.json"), JSON.stringify(manifest, null, 2)),
   ]);
@@ -388,11 +397,11 @@ export async function loadPriorPrReviewBundle(
 ): Promise<ReviewBundle | null> {
   const prDir = join(resolvePeerWorkspaceDir(repoRoot), String(prNumber));
   const currentShort = currentHeadSha.slice(0, 7).toLowerCase();
-  let entries: string[];
+  let entries: string[] = [];
   try {
     entries = await readdir(prDir);
   } catch {
-    return null;
+    // `.peer/<pr>/` may have been cleaned by `git clean -fd`; fall back to `.git/peer/reviews/pr-<n>/latest-bundle.json` below
   }
 
   let latestBundle: ReviewBundle | null = null;
@@ -417,6 +426,18 @@ export async function loadPriorPrReviewBundle(
     if (score >= latestTimestamp) {
       latestTimestamp = score;
       latestBundle = bundle;
+    }
+  }
+
+  const gitLatestBundle = await loadJsonIfExists(
+    join(resolvePeerReviewsDir(repoRoot, prNumber), "latest-bundle.json"),
+    ReviewBundleSchema,
+  );
+  if (gitLatestBundle && gitLatestBundle.headSha.toLowerCase() !== currentHeadSha.toLowerCase()) {
+    const ts = Date.parse(gitLatestBundle.generatedAt);
+    const score = Number.isFinite(ts) ? ts : 0;
+    if (score >= latestTimestamp) {
+      latestBundle = gitLatestBundle;
     }
   }
 
