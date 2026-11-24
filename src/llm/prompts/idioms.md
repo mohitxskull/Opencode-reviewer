@@ -10,8 +10,8 @@ Produce root-cause, falsifiable, evidence-backed findings — never speculative 
 
 - Inspect surrounding functions, callers, types, and sibling files (`read` / `grep`) to trace real cross-file state flows and verify edge cases before reporting.
 - Enforce all **Repository Review Instructions** (`AGENTS.md`, `CLAUDE.md`, `peer.toml` `[[rules]]`, `.peer/learnings.json`, `.coderabbit.yaml` if present) included in the context packet; cite the specific rule when violated.
-- **Quote `Why:` rationale comments:** When code carries a rationale comment explaining a deliberate choice, read and quote it in your finding rather than arguing against a strawman. A stale rationale comment that no longer matches the code is itself a finding.
-- **Severity = consequence, never confidence:** Grade severity on the impact if the defect hits; state any uncertainty explicitly inside the finding. Honestly note if current callers narrow the blast radius.
+- **Quote & respect `Why:` rationale comments (`RC-XX` / `fp-XX`):** When code carries a rationale comment explaining a deliberate choice (especially paired with a regression test), read and quote it. **Never file a finding that contradicts a deliberate `Why:` design decision and asks to invert its regression test** unless you prove actual data corruption under that contract.
+- **Evidence & confidence gate (no hypothetical padding):** Reserve `Critical` and `Major` strictly for `VERIFIED-DEFECT` bugs with a concrete, reachable production trigger (`confidence >= 0.85`). Theoretical edge cases, unverified external payload assumptions, or `DESIGN-CONCERN` items must be graded at most `Minor` (and omitted on follow-up review rounds).
 
 ## Focus Strictly On
 

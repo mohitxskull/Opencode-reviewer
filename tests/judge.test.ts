@@ -237,4 +237,132 @@ describe("Task 06: Judge deduplication and profile filtering", () => {
     expect(partitioned.outsideDiffFindings.map((f) => f.id)).toEqual(["f-outside"]);
     expect(partitioned.nitpickFindings.map((f) => f.id)).toEqual(["f-nitpick"]);
   });
+
+  test("caps DESIGN-CONCERN and low-confidence LLM findings out of P0/P1 Major and excludes optional tool diagnostics from todo.json P0-P3", async () => {
+    const { buildReviewTodoQueue, renderReviewTodoMarkdown } =
+      await import("../src/render/todo.ts");
+    const findings: Finding[] = [
+      {
+        id: "fp-design-62",
+        filePath: "src/lib.rs",
+        startLine: 12,
+        endLine: 14,
+        severity: "Major",
+        type: "Bug",
+        epistemicState: "DESIGN-CONCERN",
+        title: "Theoretical oid == oref collision",
+        body: "Unordered OR + LIMIT 1",
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: "Add ORDER BY",
+        confidence: 0.62,
+        source: "soundness",
+      },
+      {
+        id: "audit-deny-rejected-nautilus",
+        filePath: "Cargo.toml",
+        startLine: 1,
+        endLine: 1,
+        severity: "Major",
+        type: "Security",
+        title: "cargo-deny rejected license",
+        body: "LGPL-3.0-only",
+        suggestion: null,
+        suggestionVerified: false,
+        agentPrompt: "Update deny.toml",
+        confidence: 1.0,
+        source: "audit",
+      },
+    ];
+
+    const fullRound = partitionAndFilterFindings(findings, SAMPLE_DIFF_MAP, "assertive", {
+      isIncremental: false,
+    });
+    // 0.62 confidence DESIGN-CONCERN is capped from Major to Trivial
+    expect(fullRound.inlineFindings[0]?.severity).toBe("Trivial");
+
+    const queue = buildReviewTodoQueue({
+      pr: {
+        owner: "mohitxskull",
+        repo: "Algo",
+        number: 24,
+        title: "PR 24",
+        body: "",
+        author: "mohitxskull",
+        headRefName: "fix",
+        baseRefName: "main",
+        headSha: "436e35f5387df8f9f1617485f95ddd32eee866cf",
+        baseSha: "7748580a6e47a3ebf1a4bf48862c6a3dfc4467d5",
+        htmlUrl: "https://github.com/mohitxskull/Algo/pull/24",
+        updatedAt: "2026-11-24T10:00:00Z",
+      },
+      diffBaseSha: "7748580a6e47a3ebf1a4bf48862c6a3dfc4467d5",
+      headSha: "436e35f5387df8f9f1617485f95ddd32eee866cf",
+      isIncremental: false,
+      profile: "assertive",
+      baseline: {
+        mode: "REVIEW",
+        rustcVersion: "rustc 1.99.1",
+        cargoVersion: "cargo 1.99.1",
+        verificationCommands: [],
+      },
+      walkthrough: {
+        summary: "Summary",
+        changes: [],
+        sequenceDiagram: null,
+        triage: { reviewEffort: 2, mergeRisk: "Low", rationale: "Test" },
+      },
+      findings: fullRound.inlineFindings,
+      outsideDiffFindings: fullRound.outsideDiffFindings,
+      nitpickFindings: [],
+      clippyDiagnostics: [],
+      generatedAt: "2026-11-24T10:00:00Z",
+    });
+
+    // Optional analyzer diagnostic (`audit-deny-*`) is excluded from blocking P0-P3 todo groups
+    expect(queue.totalActionable).toBe(1);
+    expect(queue.optionalAnalyzerDiagnosticsCount).toBe(1);
+    expect(queue.countsByPriority.P1).toBe(0);
+    expect(queue.countsByPriority.P3).toBe(1);
+
+    const todoMd = renderReviewTodoMarkdown({
+      pr: {
+        owner: "mohitxskull",
+        repo: "Algo",
+        number: 24,
+        title: "PR 24",
+        body: "",
+        author: "mohitxskull",
+        headRefName: "fix",
+        baseRefName: "main",
+        headSha: "436e35f5387df8f9f1617485f95ddd32eee866cf",
+        baseSha: "7748580a6e47a3ebf1a4bf48862c6a3dfc4467d5",
+        htmlUrl: "https://github.com/mohitxskull/Algo/pull/24",
+        updatedAt: "2026-11-24T10:00:00Z",
+      },
+      diffBaseSha: "7748580a6e47a3ebf1a4bf48862c6a3dfc4467d5",
+      headSha: "436e35f5387df8f9f1617485f95ddd32eee866cf",
+      isIncremental: false,
+      profile: "assertive",
+      baseline: {
+        mode: "REVIEW",
+        rustcVersion: "rustc 1.99.1",
+        cargoVersion: "cargo 1.99.1",
+        verificationCommands: [],
+      },
+      walkthrough: {
+        summary: "Summary",
+        changes: [],
+        sequenceDiagram: null,
+        triage: { reviewEffort: 2, mergeRisk: "Low", rationale: "Test" },
+      },
+      findings: [],
+      outsideDiffFindings: fullRound.outsideDiffFindings,
+      nitpickFindings: [],
+      clippyDiagnostics: [],
+      generatedAt: "2026-11-24T10:00:00Z",
+    });
+    expect(todoMd).toContain("No actionable findings — ready to merge.");
+    expect(todoMd).toContain("1 optional analyzer diagnostic(s)");
+  });
 });

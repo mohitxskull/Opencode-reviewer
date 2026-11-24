@@ -25,7 +25,7 @@ A publicly-visible struct has at least one public field that is no longer availa
 
 Failed in:
   field Config.timeout in file src/config.rs:15
-  type OrderIntentStore is no longer UnwindSafe, in /workspace/repo/src/exchange/orders.rs:315
+  type OrderIntentStore is no longer UnwindSafe, in /workspace/repo/target/semver-checks/git-7748580a6e47a3ebf1a4bf48862c6a3dfc4467d5/6b3e6945468ab41450a7574fe358eda71a5329a5/src/exchange/orders.rs:315
 `;
 
 describe("cargo-semver-checks integration", () => {

@@ -96,6 +96,8 @@ export function parseCargoSemverOutput(rawOutput: string, repoRoot?: string): Se
       if (repoRoot && isAbsolute(filePath)) {
         filePath = relative(repoRoot, filePath).replace(/\\/g, "/");
       }
+      // Strip cargo-semver-checks baseline git worktree scratch prefix (`target/semver-checks/git-<sha>/<hash>/`)
+      filePath = filePath.replace(/^.*?\btarget\/semver-checks\/git-[0-9a-f]+\/[0-9a-f]+\//i, "");
       filePath = filePath.replace(/^\.\//, "") || "Cargo.toml";
       const lineNum = Math.max(1, Number.parseInt(fileLineMatch?.[2] ?? "1", 10) || 1);
       const symbolMatch = lineText.match(/^([^,]+?)(?:,\s*(?:previously\s+)?in\s+(?:file\s+)?|$)/);

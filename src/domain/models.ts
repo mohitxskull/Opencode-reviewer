@@ -316,6 +316,7 @@ export const ToolSkipReasonSchema = z.enum([
   "missing_config",
   "no_unsafe_in_diff",
   "no_modified_files",
+  "no_dependency_changes",
 ]);
 export type ToolSkipReason = z.infer<typeof ToolSkipReasonSchema>;
 

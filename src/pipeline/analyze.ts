@@ -201,6 +201,7 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
   await withInPlaceCheckout(
     { repoRoot, targetSha: pr.headSha, prNumber: pr.number, noCheckout },
     async () => {
+      const priorBundle = await loadPriorPrReviewBundle(repoRoot, pr.number, pr.headSha);
       let { diffBaseSha, isIncremental } = await checkpointStore.resolveDiffBase({
         prNumber: pr.number,
         prBaseSha: pr.baseSha,
@@ -208,6 +209,27 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         fresh,
         profile,
       });
+
+      // Automatic multi-round convergence fallback: if `.git/peer/reviews/pr-<n>/checkpoint.json`
+      // was not yet present (or `--fresh` was passed only to refresh Stage 1 tool outputs), check if
+      // an earlier commit on this PR was already reviewed and is an ancestor of `pr.headSha`.
+      if (
+        !isIncremental &&
+        priorBundle &&
+        priorBundle.pr.baseSha === pr.baseSha &&
+        priorBundle.headSha !== pr.headSha
+      ) {
+        const ancestorAttempt = tryGitRawSync(repoRoot, [
+          "merge-base",
+          "--is-ancestor",
+          priorBundle.headSha,
+          pr.headSha,
+        ]);
+        if (ancestorAttempt.ok) {
+          diffBaseSha = priorBundle.headSha;
+          isIncremental = true;
+        }
+      }
 
       let diffText: string;
       const diffRangeSpec = isIncremental
@@ -292,8 +314,29 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         }
       };
 
+      const allTouchedPaths = extractAllDiffPaths(diffText);
+      const touchesDependencyPolicyFiles = allTouchedPaths.some((fp) => {
+        const norm = fp.replace(/\\/g, "/").replace(/^\.\//, "");
+        return (
+          norm === "Cargo.lock" ||
+          norm === "deny.toml" ||
+          norm === ".cargo/deny.toml" ||
+          norm === "Cargo.toml" ||
+          norm.endsWith("/Cargo.toml")
+        );
+      });
+
       const runDenyWithPolicy = async () => {
         if (modifiedFiles.size === 0 || !enabledTools.has("deny")) {
+          return [];
+        }
+        // Only run cargo-deny when the PR touches Cargo.toml/Cargo.lock/deny.toml or `--tools deny` was explicitly requested
+        if (!touchesDependencyPolicyFiles && !explicitTools.has("deny")) {
+          toolOutcomes.deny = {
+            status: "skipped",
+            findingsCount: 0,
+            reason: "no_dependency_changes",
+          };
           return [];
         }
         const hasConfig = await hasCargoDenyConfig(repoRoot);
@@ -609,14 +652,13 @@ export async function runAnalyzeStage(input: AnalyzeStageInput): Promise<Analyze
         generatedAt: analyzeContext.generatedAt,
       });
 
-      const [learnings, repoInstructions, priorBundle] = await Promise.all([
+      const [learnings, repoInstructions] = await Promise.all([
         new LearningStore(repoRoot).getMatchingLearnings(
           modifiedFiles,
           pr.baseSha,
           peerConfig.rules,
         ),
         loadRepoInstructions(repoRoot, pr.baseSha),
-        loadPriorPrReviewBundle(repoRoot, pr.number, pr.headSha),
       ]);
       const priorSubstantiveFindings = priorBundle
         ? [...priorBundle.findings, ...(priorBundle.outsideDiffFindings ?? [])].filter(

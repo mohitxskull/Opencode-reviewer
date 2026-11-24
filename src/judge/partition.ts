@@ -288,18 +288,53 @@ export interface PartitionedFindings {
 // CodeRabbit's `<details><summary>⚠️ Outside diff range comments (N)</summary>`
 // block in the PR review body, while low-severity/nitpick findings under `chill`
 // are grouped into `<details><summary>🧹 Nitpick comments (K)</summary>`.
+function applyEpistemicSeverityCeiling(finding: Finding, isIncremental = false): Finding {
+  if (finding.source !== "soundness" && finding.source !== "idioms") {
+    return finding;
+  }
+  let cappedSeverity = finding.severity;
+  const isBlocking = cappedSeverity === "Critical" || cappedSeverity === "Major";
+
+  // Why: Speculative `DESIGN-CONCERN` hypotheses or low-confidence (< 0.80) guesses
+  // are not verified defects and must never enter the P0/P1 blocking queue.
+  if (isBlocking && (finding.epistemicState === "DESIGN-CONCERN" || finding.confidence < 0.8)) {
+    cappedSeverity = finding.confidence < 0.7 ? "Trivial" : "Minor";
+  }
+
+  // On incremental follow-up rounds (Round 2+), demote speculative `DESIGN-CONCERN` or
+  // low-confidence (< 0.82) items to `Trivial` so multi-round reviews converge cleanly.
+  if (
+    isIncremental &&
+    (finding.epistemicState === "DESIGN-CONCERN" ||
+      (finding.epistemicState === "NEEDS-RUNTIME-VERIFICATION" && finding.confidence < 0.82) ||
+      finding.confidence < 0.78)
+  ) {
+    cappedSeverity = "Trivial";
+  }
+
+  if (cappedSeverity === finding.severity) {
+    return finding;
+  }
+  return FindingSchema.parse({
+    ...finding,
+    severity: cappedSeverity,
+  });
+}
+
 export function partitionAndFilterFindings(
   findings: readonly Finding[],
   diffMap: Readonly<Record<string, DiffFileMap>>,
   profile: ReviewProfile,
+  options: { readonly isIncremental?: boolean } = {},
 ): PartitionedFindings {
   const rawInline: Finding[] = [];
   const rawOutside: Finding[] = [];
 
-  for (const finding of findings) {
-    if (finding.severity === "None") {
+  for (const rawFinding of findings) {
+    if (rawFinding.severity === "None") {
       continue;
     }
+    const finding = applyEpistemicSeverityCeiling(rawFinding, options.isIncremental);
     const fileMap = diffMap[finding.filePath];
     const snapped = fileMap ? snapRangeToHunk(fileMap, finding.startLine, finding.endLine) : null;
     if (snapped) {

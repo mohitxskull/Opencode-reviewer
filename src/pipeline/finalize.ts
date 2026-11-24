@@ -504,6 +504,7 @@ export async function runFinalizeStage(input: FinalizeStageInput): Promise<Final
         [...filteredDeterministic, ...filteredAgent],
         analyzeContext.diffMap,
         profile,
+        { isIncremental: analyzeContext.isIncremental },
       );
 
       const baselineErrorCount = analyzeContext.clippyDiagnostics.filter(

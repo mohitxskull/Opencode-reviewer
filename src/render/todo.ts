@@ -1,4 +1,9 @@
-import type { Finding, ReviewBundle, Severity } from "../domain/models.ts";
+import {
+  type Finding,
+  isOptionalAnalyzerFinding,
+  type ReviewBundle,
+  type Severity,
+} from "../domain/models.ts";
 
 export type PriorityTier = "P0" | "P1" | "P2" | "P3";
 
@@ -33,6 +38,7 @@ export interface ReviewTodoQueue {
   readonly prNumber: number;
   readonly headSha: string;
   readonly totalActionable: number;
+  readonly optionalAnalyzerDiagnosticsCount: number;
   readonly verifiedSuggestions: number;
   readonly countsByPriority: Readonly<Record<PriorityTier, number>>;
   readonly groups: readonly ReviewTodoGroup[];
@@ -72,7 +78,9 @@ function groupKeyForFinding(f: Finding): string {
  * Deterministically builds a machine-readable `todo.json` fix queue for coding agents.
  */
 export function buildReviewTodoQueue(bundle: ReviewBundle): ReviewTodoQueue {
-  const allFindings = [...bundle.findings, ...(bundle.outsideDiffFindings ?? [])];
+  const rawFindings = [...bundle.findings, ...(bundle.outsideDiffFindings ?? [])];
+  const allFindings = rawFindings.filter((f) => !isOptionalAnalyzerFinding(f));
+  const optionalAnalyzerDiagnosticsCount = rawFindings.length - allFindings.length;
   const byTier: Record<PriorityTier, Finding[]> = { P0: [], P1: [], P2: [], P3: [] };
   for (const f of allFindings) {
     byTier[severityToTier(f.severity)].push(f);
@@ -137,6 +145,7 @@ export function buildReviewTodoQueue(bundle: ReviewBundle): ReviewTodoQueue {
     prNumber: bundle.pr.number,
     headSha: bundle.headSha,
     totalActionable: allFindings.length,
+    optionalAnalyzerDiagnosticsCount,
     verifiedSuggestions: allFindings.filter((f) => f.suggestion && f.suggestionVerified).length,
     countsByPriority: {
       P0: byTier.P0.length,
@@ -151,9 +160,13 @@ export function buildReviewTodoQueue(bundle: ReviewBundle): ReviewTodoQueue {
 /**
  * Deterministically derives a dependency-ordered `todo.md` fix queue from a
  * finalized `ReviewBundle`, grouping related findings into P0-P3 solving groups.
+ * Optional analyzer telemetry (`coverage`, `semver`, `geiger`, `deny`, `miri`) is
+ * excluded from the P0-P3 fix checklist so coding agents focus strictly on substantive bugs.
  */
 export function renderReviewTodoMarkdown(bundle: ReviewBundle): string {
-  const allFindings = [...bundle.findings, ...(bundle.outsideDiffFindings ?? [])];
+  const rawFindings = [...bundle.findings, ...(bundle.outsideDiffFindings ?? [])];
+  const allFindings = rawFindings.filter((f) => !isOptionalAnalyzerFinding(f));
+  const optionalFindings = rawFindings.filter((f) => isOptionalAnalyzerFinding(f));
   const lines: string[] = [
     `# Review TODO — ${bundle.pr.owner}/${bundle.pr.repo}#${bundle.pr.number} (${bundle.headSha.slice(0, 7)})`,
     "",
@@ -163,6 +176,12 @@ export function renderReviewTodoMarkdown(bundle: ReviewBundle): string {
 
   if (allFindings.length === 0) {
     lines.push("No actionable findings — ready to merge.", "");
+    if (optionalFindings.length > 0) {
+      lines.push(
+        `_(${optionalFindings.length} optional analyzer diagnostic(s) from coverage/semver/geiger/deny/miri omitted from blocking TODO queue; see Section 1b of \`review.md\`.)_`,
+        "",
+      );
+    }
     return lines.join("\n");
   }
 
@@ -217,7 +236,8 @@ export function renderReviewTodoMarkdown(bundle: ReviewBundle): string {
     `- **P1 (Major):** ${byTier.P1.length}`,
     `- **P2 (Minor):** ${byTier.P2.length}`,
     `- **P3 (Trivial/Info):** ${byTier.P3.length}`,
-    `- **Total Actionable:** ${allFindings.length}`,
+    `- **Total Substantive Actionable:** ${allFindings.length}`,
+    `- **Optional Analyzer Diagnostics (non-blocking, see review.md §1b):** ${optionalFindings.length}`,
     "",
   );
 

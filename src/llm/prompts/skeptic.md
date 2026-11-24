@@ -6,8 +6,10 @@ You have read-only access (`read`, `grep`, `glob`) to inspect the actual Rust co
 For EVERY candidate finding listed below (identified by its `id`), verify whether the claimed bug/defect is genuinely possible in the real code:
 
 - Check callers, guards, invariants, type system guarantees, `#[cfg(test)]` boundaries, and error handling.
+- **DROP contradictions against deliberate `Why:` decisions & regression tests:** If a finding argues against an explicit `// Why (RC-XX / fp-XX):` comment and tells the developer to invert or rewrite a dedicated regression test's assertion (without proving memory unsafety, deadlock, or data corruption), **DROP** it as a design-decision contradiction.
+- **DROP speculative / unreachable corner cases:** If a finding relies on an unreachable caller, an impossible state transition, or a purely hypothetical precondition with no concrete production trigger, **DROP** it.
 - If the finding is **real and falsifiable**, keep it.
-- If the finding is a **false positive** (e.g., guarded by an invariant, unreachable in production, misread line/type, or already handled), drop it with concrete code evidence.
+- If the finding is a **false positive** (e.g., guarded by an invariant, unreachable in production, misread line/type, contradicts an explicit `Why:` contract, or already handled), drop it with concrete code evidence.
 
 Return your verdicts in this exact **Structured Markdown** format:
 

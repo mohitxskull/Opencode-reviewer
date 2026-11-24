@@ -40,7 +40,7 @@ peer next [PR_NUMBER] --json
   Stop after reporting unless they ask for an LLM review.
 
 ## Step 1: Collect Deterministic Rust Ground Truth & Cohort Packets
-Run Stage 1 on the target PR (omit `--tools` when `peer.toml` is already configured so `peer.toml` selects the workspace's enabled tools; only pass `--tools ...` to explicitly override):
+Run Stage 1 on the target PR (omit `--tools` when `peer.toml` is already configured so `peer.toml` selects the workspace's enabled tools; only pass `--tools ...` to explicitly override; **do NOT pass `--fresh` on follow-up commits of a PR** because `peer analyze` automatically invalidates its cache when `headSha` or `--tools` changes, while `--fresh` forces a full-PR re-review from `baseSha` instead of incremental convergence):
 ```bash
 peer analyze <PR_NUMBER_OR_URL> --json
 ```
